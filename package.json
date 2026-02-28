@@ -1,0 +1,50 @@
+{
+  "name": "@conduit-protocol/sdk",
+  "version": "0.1.0",
+  "description": "TypeScript SDK for the Conduit streaming payments protocol on Stellar.",
+  "license": "MIT",
+  "author": "Conduit Protocol contributors",
+  "repository": {
+    "type": "git",
+    "url":  "https://github.com/conduit-protocol/conduit-sdk.git"
+  },
+  "main":   "dist/cjs/index.js",
+  "module": "dist/esm/index.js",
+  "types":  "dist/types/index.d.ts",
+  "exports": {
+    ".": {
+      "import":  "./dist/esm/index.js",
+      "require": "./dist/cjs/index.js",
+      "types":   "./dist/types/index.d.ts"
+    },
+    "./utils": {
+      "import":  "./dist/esm/utils.js",
+      "require": "./dist/cjs/utils.js",
+      "types":   "./dist/types/utils.d.ts"
+    }
+  },
+  "files": ["dist", "src"],
+  "scripts": {
+    "build":     "tsc -p tsconfig.build.json && rollup -c",
+    "dev":       "tsc -p tsconfig.build.json --watch",
+    "test":      "vitest run",
+    "test:watch": "vitest",
+    "typecheck": "tsc --noEmit",
+    "lint":      "eslint src --ext .ts"
+  },
+  "peerDependencies": {
+    "@stellar/stellar-sdk": "^12.0.0"
+  },
+  "devDependencies": {
+    "@rollup/plugin-node-resolve": "^15.2.3",
+    "@rollup/plugin-typescript":   "^11.1.6",
+    "@stellar/stellar-sdk":        "^12.0.0",
+    "@types/node":                 "^20.14.0",
+    "eslint":                      "^8.57.0",
+    "@typescript-eslint/eslint-plugin": "^7.14.0",
+    "@typescript-eslint/parser":   "^7.14.0",
+    "rollup":                      "^4.18.0",
+    "typescript":                  "^5.5.3",
+    "vitest":                      "^2.0.3"
+  }
+}
