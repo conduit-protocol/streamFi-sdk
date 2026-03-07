@@ -10,7 +10,9 @@ import {
   TransactionBuilder,
   Networks,
   Keypair,
+  Contract,
   xdr,
+  BASE_FEE,
 } from '@stellar/stellar-sdk';
 import type { Network } from './types/index.js';
 
@@ -25,6 +27,33 @@ export const NETWORK_PASSPHRASE: Record<Network, string> = {
   testnet: Networks.TESTNET,
   local:   Networks.STANDALONE,
 };
+
+/**
+ * Build a contract-call transaction for simulate or submit.
+ *
+ * Fetches the caller's account from the RPC to get the current sequence
+ * number, then wraps the call in a TransactionBuilder.
+ */
+export async function buildContractCallTx(
+  rpcUrl:      string,
+  passphrase:  string,
+  caller:      string,
+  contractId:  string,
+  method:      string,
+  args:        xdr.ScVal[],
+): Promise<ReturnType<TransactionBuilder['build']>> {
+  const server  = new SorobanRpc.Server(rpcUrl, { allowHttp: rpcUrl.startsWith('http://') });
+  const account = await server.getAccount(caller);
+  const contract = new Contract(contractId);
+
+  return new TransactionBuilder(account, {
+    fee:            BASE_FEE,
+    networkPassphrase: passphrase,
+  })
+    .addOperation(contract.call(method, ...args))
+    .setTimeout(30)
+    .build();
+}
 
 /**
  * Simulate a transaction, then assemble + sign + submit.
@@ -89,6 +118,30 @@ export async function simulateReadOnly(
     throw new Error('Simulation returned no result');
   }
   return xdr.ScVal.fromXDR(result.result.retval.toXDR());
+}
+
+/** Convert an ScVal i128 to bigint */
+export function scValToI128(val: xdr.ScVal): bigint {
+  const i128 = val.i128();
+  const hi   = BigInt(i128.hi().toString());
+  const lo   = BigInt(i128.lo().toString());
+  // hi is signed high 64 bits, lo is unsigned low 64 bits
+  return (hi << 64n) | lo;
+}
+
+/** Convert an ScVal u64 to bigint */
+export function scValToU64(val: xdr.ScVal): bigint {
+  return BigInt(val.u64().toString());
+}
+
+/** Encode a u64 value as ScVal */
+export function u64ToScVal(val: bigint | number): xdr.ScVal {
+  return xdr.ScVal.scvU64(xdr.Uint64.fromString(val.toString()));
+}
+
+/** Encode a boolean as ScVal */
+export function boolToScVal(val: boolean): xdr.ScVal {
+  return xdr.ScVal.scvBool(val);
 }
 
 function sleep(ms: number): Promise<void> {
