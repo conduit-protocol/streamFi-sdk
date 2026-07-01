@@ -274,19 +274,79 @@ perf(factory): cache streamAddress resolution per session
 
 ## Pull Request Process
 
-### Checklist before opening
+### Branch naming
 
+```
+feat/<issue-number>-short-slug      # new feature
+fix/<issue-number>-short-slug       # bug fix
+test/<issue-number>-short-slug      # tests only
+docs/<issue-number>-short-slug      # docs only
+refactor/<issue-number>-short-slug  # internal refactor
+```
+
+Examples: `fix/2-calculate-rate-zero-guard`, `feat/4-force-cancel-method`
+
+### 5-commit convention
+
+Every PR must be structured as **exactly 5 logical commits** (minimum). Commits must be in this order:
+
+| # | Commit type | What it contains |
+|---|---|---|
+| 1 | `test(<scope>): add failing test for <issue>` | Unit tests that reproduce the bug or describe the new behaviour — expected to fail on `main` |
+| 2 | `fix(<scope>)` or `feat(<scope>)`: minimal implementation | The smallest code change that makes commit 1's tests green |
+| 3 | `test(<scope>): edge cases and error paths` | Tests for boundary values, each `ErrorCode` thrown, and related paths |
+| 4 | `docs(<scope>): update api.md and inline JSDoc` | JSDoc on new/changed public methods, `docs/api.md` entry, `CHANGELOG.md` entry |
+| 5 | `chore(<scope>): typecheck + lint pass` | Any TypeScript or ESLint fixes surfaced by the change; no functional changes |
+
+**Rules:**
+- Each commit must be independently `git cherry-pick`-able — no inter-commit dependencies except the explicit test→fix ordering.
+- Commit messages must include a **body** explaining why. Subjects alone are not acceptable for code commits.
+- Reference the issue in the fix/feat commit body: `Closes #2`.
+- No squashing before review. Reviewers read the diff per-commit.
+
+### Example commit sequence for fix/2-calculate-rate-zero-guard
+
+```
+test(utils): add failing test — calculateRate returns 0n for small deposit
+
+fix(utils): throw ConduitError when rate calculation truncates to 0n
+
+test(utils): add edge cases — negative duration, exactly-1 stroop result
+
+docs(utils): add JSDoc warning about BigInt truncation in calculateRate
+
+chore(utils): fix lint warning in utils.ts after calculateRate change
+```
+
+### Author checklist before opening a PR
+
+- [ ] Branch name follows the naming convention above
+- [ ] PR title: `fix(utils): guard calculateRate against 0n result (#2)`
+- [ ] PR description has `Closes #<n>` or `Fixes #<n>`
+- [ ] Exactly 5 commits (minimum), each with an explanatory body
 - [ ] `npm run typecheck` — no errors
 - [ ] `npm run lint` — no warnings
 - [ ] `npm test` — all tests pass
-- [ ] `npm run build` — build succeeds and bundle sizes are not significantly larger
-- [ ] New public API surface documented in `docs/api.md`
-- [ ] `CHANGELOG.md` entry added under `[Unreleased]`
+- [ ] `npm run build` — build succeeds, no significant bundle size increase
+- [ ] New public API documented in `docs/api.md`
+- [ ] `CHANGELOG.md` entry under `[Unreleased]`
 
 ### Review requirements
 
-- At least **1 approval** from a maintainer.
-- PRs that change the public API (new exports, changed signatures) require **2 approvals** and a `CHANGELOG.md` entry.
+- **Mandatory owner review:** Every PR requires approval from **@jaydbrown** before merging. No exceptions.
+- PRs that change the public API (new exports, changed signatures, removed types) additionally require **1 further maintainer approval** (2 approvals total) plus a `CHANGELOG.md` entry.
+- CI must be green (typecheck, lint, tests, build).
+
+### Reviewer checklist
+
+- [ ] Commit 1 is a test that fails on `main` before the fix
+- [ ] Commit 2 fix is minimal — no bundled unrelated changes
+- [ ] No `any` types introduced
+- [ ] No non-null assertions (`!`) in production code (only in tests with a comment)
+- [ ] All new `ErrorCode` values are tested
+- [ ] `bigint` used for all on-chain amounts — no `Number()` conversion on large values
+- [ ] Public API changes are documented in `docs/api.md` and `CHANGELOG.md`
+- [ ] 5-commit structure is clean
 
 ### Breaking changes
 
