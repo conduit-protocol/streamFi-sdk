@@ -36,7 +36,7 @@ vi.mock('../events.js', () => ({
 function makeConfig(withKeypair = true): ConduitConfig {
   return {
     network:        'testnet',
-    factoryAddress: 'CFACTORY000000000000000000000000000000000000000000000000',
+    factoryAddress: 'CCWAMYJME27OHTPKVSV252YRPXEO4BSKBHVLQ7ML3OWYNMB5RQEVHSM',
     ...(withKeypair ? { keypair: Keypair.random() } : {}),
   };
 }
@@ -45,10 +45,10 @@ function makeStreamInfo(overrides: Partial<StreamInfo> = {}): StreamInfo {
   const now = Math.floor(Date.now() / 1000);
   return {
     id:              1n,
-    address:         'CSTREAM0000000000000000000000000000000000000000000000000',
-    sender:          'GSENDER000000000000000000000000000000000000000000000000000',
-    recipient:       'GRECIPIENT00000000000000000000000000000000000000000000000',
-    token:           'CTOKEN00000000000000000000000000000000000000000000000000',
+    address:         'CCWAMYJME27OHTPKVSV252YRPXEO4BSKBHVLQ7ML3OWYNMB5RQEVHSM',
+    sender:          'GAAZI4TCR3TY5OJHCTJC2A4QSY6CJWJH5IAJTGKIN2ER7LBNVKOCCWN',
+    recipient:       'GBBD47IF6LWK7P7MDEVSCWR7DPUWV3NY3DTQEVFL4NAT4AQH3ZLLFLA5',
+    token:           'CDLZFC3SYJYDZT7K67VZ75HPJVIEUVNIXF47ZG2FB2RMQQVU2HHGCN3',
     ratePerSecond:   100n,
     startTime:       now - 3600,
     endTime:         now + 3600,
@@ -68,8 +68,8 @@ describe('StreamsModule — keypair guard', () => {
     const { StreamsModule } = await import('../streams.js');
     const sdk = new StreamsModule(makeConfig(false));
     await expect(sdk.create({
-      recipient:       'GRECIPIENT00000000000000000000000000000000000000000000000',
-      token:           'CTOKEN00000000000000000000000000000000000000000000000000',
+      recipient:       'GBBD47IF6LWK7P7MDEVSCWR7DPUWV3NY3DTQEVFL4NAT4AQH3ZLLFLA5',
+      token:           'CDLZFC3SYJYDZT7K67VZ75HPJVIEUVNIXF47ZG2FB2RMQQVU2HHGCN3',
       depositAmount:   '1000',
       durationSeconds: 86400,
     })).rejects.toThrow('keypair');
@@ -117,8 +117,8 @@ describe('StreamsModule — create() param validation', () => {
     const { StreamsModule } = await import('../streams.js');
     const sdk = new StreamsModule(makeConfig(true));
     await expect(sdk.create({
-      recipient:     'GRECIPIENT00000000000000000000000000000000000000000000000',
-      token:         'CTOKEN00000000000000000000000000000000000000000000000000',
+      recipient:     'GBBD47IF6LWK7P7MDEVSCWR7DPUWV3NY3DTQEVFL4NAT4AQH3ZLLFLA5',
+      token:         'CDLZFC3SYJYDZT7K67VZ75HPJVIEUVNIXF47ZG2FB2RMQQVU2HHGCN3',
       depositAmount: '100',
     })).rejects.toThrow(/durationSeconds|ratePerSecond/);
   });
@@ -150,7 +150,7 @@ describe('StreamsModule — list()', () => {
     mockStreamsBySender.mockResolvedValue([]);
     const { StreamsModule } = await import('../streams.js');
     const sdk = new StreamsModule(makeConfig(false));
-    const result = await sdk.list({ sender: 'GSENDER000000000000000000000000000000000000000000000000000' });
+    const result = await sdk.list({ sender: 'GAAZI4TCR3TY5OJHCTJC2A4QSY6CJWJH5IAJTGKIN2ER7LBNVKOCCWN' });
     expect(result).toEqual([]);
   });
 
@@ -158,9 +158,9 @@ describe('StreamsModule — list()', () => {
     mockStreamsBySender.mockResolvedValue([]);
     const { StreamsModule } = await import('../streams.js');
     const sdk = new StreamsModule(makeConfig(false));
-    await sdk.list({ sender: 'GSENDER000000000000000000000000000000000000000000000000000', limit: 5 });
+    await sdk.list({ sender: 'GAAZI4TCR3TY5OJHCTJC2A4QSY6CJWJH5IAJTGKIN2ER7LBNVKOCCWN', limit: 5 });
     expect(mockStreamsBySender).toHaveBeenCalledWith(
-      'GSENDER000000000000000000000000000000000000000000000000000', 0, 5,
+      'GAAZI4TCR3TY5OJHCTJC2A4QSY6CJWJH5IAJTGKIN2ER7LBNVKOCCWN', 0, 5,
     );
   });
 
@@ -168,9 +168,9 @@ describe('StreamsModule — list()', () => {
     mockStreamsByRecipient.mockResolvedValue([]);
     const { StreamsModule } = await import('../streams.js');
     const sdk = new StreamsModule(makeConfig(false));
-    await sdk.list({ recipient: 'GRECIPIENT00000000000000000000000000000000000000000000000', offset: 10, limit: 10 });
+    await sdk.list({ recipient: 'GBBD47IF6LWK7P7MDEVSCWR7DPUWV3NY3DTQEVFL4NAT4AQH3ZLLFLA5', offset: 10, limit: 10 });
     expect(mockStreamsByRecipient).toHaveBeenCalledWith(
-      'GRECIPIENT00000000000000000000000000000000000000000000000', 10, 10,
+      'GBBD47IF6LWK7P7MDEVSCWR7DPUWV3NY3DTQEVFL4NAT4AQH3ZLLFLA5', 10, 10,
     );
   });
 
@@ -178,7 +178,7 @@ describe('StreamsModule — list()', () => {
     mockStreamsBySender.mockResolvedValue([]);
     const { StreamsModule } = await import('../streams.js');
     const sdk = new StreamsModule(makeConfig(false));
-    await sdk.list({ sender: 'GSENDER000000000000000000000000000000000000000000000000000' });
+    await sdk.list({ sender: 'GAAZI4TCR3TY5OJHCTJC2A4QSY6CJWJH5IAJTGKIN2ER7LBNVKOCCWN' });
     expect(mockStreamsBySender).toHaveBeenCalledWith(
       expect.any(String), 0, 20,
     );
@@ -196,7 +196,7 @@ describe('StreamsModule — subscribe()', () => {
   });
 
   it('calling unsubscribe before async resolve sets stopped flag', async () => {
-    mockStreamAddress.mockResolvedValue('CSTREAM0000000000000000000000000000000000000000000000000');
+    mockStreamAddress.mockResolvedValue('CCWAMYJME27OHTPKVSV252YRPXEO4BSKBHVLQ7ML3OWYNMB5RQEVHSM');
     const { StreamsModule } = await import('../streams.js');
     const sdk = new StreamsModule(makeConfig(false));
     const sub = sdk.subscribe(1n, {});

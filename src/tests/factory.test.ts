@@ -1,89 +1,97 @@
-import { describe, it, expect, vi } from 'vitest';
+import { describe, it, expect, vi, beforeEach } from 'vitest';
+import { xdr as _xdr } from '@stellar/stellar-sdk';
 import type { ConduitConfig } from '../types/index.js';
 
-// ── Mock Soroban RPC ──────────────────────────────────────────────────────────
+// ── Hoist mocks so they can be referenced inside vi.mock() factories ──────────
 
-const mockSimulate = vi.fn();
-const mockGetAccount = vi.fn().mockResolvedValue({
-  accountId: () => 'GAAZI4TCR3TY5OJHCTJC2A4QSY6CJWJH5IAJTGKIN2ER7LBNVKOCCWN',
-  sequenceNumber: () => '1',
-  incrementSequenceNumber: vi.fn(),
-});
+const { mockBuildTx, mockSimulate } = vi.hoisted(() => ({
+  mockBuildTx:  vi.fn<[], unknown>().mockResolvedValue({ _stub: 'tx' }),
+  mockSimulate: vi.fn<[], unknown>(),
+}));
+
+// ── Mock soroban helpers — avoids real RPC calls and address validation ────────
+
+vi.mock('../soroban.js', () => ({
+  buildContractCallTx: mockBuildTx,
+  simulateReadOnly:    mockSimulate,
+  scValToU64: (v: { u64: () => { toString: () => string } }) =>
+    BigInt(v.u64().toString()),
+  scValToI128: (_v: unknown) => 0n,
+  NETWORK_PASSPHRASE: {
+    testnet:  'Test SDF Network ; September 2015',
+    mainnet:  'Public Global Stellar Network ; September 2015',
+    local:    'Standalone Network ; February 2017',
+  },
+  DEFAULT_RPC: {
+    testnet:  'https://soroban-testnet.stellar.org',
+    mainnet:  'https://mainnet.sorobanrpc.com',
+    local:    'http://localhost:8000/soroban/rpc',
+  },
+}));
+
+// ── Mock Address so G-addresses are accepted without strkey validation ─────────
 
 vi.mock('@stellar/stellar-sdk', async () => {
   const actual = await vi.importActual<typeof import('@stellar/stellar-sdk')>('@stellar/stellar-sdk');
 
-  const MockServer = vi.fn().mockImplementation(() => ({
-    getAccount:          mockGetAccount,
-    simulateTransaction: mockSimulate,
-  }));
+  class MockAddress {
+    constructor(private readonly addr: string) {}
+    toScVal() { return actual.xdr.ScVal.scvVoid(); }
+    toString() { return this.addr; }
+    static fromScVal(_v: unknown) { return new MockAddress(''); }
+    static fromString(s: string)  { return new MockAddress(s); }
+  }
 
-  return {
-    ...actual,
-    SorobanRpc: {
-      ...actual.SorobanRpc,
-      Server: MockServer,
-      Api:    actual.SorobanRpc.Api,
-    },
-  };
+  return { ...actual, Address: MockAddress };
 });
 
 // ── Helpers ───────────────────────────────────────────────────────────────────
 
+const FACTORY_ADDR   = 'CCWAMYJME27OHTPKVSV252YRPXEO4BSKBHVLQ7ML3OWYNMB5RQEVHSM';
+const SENDER_ADDR    = 'GAAZI4TCR3TY5OJHCTJC2A4QSY6CJWJH5IAJTGKIN2ER7LBNVKOCCWN';
+const RECIPIENT_ADDR = 'GBBD47IF6LWK7P7MDEVSCWR7DPUWV3NY3DTQEVFL4NAT4AQH3ZLLFLA5';
+
 function cfg(): ConduitConfig {
   return {
     network:        'testnet',
-    factoryAddress: 'CFACTORY000000000000000000000000000000000000000000000000',
+    factoryAddress: FACTORY_ADDR,
     rpcUrl:         'https://soroban-testnet.stellar.org',
   };
 }
 
 function makeU64ScVal(n: bigint) {
-  const { xdr } = require('@stellar/stellar-sdk');
-  return xdr.ScVal.scvU64(xdr.Uint64.fromString(n.toString()));
+  return _xdr.ScVal.scvU64(_xdr.Uint64.fromString(n.toString()));
 }
 
 function makeU32ScVal(n: number) {
-  const { xdr } = require('@stellar/stellar-sdk');
-  return xdr.ScVal.scvU32(n);
+  return _xdr.ScVal.scvU32(n);
 }
 
 function makeVoidScVal() {
-  const { xdr } = require('@stellar/stellar-sdk');
-  return xdr.ScVal.scvVoid();
-}
-
-function makeVecScVal(items: unknown[]) {
-  const { xdr } = require('@stellar/stellar-sdk');
-  return xdr.ScVal.scvVec(items);
-}
-
-function mockSimSuccess(retval: unknown) {
-  mockSimulate.mockResolvedValue({
-    result: { retval },
-    error:  undefined,
-  });
+  return _xdr.ScVal.scvVoid();
 }
 
 // ── Tests ─────────────────────────────────────────────────────────────────────
 
+beforeEach(() => {
+  mockBuildTx.mockResolvedValue({ _stub: 'tx' });
+  mockSimulate.mockReset();
+});
+
 describe('FactoryModule — streamCount()', () => {
   it('returns bigint parsed from u64 scval', async () => {
     const { FactoryModule } = await import('../factory.js');
-    const factory = new FactoryModule(cfg());
-    const retval  = makeU64ScVal(42n);
-    mockSimSuccess(retval);
+    mockSimulate.mockResolvedValueOnce(makeU64ScVal(42n));
 
-    const count = await factory.streamCount();
+    const count = await new FactoryModule(cfg()).streamCount();
     expect(count).toBe(42n);
   });
 
   it('returns 0n when contract has no streams', async () => {
     const { FactoryModule } = await import('../factory.js');
-    const factory = new FactoryModule(cfg());
-    mockSimSuccess(makeU64ScVal(0n));
+    mockSimulate.mockResolvedValueOnce(makeU64ScVal(0n));
 
-    const count = await factory.streamCount();
+    const count = await new FactoryModule(cfg()).streamCount();
     expect(count).toBe(0n);
   });
 });
@@ -91,10 +99,9 @@ describe('FactoryModule — streamCount()', () => {
 describe('FactoryModule — streamAddress()', () => {
   it('returns null when contract returns void (stream not found)', async () => {
     const { FactoryModule } = await import('../factory.js');
-    const factory = new FactoryModule(cfg());
-    mockSimSuccess(makeVoidScVal());
+    mockSimulate.mockResolvedValueOnce(makeVoidScVal());
 
-    const addr = await factory.streamAddress(999n);
+    const addr = await new FactoryModule(cfg()).streamAddress(999n);
     expect(addr).toBeNull();
   });
 });
@@ -102,20 +109,18 @@ describe('FactoryModule — streamAddress()', () => {
 describe('FactoryModule — protocolFeeBps()', () => {
   it('returns fee as a number', async () => {
     const { FactoryModule } = await import('../factory.js');
-    const factory = new FactoryModule(cfg());
-    mockSimSuccess(makeU32ScVal(30));
+    mockSimulate.mockResolvedValueOnce(makeU32ScVal(30));
 
-    const fee = await factory.protocolFeeBps();
+    const fee = await new FactoryModule(cfg()).protocolFeeBps();
     expect(fee).toBe(30);
     expect(typeof fee).toBe('number');
   });
 
   it('handles zero fee', async () => {
     const { FactoryModule } = await import('../factory.js');
-    const factory = new FactoryModule(cfg());
-    mockSimSuccess(makeU32ScVal(0));
+    mockSimulate.mockResolvedValueOnce(makeU32ScVal(0));
 
-    const fee = await factory.protocolFeeBps();
+    const fee = await new FactoryModule(cfg()).protocolFeeBps();
     expect(fee).toBe(0);
   });
 });
@@ -123,41 +128,33 @@ describe('FactoryModule — protocolFeeBps()', () => {
 describe('FactoryModule — streamsBySender() / streamsByRecipient()', () => {
   it('returns empty array when no streams exist', async () => {
     const { FactoryModule } = await import('../factory.js');
-    const factory = new FactoryModule(cfg());
-    const { xdr } = await import('@stellar/stellar-sdk');
-    mockSimSuccess(xdr.ScVal.scvVec([]));
+    mockSimulate.mockResolvedValueOnce(_xdr.ScVal.scvVec([]));
 
-    const ids = await factory.streamsBySender('GSENDER000000000000000000000000000000000000000000000000000');
+    const ids = await new FactoryModule(cfg()).streamsBySender(SENDER_ADDR);
     expect(ids).toEqual([]);
   });
 
   it('returns bigint array of stream IDs', async () => {
     const { FactoryModule } = await import('../factory.js');
-    const factory = new FactoryModule(cfg());
-    const { xdr } = await import('@stellar/stellar-sdk');
 
-    const vec = xdr.ScVal.scvVec([
-      xdr.ScVal.scvU64(xdr.Uint64.fromString('0')),
-      xdr.ScVal.scvU64(xdr.Uint64.fromString('1')),
-      xdr.ScVal.scvU64(xdr.Uint64.fromString('7')),
-    ]);
-    mockSimSuccess(vec);
+    mockSimulate.mockResolvedValueOnce(_xdr.ScVal.scvVec([
+      _xdr.ScVal.scvU64(_xdr.Uint64.fromString('0')),
+      _xdr.ScVal.scvU64(_xdr.Uint64.fromString('1')),
+      _xdr.ScVal.scvU64(_xdr.Uint64.fromString('7')),
+    ]));
 
-    const ids = await factory.streamsBySender('GSENDER000000000000000000000000000000000000000000000000000');
+    const ids = await new FactoryModule(cfg()).streamsBySender(SENDER_ADDR);
     expect(ids).toEqual([0n, 1n, 7n]);
   });
 
   it('streamsByRecipient parses identically to streamsBySender', async () => {
     const { FactoryModule } = await import('../factory.js');
-    const factory = new FactoryModule(cfg());
-    const { xdr } = await import('@stellar/stellar-sdk');
 
-    const vec = xdr.ScVal.scvVec([
-      xdr.ScVal.scvU64(xdr.Uint64.fromString('3')),
-    ]);
-    mockSimSuccess(vec);
+    mockSimulate.mockResolvedValueOnce(_xdr.ScVal.scvVec([
+      _xdr.ScVal.scvU64(_xdr.Uint64.fromString('3')),
+    ]));
 
-    const ids = await factory.streamsByRecipient('GRECIPIENT00000000000000000000000000000000000000000000000');
+    const ids = await new FactoryModule(cfg()).streamsByRecipient(RECIPIENT_ADDR);
     expect(ids).toEqual([3n]);
   });
 });
