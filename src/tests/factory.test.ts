@@ -5,8 +5,8 @@ import type { ConduitConfig } from '../types/index.js';
 // ── Hoist mocks so they can be referenced inside vi.mock() factories ──────────
 
 const { mockBuildTx, mockSimulate } = vi.hoisted(() => ({
-  mockBuildTx:  vi.fn<[], unknown>().mockResolvedValue({ _stub: 'tx' }),
-  mockSimulate: vi.fn<[], unknown>(),
+  mockBuildTx:  vi.fn().mockResolvedValue({ _stub: 'tx' }),
+  mockSimulate: vi.fn(),
 }));
 
 // ── Mock soroban helpers — avoids real RPC calls and address validation ────────
