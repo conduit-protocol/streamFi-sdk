@@ -33,7 +33,6 @@ const TOPIC = {
 function scValToBigInt(val: SorobanRpc.Api.EventResponse['value']): bigint {
   // soroban-sdk emits i128 / u64 as XDR ScVal; parse accordingly
   try {
-    // @ts-expect-error — raw XDR value parsing
     return BigInt(val.toString());
   } catch {
     return 0n;
@@ -65,7 +64,7 @@ export function subscribeToStream(
 
     try {
       const response = await server.getEvents({
-        startLedger:  startLedger || undefined,
+        ...(startLedger > 0 ? { startLedger } : {}),
         filters: [{
           type:        'contract',
           contractIds: [streamAddress],

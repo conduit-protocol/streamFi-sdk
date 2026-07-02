@@ -282,17 +282,17 @@ function parseStreamInfo(id: bigint, address: string, val: xdr.ScVal): StreamInf
   return {
     id,
     address,
-    sender:          Address.fromScVal(m['sender']).toString(),
-    recipient:       Address.fromScVal(m['recipient']).toString(),
-    token:           Address.fromScVal(m['token']).toString(),
-    ratePerSecond:   scValToI128(m['rate_per_second']),
-    startTime:       Number(scValToU64(m['start_time'])),
-    endTime:         Number(scValToU64(m['end_time'])),
-    withdrawn:       scValToI128(m['withdrawn']),
-    paused:          m['paused'].b(),
-    pausedAt:        Number(scValToU64(m['paused_at'])),
-    cancelled:       m['cancelled'].b(),
-    clawbackEnabled: m['clawback_enabled'].b(),
+    sender:          m['sender']          ? Address.fromScVal(m['sender']).toString()          : '',
+    recipient:       m['recipient']       ? Address.fromScVal(m['recipient']).toString()       : '',
+    token:           m['token']           ? Address.fromScVal(m['token']).toString()           : '',
+    ratePerSecond:   m['rate_per_second'] ? scValToI128(m['rate_per_second'])                 : 0n,
+    startTime:       m['start_time']      ? Number(scValToU64(m['start_time']))               : 0,
+    endTime:         m['end_time']        ? Number(scValToU64(m['end_time']))                 : 0,
+    withdrawn:       m['withdrawn']       ? scValToI128(m['withdrawn'])                       : 0n,
+    paused:          m['paused']?.b()     ?? false,
+    pausedAt:        m['paused_at']       ? Number(scValToU64(m['paused_at']))                : 0,
+    cancelled:       m['cancelled']?.b()  ?? false,
+    clawbackEnabled: m['clawback_enabled']?.b() ?? false,
   };
 }
 
