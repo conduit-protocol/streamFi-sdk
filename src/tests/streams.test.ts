@@ -1,7 +1,7 @@
-import { describe, it, expect, vi, beforeEach, type Mock } from 'vitest';
-import { Keypair, xdr, SorobanRpc } from '@stellar/stellar-sdk';
+import { describe, it, expect, vi, beforeEach } from 'vitest';
+import { Keypair } from '@stellar/stellar-sdk';
 import { ConduitError, ErrorCode } from '../errors.js';
-import type { ConduitConfig, StreamInfo } from '../types/index.js';
+import type { ConduitConfig } from '../types/index.js';
 
 // ── Mocks ─────────────────────────────────────────────────────────────────────
 
@@ -38,26 +38,6 @@ function makeConfig(withKeypair = true): ConduitConfig {
     network:        'testnet',
     factoryAddress: 'CCWAMYJME27OHTPKVSV252YRPXEO4BSKBHVLQ7ML3OWYNMB5RQEVHSM',
     ...(withKeypair ? { keypair: Keypair.random() } : {}),
-  };
-}
-
-function makeStreamInfo(overrides: Partial<StreamInfo> = {}): StreamInfo {
-  const now = Math.floor(Date.now() / 1000);
-  return {
-    id:              1n,
-    address:         'CCWAMYJME27OHTPKVSV252YRPXEO4BSKBHVLQ7ML3OWYNMB5RQEVHSM',
-    sender:          'GAAZI4TCR3TY5OJHCTJC2A4QSY6CJWJH5IAJTGKIN2ER7LBNVKOCCWN',
-    recipient:       'GBBD47IF6LWK7P7MDEVSCWR7DPUWV3NY3DTQEVFL4NAT4AQH3ZLLFLA5',
-    token:           'CDLZFC3SYJYDZT7K67VZ75HPJVIEUVNIXF47ZG2FB2RMQQVU2HHGCN3',
-    ratePerSecond:   100n,
-    startTime:       now - 3600,
-    endTime:         now + 3600,
-    withdrawn:       0n,
-    paused:          false,
-    pausedAt:        0,
-    cancelled:       false,
-    clawbackEnabled: false,
-    ...overrides,
   };
 }
 
