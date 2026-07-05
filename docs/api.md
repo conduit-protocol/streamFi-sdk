@@ -140,6 +140,14 @@ const sub = client.streams.subscribe(streamId, {
 sub.unsubscribe();
 ```
 
+> **Only `amount` (on `onWithdraw`/`onClawback`) is real.** Every other numeric/timestamp field —
+> `totalWithdrawn`, `remaining`, `refundAmount`, `withdrawnSoFar`, `pausedAt`, `withdrawable`,
+> `resumedAt`, `newBalance` — is a hardcoded `0` / `0n` placeholder in `src/events.ts`
+> (`dispatchEvent`), marked `// TODO: parse tuple data`. The contracts emit these as multi-value
+> tuples (e.g. `stream_withdrawn` → `{ amount, total_withdrawn, remaining }`), and the parser
+> doesn't decode tuple `ScVal`s yet — only the single-value case. Don't rely on these fields
+> until that's implemented; re-fetch via `client.streams.get(streamId)` instead.
+
 ---
 
 ## `client.factory`

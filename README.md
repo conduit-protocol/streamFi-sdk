@@ -424,6 +424,8 @@ sub.unsubscribe();
 
 Event subscriptions poll the Soroban event ledger every 5 seconds by default. Pass `{ pollInterval: 2000 }` to change the interval.
 
+**Caveat:** only `amount` is actually parsed today. `refundAmount`, `pausedAt`, `resumedAt`, `totalWithdrawn`, `remaining`, and `newBalance` are hardcoded `0`/`0n` placeholders in `src/events.ts` — the contracts emit these as tuples, and the event parser doesn't decode multi-value `ScVal`s yet. Treat an event as a "something happened, go refetch" signal, not a source of truth for those fields; use `client.streams.get(streamId)` to get the real numbers. See [`docs/api.md`](./docs/api.md) for detail.
+
 ---
 
 ## Browser / React Usage
@@ -507,7 +509,7 @@ conduit-sdk/
 
 ## Contributing
 
-See the root [`CONTRIBUTING.md`](../CONTRIBUTING.md).
+See [`CONTRIBUTING.md`](./CONTRIBUTING.md). For the module map and call flow, see [`docs/architecture.md`](./docs/architecture.md).
 
 ---
 
