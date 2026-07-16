@@ -89,12 +89,19 @@ export class StreamsModule {
       throw ConduitError.fromSorobanMessage('factory', sim.error);
     }
 
-    // create_stream returns the new stream ID (u64)
-    const streamId = scValToU64(xdr.ScVal.fromXDR(sim.result!.retval.toXDR()));
-
     const assembled = SorobanRpc.assembleTransaction(tx, sim).build();
     assembled.sign(this.config.keypair);
-    const txHash = await this._sendAndPoll(server, assembled);
+    const { hash: txHash, returnValue } = await this._sendAndPoll(server, assembled);
+
+    // create_stream returns the new stream ID (u64). Read it from the
+    // confirmed transaction's actual return value, not the pre-submission
+    // simulation — if another create_stream lands on the factory between
+    // this call's simulate and submit, the real assigned stream_id can
+    // differ from what was simulated.
+    if (!returnValue) {
+      throw new Error(`Transaction ${txHash} succeeded but returned no value`);
+    }
+    const streamId = scValToU64(returnValue);
 
     const streamAddress = await this._factory.streamAddress(streamId) ?? '';
     return { streamId, streamAddress, txHash };
@@ -170,12 +177,17 @@ export class StreamsModule {
       throw ConduitError.fromSorobanMessage('stream', sim.error);
     }
 
-    const amount    = scValToI128(xdr.ScVal.fromXDR(sim.result!.retval.toXDR()));
     const assembled = SorobanRpc.assembleTransaction(tx, sim).build();
     assembled.sign(this.config.keypair);
-    await this._sendAndPoll(server, assembled);
+    const { hash, returnValue } = await this._sendAndPoll(server, assembled);
 
-    return amount;
+    // Read the reclaimed amount from the confirmed transaction, not the
+    // pre-submission simulation — see create()'s comment for why these can
+    // genuinely differ (balance/withdrawn can shift between simulate and submit).
+    if (!returnValue) {
+      throw new Error(`Transaction ${hash} succeeded but returned no value`);
+    }
+    return scValToI128(returnValue);
   }
 
   /**
@@ -249,10 +261,26 @@ export class StreamsModule {
     }
     const assembled = SorobanRpc.assembleTransaction(tx, sim).build();
     assembled.sign(keypair);
-    return this._sendAndPoll(server, assembled);
+    const { hash } = await this._sendAndPoll(server, assembled);
+    return hash;
   }
 
-  private async _sendAndPoll(server: SorobanRpc.Server, tx: Transaction): Promise<string> {
+  /**
+   * Submits `tx` and polls until it lands. Returns the confirmed transaction's
+   * hash and, for a SUCCESS status, its actual on-chain `returnValue` — the
+   * real executed result, not the pre-submission simulation.
+   *
+   * Callers that only need the hash (withdraw/cancel/pause/resume/topUp) can
+   * ignore `returnValue`; callers whose contract method returns something
+   * meaningful (create_stream's stream_id, clawback's reclaimed amount) must
+   * use it instead of trusting the simulated retval — the two can genuinely
+   * differ (e.g. another create_stream landing between this call's simulate
+   * and submit shifts the assigned stream_id).
+   */
+  private async _sendAndPoll(
+    server: SorobanRpc.Server,
+    tx: Transaction,
+  ): Promise<{ hash: string; returnValue: xdr.ScVal | undefined }> {
     const sent = await server.sendTransaction(tx);
     if (sent.status === 'ERROR') {
       throw new Error(`Transaction rejected: ${JSON.stringify(sent.errorResult)}`);
@@ -261,7 +289,9 @@ export class StreamsModule {
     for (let i = 0; i < 30; i++) {
       await sleep(1000);
       const s = await server.getTransaction(hash);
-      if (s.status === SorobanRpc.Api.GetTransactionStatus.SUCCESS) return hash;
+      if (s.status === SorobanRpc.Api.GetTransactionStatus.SUCCESS) {
+        return { hash, returnValue: s.returnValue };
+      }
       if (s.status === SorobanRpc.Api.GetTransactionStatus.FAILED) {
         throw new Error(`Transaction failed: ${hash}`);
       }
