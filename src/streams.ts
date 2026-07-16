@@ -18,6 +18,7 @@ import {
   scValToI128,
   scValToU64,
   boolToScVal,
+  getTokenDecimals,
   DEFAULT_RPC,
   NETWORK_PASSPHRASE,
 } from './soroban.js';
@@ -60,15 +61,22 @@ export class StreamsModule {
       throw new Error('Either durationSeconds or ratePerSecond must be provided');
     }
 
-    const depositStroops = toStroops(depositAmount);
-    const rateStroops    = ratePerSecond
-      ? BigInt(ratePerSecond)
-      : calculateRate(depositAmount, durationSeconds!);
-    const start = startTime ?? Math.floor(Date.now() / 1000);
-    const end   = durationSeconds ? start + durationSeconds : 0;
-
     const senderAddr = this.config.keypair.publicKey();
     const factoryId  = this.config.factoryAddress ?? '';
+
+    // `token` is an arbitrary contract address (see CreateStreamParams) — it
+    // must not be assumed to use the native asset's 7 decimals. Query the
+    // token's own decimals() rather than defaulting toStroops/calculateRate
+    // to 7, or a non-7-decimal token's deposit/rate would be silently wrong
+    // by orders of magnitude.
+    const decimals = await getTokenDecimals(this.rpcUrl, this.passphrase, senderAddr, token);
+
+    const depositStroops = toStroops(depositAmount, decimals);
+    const rateStroops    = ratePerSecond
+      ? BigInt(ratePerSecond)
+      : calculateRate(depositAmount, durationSeconds!, decimals);
+    const start = startTime ?? Math.floor(Date.now() / 1000);
+    const end   = durationSeconds ? start + durationSeconds : 0;
 
     const args = [
       new Address(senderAddr).toScVal(),
