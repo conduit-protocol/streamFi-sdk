@@ -5,7 +5,7 @@
  * to registered handlers.
  */
 
-import { SorobanRpc } from '@stellar/stellar-sdk';
+import { Address, SorobanRpc, xdr } from '@stellar/stellar-sdk';
 import type {
   StreamEventHandlers,
   Subscription,
@@ -16,6 +16,7 @@ import type {
   TopUpEvent,
   ClawbackEvent,
 } from './types/index.js';
+import { scValToI128, scValToU64 } from './soroban.js';
 
 // ── Event topic names (match symbol_short!() values in Rust) ─────────────────
 
@@ -30,12 +31,38 @@ const TOPIC = {
 
 // ── Parser helpers ────────────────────────────────────────────────────────────
 
-function scValToBigInt(val: SorobanRpc.Api.EventResponse['value']): bigint {
-  // soroban-sdk emits i128 / u64 as XDR ScVal; parse accordingly
+/**
+ * The stream contract publishes multi-field event data as a Rust tuple,
+ * which soroban-sdk encodes as an ScVec. Single-field events (resumed,
+ * clawback) publish the bare scalar instead — callers must know which shape
+ * to expect for a given topic (see contracts/stream/src/events.rs).
+ */
+function tupleFields(val: xdr.ScVal): xdr.ScVal[] {
+  return val.vec() ?? [];
+}
+
+function i128Field(fields: xdr.ScVal[], index: number): bigint {
+  const field = fields[index];
+  return field ? scValToI128(field) : 0n;
+}
+
+function u64Field(fields: xdr.ScVal[], index: number): number {
+  const field = fields[index];
+  return field ? Number(scValToU64(field)) : 0;
+}
+
+/**
+ * Decodes an address topic to its G.../C... string. `ScVal.address()?.accountId()`
+ * returns the raw XDR PublicKey object, not a string — calling `.toString()`
+ * on it yields `"[object Object]"`. `Address.fromScVal` handles both account
+ * and contract address variants correctly.
+ */
+function addressField(val: xdr.ScVal | undefined): string {
+  if (!val) return '';
   try {
-    return BigInt(val.toString());
+    return Address.fromScVal(val).toString();
   } catch {
-    return 0n;
+    return '';
   }
 }
 
@@ -99,7 +126,9 @@ export function subscribeToStream(
 
 // ── Event dispatcher ──────────────────────────────────────────────────────────
 
-function dispatchEvent(
+// Exported (but not re-exported from index.ts) so tests can exercise the
+// tuple-decoding logic directly without standing up a fake RPC server.
+export function dispatchEvent(
   event:    SorobanRpc.Api.EventResponse,
   handlers: StreamEventHandlers,
 ): void {
@@ -109,14 +138,18 @@ function dispatchEvent(
 
   const topicName = topics[0]?.sym()?.toString() ?? '';
 
+  const actor = addressField(topics[1]);
+
   switch (topicName) {
     case TOPIC.WITHDRAWN: {
       if (!handlers.onWithdraw) break;
+      // data: (amount: i128, total_withdrawn: i128, remaining: i128)
+      const fields = tupleFields(event.value);
       const data: WithdrawEvent = {
-        recipient:      topics[1] ? topics[1].address()?.accountId().toString() ?? '' : '',
-        amount:         scValToBigInt(event.value),
-        totalWithdrawn: 0n, // TODO: parse tuple data
-        remaining:      0n,
+        recipient:      actor,
+        amount:         i128Field(fields, 0),
+        totalWithdrawn: i128Field(fields, 1),
+        remaining:      i128Field(fields, 2),
       };
       handlers.onWithdraw(data);
       break;
@@ -124,10 +157,12 @@ function dispatchEvent(
 
     case TOPIC.CANCELLED: {
       if (!handlers.onCancel) break;
+      // data: (refund_amount: i128, withdrawn_so_far: i128)
+      const fields = tupleFields(event.value);
       const data: CancelEvent = {
-        sender:         topics[1] ? topics[1].address()?.accountId().toString() ?? '' : '',
-        refundAmount:   0n, // TODO: parse tuple data
-        withdrawnSoFar: 0n,
+        sender:         actor,
+        refundAmount:   i128Field(fields, 0),
+        withdrawnSoFar: i128Field(fields, 1),
       };
       handlers.onCancel(data);
       break;
@@ -135,10 +170,12 @@ function dispatchEvent(
 
     case TOPIC.PAUSED: {
       if (!handlers.onPause) break;
+      // data: (paused_at: u64, withdrawable: i128)
+      const fields = tupleFields(event.value);
       const data: PauseEvent = {
-        sender:      topics[1] ? topics[1].address()?.accountId().toString() ?? '' : '',
-        pausedAt:    0,
-        withdrawable: 0n,
+        sender:       actor,
+        pausedAt:     u64Field(fields, 0),
+        withdrawable: i128Field(fields, 1),
       };
       handlers.onPause(data);
       break;
@@ -146,9 +183,11 @@ function dispatchEvent(
 
     case TOPIC.RESUMED: {
       if (!handlers.onResume) break;
+      // data: resumed_at: u64 (bare scalar, not a tuple — resumed() only
+      // publishes one field, see contracts/stream/src/events.rs)
       const data: ResumeEvent = {
-        sender:    topics[1] ? topics[1].address()?.accountId().toString() ?? '' : '',
-        resumedAt: 0,
+        sender:    actor,
+        resumedAt: Number(scValToU64(event.value)),
       };
       handlers.onResume(data);
       break;
@@ -156,10 +195,12 @@ function dispatchEvent(
 
     case TOPIC.TOPPED_UP: {
       if (!handlers.onTopUp) break;
+      // data: (amount: i128, new_balance: i128)
+      const fields = tupleFields(event.value);
       const data: TopUpEvent = {
-        sender:     topics[1] ? topics[1].address()?.accountId().toString() ?? '' : '',
-        amount:     0n,
-        newBalance: 0n,
+        sender:     actor,
+        amount:     i128Field(fields, 0),
+        newBalance: i128Field(fields, 1),
       };
       handlers.onTopUp(data);
       break;
@@ -167,9 +208,10 @@ function dispatchEvent(
 
     case TOPIC.CLAWBACK: {
       if (!handlers.onClawback) break;
+      // data: amount: i128 (bare scalar, not a tuple)
       const data: ClawbackEvent = {
-        sender: topics[1] ? topics[1].address()?.accountId().toString() ?? '' : '',
-        amount: scValToBigInt(event.value),
+        sender: actor,
+        amount: scValToI128(event.value),
       };
       handlers.onClawback(data);
       break;
