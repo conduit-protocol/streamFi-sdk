@@ -78,6 +78,13 @@ beforeEach(() => {
   mockSimulate.mockReset();
 });
 
+describe('FactoryModule — construction', () => {
+  it('throws immediately when factoryAddress is missing, not deep inside stellar-sdk later', async () => {
+    const { FactoryModule } = await import('../factory.js');
+    expect(() => new FactoryModule({ network: 'testnet' })).toThrow(/factoryAddress is required/);
+  });
+});
+
 describe('FactoryModule — streamCount()', () => {
   it('returns bigint parsed from u64 scval', async () => {
     const { FactoryModule } = await import('../factory.js');

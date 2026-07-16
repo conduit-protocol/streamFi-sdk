@@ -4,6 +4,7 @@
 
 import { nativeToScVal, xdr, Address } from '@stellar/stellar-sdk';
 import type { ConduitConfig } from './types/index.js';
+import { ZERO_ADDR } from './constants.js';
 import {
   buildContractCallTx,
   simulateReadOnly,
@@ -11,12 +12,6 @@ import {
   NETWORK_PASSPHRASE,
   DEFAULT_RPC,
 } from './soroban.js';
-
-const DEFAULT_FACTORY: Record<string, string> = {
-  mainnet: 'CDRIP_FACTORY_MAINNET_PLACEHOLDER',
-  testnet: 'CDRIP_FACTORY_TESTNET_PLACEHOLDER',
-  local:   'CDRIP_FACTORY_LOCAL_PLACEHOLDER',
-};
 
 export class FactoryModule {
   private readonly rpcUrl:      string;
@@ -27,10 +22,19 @@ export class FactoryModule {
   constructor(private readonly config: ConduitConfig) {
     this.rpcUrl     = config.rpcUrl     ?? DEFAULT_RPC[config.network];
     this.passphrase = NETWORK_PASSPHRASE[config.network];
-    this.factoryId  = config.factoryAddress ?? DEFAULT_FACTORY[config.network] ?? '';
+    // There is no known default DripFactory deployment for any network —
+    // shipping a placeholder string here means callers who forget to set
+    // this fail deep inside @stellar/stellar-sdk with a confusing StrKey
+    // error instead of a clear one at construction time.
+    if (!config.factoryAddress) {
+      throw new Error(
+        `ConduitConfig.factoryAddress is required (no default DripFactory is known for network "${config.network}").`,
+      );
+    }
+    this.factoryId  = config.factoryAddress;
     // For read-only calls we use the keypair's public key as the fee source;
     // if no keypair, we use the zero address (simulation only — no real account needed).
-    this.callerAddr = config.keypair?.publicKey() ?? 'GAAZI4TCR3TY5OJHCTJC2A4QSY6CJWJH5IAJTGKIN2ER7LBNVKOCCWN';
+    this.callerAddr = config.keypair?.publicKey() ?? ZERO_ADDR;
   }
 
   /** Total number of streams ever created through this factory. */

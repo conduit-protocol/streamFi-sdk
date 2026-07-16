@@ -24,8 +24,7 @@ import {
 } from './soroban.js';
 import { FactoryModule } from './factory.js';
 import { ConduitError, StreamErrorCode } from './errors.js';
-
-const ZERO_ADDR = 'GAAZI4TCR3TY5OJHCTJC2A4QSY6CJWJH5IAJTGKIN2ER7LBNVKOCCWN';
+import { ZERO_ADDR } from './constants.js';
 
 export class StreamsModule {
   private readonly rpcUrl:     string;
