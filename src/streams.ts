@@ -22,7 +22,7 @@ import {
   NETWORK_PASSPHRASE,
 } from './soroban.js';
 import { FactoryModule } from './factory.js';
-import { ConduitError, ErrorCode } from './errors.js';
+import { ConduitError, StreamErrorCode } from './errors.js';
 
 const ZERO_ADDR = 'GAAZI4TCR3TY5OJHCTJC2A4QSY6CJWJH5IAJTGKIN2ER7LBNVKOCCWN';
 
@@ -86,7 +86,7 @@ export class StreamsModule {
     const sim    = await server.simulateTransaction(tx);
 
     if (SorobanRpc.Api.isSimulationError(sim)) {
-      throw new Error(`Simulation failed: ${sim.error}`);
+      throw ConduitError.fromSorobanMessage('factory', sim.error);
     }
 
     // create_stream returns the new stream ID (u64)
@@ -167,7 +167,7 @@ export class StreamsModule {
     const sim    = await server.simulateTransaction(tx);
 
     if (SorobanRpc.Api.isSimulationError(sim)) {
-      throw new Error(`Simulation failed: ${sim.error}`);
+      throw ConduitError.fromSorobanMessage('stream', sim.error);
     }
 
     const amount    = scValToI128(xdr.ScVal.fromXDR(sim.result!.retval.toXDR()));
@@ -224,7 +224,7 @@ export class StreamsModule {
 
   private async _resolveAddr(id: bigint): Promise<string> {
     const addr = await this._factory.streamAddress(id);
-    if (!addr) throw new ConduitError(ErrorCode.StreamNotFound, `Stream ${id} not found`);
+    if (!addr) throw new ConduitError('stream', StreamErrorCode.StreamNotFound, `Stream ${id} not found`);
     return addr;
   }
 
@@ -232,7 +232,7 @@ export class StreamsModule {
     const server = this._server();
     const result = await server.simulateTransaction(tx);
     if (SorobanRpc.Api.isSimulationError(result)) {
-      throw new Error(`Simulation error: ${result.error}`);
+      throw ConduitError.fromSorobanMessage('stream', result.error);
     }
     if (!result.result) throw new Error('Simulation returned no result');
     return xdr.ScVal.fromXDR(result.result.retval.toXDR());
@@ -245,7 +245,7 @@ export class StreamsModule {
     const server  = this._server();
     const sim     = await server.simulateTransaction(tx);
     if (SorobanRpc.Api.isSimulationError(sim)) {
-      throw new Error(`Simulation failed: ${sim.error}`);
+      throw ConduitError.fromSorobanMessage('stream', sim.error);
     }
     const assembled = SorobanRpc.assembleTransaction(tx, sim).build();
     assembled.sign(keypair);

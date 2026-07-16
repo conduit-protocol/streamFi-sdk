@@ -1,6 +1,6 @@
 import { describe, it, expect, vi, beforeEach } from 'vitest';
 import { Keypair } from '@stellar/stellar-sdk';
-import { ConduitError, ErrorCode } from '../errors.js';
+import { ConduitError, StreamErrorCode } from '../errors.js';
 import type { ConduitConfig } from '../types/index.js';
 
 // ── Mocks ─────────────────────────────────────────────────────────────────────
@@ -116,7 +116,8 @@ describe('StreamsModule — _resolveAddr via get()', () => {
 
     const err = await sdk.get(99n).catch(e => e);
     expect(err).toBeInstanceOf(ConduitError);
-    expect((err as ConduitError).code).toBe(ErrorCode.StreamNotFound);
+    expect((err as ConduitError).contract).toBe('stream');
+    expect((err as ConduitError).code).toBe(StreamErrorCode.StreamNotFound);
   });
 });
 
