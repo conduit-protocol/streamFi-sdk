@@ -36,7 +36,7 @@ new ConduitClient(config: ConduitConfig)
 | `clawbackEnabled` | `boolean?` | Default `false` |
 | `ratePerSecond` | `string?` | Stroops/s; exclusive with `durationSeconds` |
 
-**Throws:** `ConduitError.InvalidDeposit`, `ConduitError.InsufficientDeposit`, `ConduitError.BackdatedStream`, `ConduitError.InvalidTimeRange`
+**Throws:** `ConduitError` with `contract: 'factory'` — `FactoryErrorCode.InvalidDeposit`, `.InsufficientDeposit`, `.BackdatedStream`, `.InvalidTimeRange`, `.RateExceedsMax`, `.DurationTooShort`
 
 ---
 
@@ -61,7 +61,7 @@ Current withdrawable balance in stroops. Read-only, no transaction.
 
 **Returns:** Transaction hash  
 **Requires:** `keypair` set (recipient)  
-**Throws:** `ConduitError.NothingToWithdraw`, `ConduitError.NotAuthorized`, `ConduitError.StreamCancelled`
+**Throws:** `ConduitError` with `contract: 'stream'` — `StreamErrorCode.NothingToWithdraw`, `.NotAuthorized`, `.StreamCancelled`, `.InvalidAmount`
 
 ---
 
@@ -70,7 +70,7 @@ Current withdrawable balance in stroops. Read-only, no transaction.
 Atomically settles both parties (recipient gets owed amount, sender gets refund).
 
 **Requires:** `keypair` set (sender)  
-**Throws:** `ConduitError.NotAuthorized`, `ConduitError.StreamCancelled`
+**Throws:** `ConduitError` with `contract: 'stream'` — `StreamErrorCode.NotAuthorized`, `.StreamCancelled`
 
 ---
 
@@ -79,7 +79,7 @@ Atomically settles both parties (recipient gets owed amount, sender gets refund)
 Freezes the stream clock. Withdrawable balance stops growing.
 
 **Requires:** `keypair` set (sender)  
-**Throws:** `ConduitError.AlreadyPaused`, `ConduitError.StreamCancelled`
+**Throws:** `ConduitError` with `contract: 'stream'` — `StreamErrorCode.AlreadyPaused`, `.StreamCancelled`
 
 ---
 
@@ -88,7 +88,7 @@ Freezes the stream clock. Withdrawable balance stops growing.
 Resumes a paused stream. Paused duration is excluded from streaming time.
 
 **Requires:** `keypair` set (sender)  
-**Throws:** `ConduitError.NotPaused`, `ConduitError.StreamCancelled`
+**Throws:** `ConduitError` with `contract: 'stream'` — `StreamErrorCode.NotPaused`, `.StreamCancelled`
 
 ---
 
@@ -97,7 +97,7 @@ Resumes a paused stream. Paused duration is excluded from streaming time.
 Adds tokens to the stream balance. Extends effective stream duration.
 
 **Requires:** `keypair` set (sender)  
-**Throws:** `ConduitError.StreamCancelled`
+**Throws:** `ConduitError` with `contract: 'stream'` — `StreamErrorCode.StreamCancelled`, `.InvalidAmount`
 
 ---
 
@@ -107,7 +107,7 @@ Reclaims unstreamed tokens. Only works if `clawbackEnabled` was `true` at creati
 
 **Returns:** Amount reclaimed (stroops)  
 **Requires:** `keypair` set (sender)  
-**Throws:** `ConduitError.ClawbackDisabled`, `ConduitError.NotAuthorized`
+**Throws:** `ConduitError` with `contract: 'stream'` — `StreamErrorCode.ClawbackDisabled`, `.NotAuthorized`
 
 ---
 
@@ -168,6 +168,7 @@ interface GovernorConfig {
   feeRecipient:       string;
   minDurationSeconds: number;
   maxRatePerSecond:   bigint;
+  factoryAddress:     string;
 }
 ```
 
@@ -197,8 +198,14 @@ interface StreamInfo {
 
 ## Error Codes
 
-| Code | `ErrorCode` constant | Meaning |
-|------|---------------------|---------|
+Each contract has its own error-code space — `ConduitError.contract` tells you which table
+applies (`'stream' | 'factory' | 'governor'`). The same numeric `code` means something different
+in each one.
+
+**`StreamErrorCode`** (`err.contract === 'stream'`)
+
+| Code | Constant | Meaning |
+|------|----------|---------|
 | 1 | `NotAuthorized` | Caller is not sender or recipient |
 | 2 | `StreamNotFound` | Stream ID does not exist |
 | 3 | `StreamCancelled` | Stream has been cancelled |
@@ -211,6 +218,32 @@ interface StreamInfo {
 | 10 | `NotPaused` | Stream is not paused |
 | 11 | `ClawbackDisabled` | Clawback not enabled |
 | 12 | `ArithmeticOverflow` | Integer overflow |
+| 13 | `PauseThresholdNotMet` | `force_cancel` before the 30-day pause threshold elapsed |
+| 14 | `AlreadyInitialized` | Stream has already been initialized |
+| 15 | `InvalidAmount` | `withdraw`/`top_up` amount must be > 0 |
+
+**`FactoryErrorCode`** (`err.contract === 'factory'`)
+
+| Code | Constant | Meaning |
+|------|----------|---------|
+| 1 | `NotInitialized` | Factory hasn't been initialized |
+| 2 | `InvalidDeposit` | deposit ≤ 0 |
+| 3 | `InvalidRate` | rate_per_sec ≤ 0 |
+| 4 | `InvalidTimeRange` | end_time ≤ start_time |
+| 5 | `InsufficientDeposit` | Deposit too small for the rate/duration |
+| 6 | `BackdatedStream` | start_time is in the past |
+| 7 | `AlreadyInitialized` | Factory has already been initialized |
+| 8 | `RateExceedsMax` | rate_per_sec exceeds governor's max_rate_per_second |
+| 9 | `DurationTooShort` | Duration below governor's min_duration_seconds |
+| 10 | `ArithmeticOverflow` | Integer overflow validating deposit against duration |
+
+**`GovernorErrorCode`** (`err.contract === 'governor'`)
+
+| Code | Constant | Meaning |
+|------|----------|---------|
+| 1 | `NotAuthorized` | Caller is not the current authority |
+| 2 | `InvalidParam` | Setter argument failed validation |
+| 3 | `AlreadyInitialized` | Governor has already been initialized |
 
 ---
 

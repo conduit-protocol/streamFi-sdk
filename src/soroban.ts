@@ -120,6 +120,23 @@ export async function simulateReadOnly(
   return xdr.ScVal.fromXDR(result.result.retval.toXDR());
 }
 
+/**
+ * Query a token contract's `decimals()` — part of the standard Stellar
+ * Asset / SEP-41 token interface every `CreateStreamParams.token` must
+ * implement. Callers must not assume 7 decimals (the native XLM/Stellar
+ * Asset Contract default) for arbitrary token addresses.
+ */
+export async function getTokenDecimals(
+  rpcUrl:     string,
+  passphrase: string,
+  callerAddr: string,
+  tokenId:    string,
+): Promise<number> {
+  const tx  = await buildContractCallTx(rpcUrl, passphrase, callerAddr, tokenId, 'decimals', []);
+  const val = await simulateReadOnly(rpcUrl, passphrase, tx);
+  return val.u32();
+}
+
 /** Convert an ScVal i128 to bigint */
 export function scValToI128(val: xdr.ScVal): bigint {
   const i128 = val.i128();

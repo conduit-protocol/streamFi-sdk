@@ -4,6 +4,7 @@
 
 import { Address, xdr } from '@stellar/stellar-sdk';
 import type { ConduitConfig, GovernorConfig } from './types/index.js';
+import { ZERO_ADDR } from './constants.js';
 import {
   buildContractCallTx,
   simulateReadOnly,
@@ -13,29 +14,34 @@ import {
   DEFAULT_RPC,
 } from './soroban.js';
 
-const DEFAULT_GOVERNOR: Record<string, string> = {
-  mainnet: 'CDRIP_GOVERNOR_MAINNET_PLACEHOLDER',
-  testnet: 'CDRIP_GOVERNOR_TESTNET_PLACEHOLDER',
-  local:   'CDRIP_GOVERNOR_LOCAL_PLACEHOLDER',
-};
-
-const ZERO_ADDR = 'GAAZI4TCR3TY5OJHCTJC2A4QSY6CJWJH5IAJTGKIN2ER7LBNVKOCCWN';
-
 export class GovernorModule {
-  private readonly rpcUrl:     string;
-  private readonly passphrase: string;
-  private readonly governorId: string;
-  private readonly callerAddr: string;
+  private readonly rpcUrl:      string;
+  private readonly passphrase:  string;
+  private readonly governorId: string | undefined;
+  private readonly callerAddr:  string;
+  private readonly network:     ConduitConfig['network'];
 
+  // Unlike FactoryModule (a hard prerequisite for virtually all StreamsModule
+  // methods), GovernorModule is orthogonal to stream operations — a caller
+  // using only client.streams shouldn't be forced to supply a
+  // governorAddress they'll never touch. ConduitClient constructs this
+  // module unconditionally, so the missing-address check has to be deferred
+  // to first actual use (getConfig()) rather than thrown in the constructor.
   constructor(cfg: ConduitConfig) {
-    this.rpcUrl     = cfg.rpcUrl         ?? DEFAULT_RPC[cfg.network];
+    this.rpcUrl     = cfg.rpcUrl ?? DEFAULT_RPC[cfg.network];
     this.passphrase = NETWORK_PASSPHRASE[cfg.network];
-    this.governorId = cfg.governorAddress ?? DEFAULT_GOVERNOR[cfg.network] ?? '';
+    this.governorId = cfg.governorAddress;
     this.callerAddr = cfg.keypair?.publicKey() ?? ZERO_ADDR;
+    this.network    = cfg.network;
   }
 
   /** Fetch the current protocol config from the DripGovernor contract. */
   async getConfig(): Promise<GovernorConfig> {
+    if (!this.governorId) {
+      throw new Error(
+        `ConduitConfig.governorAddress is required (no default DripGovernor is known for network "${this.network}").`,
+      );
+    }
     const tx  = await buildContractCallTx(
       this.rpcUrl, this.passphrase, this.callerAddr,
       this.governorId, 'config', [],
@@ -57,5 +63,6 @@ function parseGovernorConfig(val: xdr.ScVal): GovernorConfig {
     feeRecipient:       m['fee_recipient'] ? Address.fromScVal(m['fee_recipient']).toString() : '',
     minDurationSeconds: m['min_duration_seconds'] ? Number(scValToU64(m['min_duration_seconds'])) : 0,
     maxRatePerSecond:   m['max_rate_per_second'] ? scValToI128(m['max_rate_per_second']) : 0n,
+    factoryAddress:     m['factory_address'] ? Address.fromScVal(m['factory_address']).toString() : '',
   };
 }
