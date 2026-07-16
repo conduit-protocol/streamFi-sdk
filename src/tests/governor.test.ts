@@ -1,5 +1,5 @@
 import { describe, it, expect, vi, beforeEach } from 'vitest';
-import { xdr as _xdr } from '@stellar/stellar-sdk';
+import { Address, Keypair, StrKey, xdr as _xdr } from '@stellar/stellar-sdk';
 import type { ConduitConfig } from '../types/index.js';
 
 // ── Hoist mocks so they can be referenced inside vi.mock() factories ──────────
@@ -30,24 +30,16 @@ vi.mock('../soroban.js', () => ({
   },
 }));
 
-vi.mock('@stellar/stellar-sdk', async () => {
-  const actual = await vi.importActual<typeof import('@stellar/stellar-sdk')>('@stellar/stellar-sdk');
-
-  class MockAddress {
-    constructor(private readonly addr: string) {}
-    toScVal() { return actual.xdr.ScVal.scvVoid(); }
-    toString() { return this.addr; }
-    static fromScVal(_v: unknown) { return new MockAddress(FEE_RECIPIENT); }
-    static fromString(s: string)  { return new MockAddress(s); }
-  }
-
-  return { ...actual, Address: MockAddress };
-});
+// Real Address is used (not mocked) so fee_recipient and factory_address —
+// two different address fields on the same GovernorConfig — decode to their
+// actual distinct values rather than both resolving to whatever a mock
+// hardcodes.
 
 // ── Helpers ───────────────────────────────────────────────────────────────────
 
 const GOVERNOR_ADDR = 'CBQHNAXSI55GX2GN6D67GK7BHVPSLJUGZQEU7WJ5LKR5PNUCGLIMAO4K';
-const FEE_RECIPIENT  = 'GAAZI4TCR3TY5OJHCTJC2A4QSY6CJWJH5IAJTGKIN2ER7LBNVKOCCWN';
+const FEE_RECIPIENT  = Keypair.random().publicKey();
+const FACTORY_ADDR   = StrKey.encodeContract(Buffer.alloc(32, 9));
 
 function cfg(withGovernorAddress = true): ConduitConfig {
   const base: ConduitConfig = {
@@ -112,15 +104,29 @@ describe('GovernorModule — getConfig()', () => {
     const { GovernorModule } = await import('../governor.js');
     mockSimulate.mockResolvedValueOnce(scvMap({
       fee_bps:              u32(30),
-      fee_recipient:        _xdr.ScVal.scvVoid(),
+      fee_recipient:        new Address(FEE_RECIPIENT).toScVal(),
       min_duration_seconds: u64(3_600n),
       max_rate_per_second:  i128(1_000_000_000_000_000n),
+      factory_address:      new Address(FACTORY_ADDR).toScVal(),
     }));
 
     const config = await new GovernorModule(cfg()).getConfig();
     expect(config.feeBps).toBe(30);
     expect(config.minDurationSeconds).toBe(3_600);
     expect(config.maxRatePerSecond).toBe(1_000_000_000_000_000n);
+  });
+
+  it('parses fee_recipient and factory_address as their own distinct addresses', async () => {
+    const { GovernorModule } = await import('../governor.js');
+    mockSimulate.mockResolvedValueOnce(scvMap({
+      fee_recipient:   new Address(FEE_RECIPIENT).toScVal(),
+      factory_address: new Address(FACTORY_ADDR).toScVal(),
+    }));
+
+    const config = await new GovernorModule(cfg()).getConfig();
+    expect(config.feeRecipient).toBe(FEE_RECIPIENT);
+    expect(config.factoryAddress).toBe(FACTORY_ADDR);
+    expect(config.feeRecipient).not.toBe(config.factoryAddress);
   });
 
   it('defaults missing fields to falsy/zero values rather than throwing', async () => {
@@ -132,5 +138,6 @@ describe('GovernorModule — getConfig()', () => {
     expect(config.minDurationSeconds).toBe(0);
     expect(config.maxRatePerSecond).toBe(0n);
     expect(config.feeRecipient).toBe('');
+    expect(config.factoryAddress).toBe('');
   });
 });

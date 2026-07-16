@@ -278,6 +278,7 @@ const config = await client.governor.config();
 //   feeRecipient:         string,
 //   minDurationSeconds:   number,
 //   maxRatePerSecond:     bigint,
+//   factoryAddress:       string,
 // }
 ```
 

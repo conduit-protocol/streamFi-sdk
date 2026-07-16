@@ -71,6 +71,7 @@ export interface GovernorConfig {
   feeRecipient:        string;
   minDurationSeconds:  number;
   maxRatePerSecond:    bigint;
+  factoryAddress:      string;
 }
 
 // ── Events ──────────────────────────────────────────────────────────────────
