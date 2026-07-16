@@ -9,9 +9,12 @@ vi.mock('@stellar/stellar-sdk', async () => {
     ...actual,
     SorobanRpc: {
       ...actual.SorobanRpc,
-      Server: vi.fn().mockImplementation(() => ({
-        getEvents: mockGetEvents,
-      })),
+      // A plain class, not vi.fn().mockImplementation(() => ({...})) —
+      // Vitest 4's spy wrapper no longer supports `new`-invoking an
+      // arrow-function implementation and returning its object as the instance.
+      Server: class {
+        getEvents = mockGetEvents;
+      },
     },
   };
 });

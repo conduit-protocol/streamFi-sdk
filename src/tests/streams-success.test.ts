@@ -24,9 +24,12 @@ const {
 }));
 
 vi.mock('../factory.js', () => ({
-  FactoryModule: vi.fn().mockImplementation(() => ({
-    streamAddress: mockStreamAddress,
-  })),
+  // A plain class, not vi.fn().mockImplementation(() => ({...})) — Vitest 4's
+  // spy wrapper no longer supports `new`-invoking an arrow-function
+  // implementation and returning its object as the instance.
+  FactoryModule: class {
+    streamAddress = mockStreamAddress;
+  },
 }));
 
 vi.mock('../soroban.js', async () => {
@@ -44,11 +47,11 @@ vi.mock('@stellar/stellar-sdk', async () => {
     ...actual,
     SorobanRpc: {
       ...actual.SorobanRpc,
-      Server: vi.fn().mockImplementation(() => ({
-        simulateTransaction: mockSimulate,
-        sendTransaction:     mockSend,
-        getTransaction:      mockGetTransaction,
-      })),
+      Server: class {
+        simulateTransaction = mockSimulate;
+        sendTransaction     = mockSend;
+        getTransaction      = mockGetTransaction;
+      },
       assembleTransaction: mockAssemble,
     },
   };

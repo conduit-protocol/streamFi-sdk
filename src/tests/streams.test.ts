@@ -11,12 +11,15 @@ const mockStreamsByRecipient = vi.fn();
 const mockStreamCount = vi.fn();
 
 vi.mock('../factory.js', () => ({
-  FactoryModule: vi.fn().mockImplementation(() => ({
-    streamAddress:       mockStreamAddress,
-    streamsBySender:     mockStreamsBySender,
-    streamsByRecipient:  mockStreamsByRecipient,
-    streamCount:         mockStreamCount,
-  })),
+  // A plain class, not vi.fn().mockImplementation(() => ({...})) — Vitest 4's
+  // spy wrapper no longer supports `new`-invoking an arrow-function
+  // implementation and returning its object as the instance.
+  FactoryModule: class {
+    streamAddress      = mockStreamAddress;
+    streamsBySender    = mockStreamsBySender;
+    streamsByRecipient = mockStreamsByRecipient;
+    streamCount        = mockStreamCount;
+  },
 }));
 
 vi.mock('../soroban.js', async () => {
