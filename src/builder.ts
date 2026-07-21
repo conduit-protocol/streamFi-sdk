@@ -64,7 +64,7 @@ export class StreamBuilder {
 }
 
 export class ConduitBatcher {
-  static execute(streams: any[]) {
+  static execute(streams: Record<string, unknown>[]) {
     console.log(`Bundling ${streams.length} stream operations into a single transaction...`);
     // Mock Soroban XDR assembly
     return {
