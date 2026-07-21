@@ -557,6 +557,14 @@ See [`CONTRIBUTING.md`](./CONTRIBUTING.md). For the module map and call flow, se
 
 ---
 
+## Configuration
+
+The RoomManager limits can be configured via environment variables.
+
+* `MAX_ROOM_SIZE`: Maximum number of clients allowed in a single room (default: Infinity).
+
+---
+
 ## License
 
 MIT — see [`LICENSE`](./LICENSE).
