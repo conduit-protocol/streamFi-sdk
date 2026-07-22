@@ -109,6 +109,75 @@ client.setWallet(walletAdapter);
 
 ---
 
+## Fluent Builder API
+
+The SDK provides a Fluent Builder API (`StreamBuilder` and `ConduitBatcher`) to construct and batch stream operations. This is useful for building complex transaction configurations or compiling multiple stream deployments into a single batch transaction.
+
+### Creating a Stream
+
+```typescript
+import { StreamBuilder } from '@conduit-protocol/sdk';
+
+const stream = new StreamBuilder()
+  .token('USDC')
+  .sender('GABC...SENDER')
+  .recipient('GXYZ...RECIPIENT')
+  .amount(1000)
+  .build();
+
+console.log(stream);
+// Output:
+// {
+//   token: 'USDC',
+//   sender: 'GABC...SENDER',
+//   recipient: 'GXYZ...RECIPIENT',
+//   amount: 1000
+// }
+```
+
+### Chaining Methods
+
+The `StreamBuilder` class exposes the following chainable methods:
+
+| Method | Argument Type | Description |
+|--------|---------------|-------------|
+| `token(address)` | `string` | Sets the Soroban token contract address. |
+| `sender(address)` | `string` | Sets the sender address who funds the stream. |
+| `recipient(address)` | `string` | Sets the recipient address receiving the stream. |
+| `amount(val)` | `number` | Sets the deposit amount (in the token's smallest unit). |
+| `build()` | — | Validates the fields and returns the stream configuration. Throws an error if any required field is missing. |
+
+### Batching Streams
+
+You can bundle multiple stream operations together and compile them using `ConduitBatcher`:
+
+```typescript
+import { StreamBuilder, ConduitBatcher } from '@conduit-protocol/sdk';
+
+const stream1 = new StreamBuilder()
+  .token('USDC')
+  .sender('GABC...SENDER')
+  .recipient('GXYZ...RECIPIENT_A')
+  .amount(500)
+  .build();
+
+const stream2 = new StreamBuilder()
+  .token('native')
+  .sender('GABC...SENDER')
+  .recipient('GXYZ...RECIPIENT_B')
+  .amount(1500)
+  .build();
+
+// Execute batch operation
+const result = ConduitBatcher.execute([stream1, stream2]);
+
+console.log('Batch Success:', result.success);
+console.log('Operations:', result.operations);
+console.log('Transaction XDR:', result.xdr);
+```
+
+---
+
 ## API Reference
 
 ### `client.streams`
@@ -541,6 +610,7 @@ npm run lint
 conduit-sdk/
 ├── src/
 │   ├── client.ts            # ConduitClient — main entry point
+│   ├── builder.ts           # Fluent builder and batcher for streams
 │   ├── streams.ts           # StreamsModule — all stream operations
 │   ├── factory.ts           # FactoryModule — factory queries
 │   ├── governor.ts          # GovernorModule — config reads
@@ -556,6 +626,7 @@ conduit-sdk/
 │       └── index.ts         # All exported TypeScript types
 ├── examples/
 │   ├── create-stream.ts     # End-to-end create example
+│   ├── fluent-builder.ts    # Fluent Builder and batcher example
 │   ├── withdraw.ts          # Recipient withdraw example
 │   └── list-streams.ts      # List all streams for an address
 ├── docs/

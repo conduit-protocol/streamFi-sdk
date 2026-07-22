@@ -3,6 +3,7 @@
  */
 
 import { SorobanRpc, nativeToScVal, xdr, Address, Transaction } from '@stellar/stellar-sdk';
+import type { Signer } from './signer.js';
 import type {
   ConduitConfig,
   CreateStreamParams,
@@ -38,7 +39,7 @@ export class StreamsModule {
   constructor(private readonly config: ConduitConfig) {
     this.rpcUrl     = config.rpcUrl ?? DEFAULT_RPC[config.network];
     this.passphrase = NETWORK_PASSPHRASE[config.network];
-    this.callerAddr = config.keypair?.publicKey() ?? ZERO_ADDR;
+    this.callerAddr = this._signerPublicKey();
     this._factory   = new FactoryModule(config);
 
     if (config.wallet) {
@@ -53,6 +54,20 @@ export class StreamsModule {
    */
   setWallet(wallet: WalletAdapter): void {
     this.activeWallet = wallet;
+  }
+
+  private _signer(): Signer | null {
+    return this.config.signer ?? null;
+  }
+
+  private _signerPublicKey(): string {
+    if (this.activeWallet) {
+      const pk = this.activeWallet.getPublicKey();
+      if (typeof pk === 'string') return pk;
+    }
+    if (this.config.signer) return this.config.signer.publicKey();
+    if (this.config.keypair) return this.config.keypair.publicKey();
+    return ZERO_ADDR;
   }
 
   /**
@@ -239,8 +254,8 @@ export class StreamsModule {
   // ── Private helpers ──────────────────────────────────────────────────────
 
   private _ensureCanMutate(): void {
-    if (!this.activeWallet) {
-      throw new Error('keypair or wallet adapter is required for mutating operations');
+    if (!this.activeWallet && !this.config.signer && !this.config.keypair) {
+      throw new Error('keypair, wallet adapter, or signer is required for mutating operations');
     }
   }
 
@@ -248,24 +263,34 @@ export class StreamsModule {
     if (this.activeWallet) {
       return this.activeWallet.getPublicKey();
     }
+    if (this.config.signer) {
+      return this.config.signer.publicKey();
+    }
     if (this.config.keypair) {
       return this.config.keypair.publicKey();
     }
-    throw new Error('keypair or wallet adapter is required for mutating operations');
+    throw new Error('keypair, wallet adapter, or signer is required for mutating operations');
   }
 
   private async _signTx(tx: Transaction): Promise<Transaction> {
-    if (!this.activeWallet) {
-      throw new Error('keypair or wallet adapter is required for mutating operations');
+    if (this.activeWallet) {
+      const signed = await this.activeWallet.signTransaction(tx, {
+        networkPassphrase: this.passphrase,
+      });
+      if (typeof signed === 'string') {
+        return new Transaction(signed, this.passphrase);
+      }
+      return signed;
     }
-    const signed = await this.activeWallet.signTransaction(tx, {
-      networkPassphrase: this.passphrase,
-    });
-
-    if (typeof signed === 'string') {
-      return new Transaction(signed, this.passphrase);
+    if (this.config.signer) {
+      await this.config.signer.sign(tx);
+      return tx;
     }
-    return signed;
+    if (this.config.keypair) {
+      tx.sign(this.config.keypair);
+      return tx;
+    }
+    throw new Error('keypair, wallet adapter, or signer is required for mutating operations');
   }
 
   private _server(): SorobanRpc.Server {

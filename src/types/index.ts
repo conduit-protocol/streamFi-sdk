@@ -1,3 +1,5 @@
+import type { Signer } from '../signer.js';
+
 export type Network = 'mainnet' | 'testnet' | 'local';
 
 export interface ConduitConfig {
@@ -7,6 +9,8 @@ export interface ConduitConfig {
   keypair?: import('@stellar/stellar-sdk').Keypair;
   /** Custom wallet adapter (e.g. WalletConnectAdapter) for browser/mobile wallet signing */
   wallet?: import('../adapters/types.js').WalletAdapter;
+  /** Custom signer plugin (KMS/HSM). Takes precedence over keypair when set. */
+  signer?: Signer;
   /** Override default Soroban RPC URL */
   rpcUrl?: string;
   /** Override deployed DripFactory contract ID */

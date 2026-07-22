@@ -9,12 +9,12 @@ import {
   SorobanRpc,
   TransactionBuilder,
   Networks,
-  Keypair,
   Contract,
   xdr,
   BASE_FEE,
 } from '@stellar/stellar-sdk';
 import type { Network } from './types/index.js';
+import type { Signer } from './signer.js';
 
 export const DEFAULT_RPC: Record<Network, string> = {
   mainnet: 'https://soroban-mainnet.stellar.org',
@@ -62,7 +62,7 @@ export async function buildContractCallTx(
 export async function invokeContract(
   rpcUrl:     string,
   passphrase: string,
-  keypair:    Keypair,
+  signer:     Signer,
   tx:         ReturnType<TransactionBuilder['build']>,
 ): Promise<string> {
   const server = new SorobanRpc.Server(rpcUrl, { allowHttp: rpcUrl.startsWith('http://') });
@@ -77,7 +77,7 @@ export async function invokeContract(
   const assembled = SorobanRpc.assembleTransaction(tx, simResult).build();
 
   // Sign
-  assembled.sign(keypair);
+  await signer.sign(assembled);
 
   // Submit
   const sent = await server.sendTransaction(assembled);
