@@ -1,5 +1,5 @@
 import { describe, it, expect, vi, beforeEach } from 'vitest';
-import { Keypair } from '@stellar/stellar-sdk';
+import { Keypair, xdr } from '@stellar/stellar-sdk';
 import { ConduitError, StreamErrorCode } from '../errors.js';
 import type { ConduitConfig } from '../types/index.js';
 
@@ -9,6 +9,7 @@ const mockStreamAddress = vi.fn();
 const mockStreamsBySender = vi.fn();
 const mockStreamsByRecipient = vi.fn();
 const mockStreamCount = vi.fn();
+const mockSimulate = vi.fn();
 
 vi.mock('../factory.js', () => ({
   // A plain class, not vi.fn().mockImplementation(() => ({...})) — Vitest 4's
@@ -27,6 +28,19 @@ vi.mock('../soroban.js', async () => {
   return {
     ...actual,
     buildContractCallTx: vi.fn().mockResolvedValue({ _stub: 'tx' }),
+  };
+});
+
+vi.mock('@stellar/stellar-sdk', async () => {
+  const actual = await vi.importActual<typeof import('@stellar/stellar-sdk')>('@stellar/stellar-sdk');
+  return {
+    ...actual,
+    SorobanRpc: {
+      ...actual.SorobanRpc,
+      Server: class {
+        simulateTransaction = mockSimulate;
+      },
+    },
   };
 });
 
@@ -128,18 +142,27 @@ describe('StreamsModule — list()', () => {
   beforeEach(() => {
     mockStreamsBySender.mockReset();
     mockStreamsByRecipient.mockReset();
+    mockStreamCount.mockReset().mockResolvedValue(0n);
+    mockStreamAddress.mockReset();
+    mockSimulate.mockReset();
   });
 
-  it('returns empty array when factory has no streams', async () => {
+  it('returns empty PaginatedStreams when factory has no streams', async () => {
     mockStreamsBySender.mockResolvedValue([]);
+    mockStreamCount.mockResolvedValue(0n);
     const { StreamsModule } = await import('../streams.js');
     const sdk = new StreamsModule(makeConfig(false));
     const result = await sdk.list({ sender: 'GAAZI4TCR3TY5OJHCTJC2A4QSY6CJWJH5IAJTGKIN2ER7LBNVKOCCWN' });
-    expect(result).toEqual([]);
+    expect(result.streams).toEqual([]);
+    expect(result.hasNextPage).toBe(false);
+    expect(result.totalCount).toBe(0n);
+    expect(result.offset).toBe(0);
+    expect(result.limit).toBe(20);
   });
 
   it('calls streamsBySender when sender is given', async () => {
     mockStreamsBySender.mockResolvedValue([]);
+    mockStreamCount.mockResolvedValue(0n);
     const { StreamsModule } = await import('../streams.js');
     const sdk = new StreamsModule(makeConfig(false));
     await sdk.list({ sender: 'GAAZI4TCR3TY5OJHCTJC2A4QSY6CJWJH5IAJTGKIN2ER7LBNVKOCCWN', limit: 5 });
@@ -150,6 +173,7 @@ describe('StreamsModule — list()', () => {
 
   it('calls streamsByRecipient when recipient is given', async () => {
     mockStreamsByRecipient.mockResolvedValue([]);
+    mockStreamCount.mockResolvedValue(0n);
     const { StreamsModule } = await import('../streams.js');
     const sdk = new StreamsModule(makeConfig(false));
     await sdk.list({ recipient: 'GBBD47IF6LWK7P7MDEVSCWR7DPUWV3NY3DTQEVFL4NAT4AQH3ZLLFLA5', offset: 10, limit: 10 });
@@ -160,12 +184,56 @@ describe('StreamsModule — list()', () => {
 
   it('uses default offset=0 limit=20', async () => {
     mockStreamsBySender.mockResolvedValue([]);
+    mockStreamCount.mockResolvedValue(0n);
     const { StreamsModule } = await import('../streams.js');
     const sdk = new StreamsModule(makeConfig(false));
     await sdk.list({ sender: 'GAAZI4TCR3TY5OJHCTJC2A4QSY6CJWJH5IAJTGKIN2ER7LBNVKOCCWN' });
     expect(mockStreamsBySender).toHaveBeenCalledWith(
       expect.any(String), 0, 20,
     );
+  });
+
+  it('returns hasNextPage=true when there are more results', async () => {
+    mockStreamsBySender.mockResolvedValue([1n, 2n, 3n]);
+    mockStreamCount.mockResolvedValue(50n);
+    // Mock get() to return minimal valid StreamInfo
+    mockStreamAddress.mockResolvedValue('CCWAMYJME27OHTPKVSV252YRPXEO4BSKBHVLQ7ML3OWYNMB5RQEVHSM');
+    mockSimulate.mockResolvedValue({ result: { retval: xdr.ScVal.scvMap([]) } });
+    const { StreamsModule } = await import('../streams.js');
+    const sdk = new StreamsModule(makeConfig(false));
+    const result = await sdk.list({
+      sender: 'GAAZI4TCR3TY5OJHCTJC2A4QSY6CJWJH5IAJTGKIN2ER7LBNVKOCCWN',
+      offset: 0,
+      limit: 20,
+    });
+    expect(result.hasNextPage).toBe(true);
+    expect(result.totalCount).toBe(50n);
+    expect(result.streams).toHaveLength(3);
+  });
+
+  it('returns hasNextPage=false when on the last page', async () => {
+    mockStreamsBySender.mockResolvedValue([1n, 2n]);
+    mockStreamCount.mockResolvedValue(12n);
+    mockStreamAddress.mockResolvedValue('CCWAMYJME27OHTPKVSV252YRPXEO4BSKBHVLQ7ML3OWYNMB5RQEVHSM');
+    mockSimulate.mockResolvedValue({ result: { retval: xdr.ScVal.scvMap([]) } });
+    const { StreamsModule } = await import('../streams.js');
+    const sdk = new StreamsModule(makeConfig(false));
+    const result = await sdk.list({
+      sender: 'GAAZI4TCR3TY5OJHCTJC2A4QSY6CJWJH5IAJTGKIN2ER7LBNVKOCCWN',
+      offset: 10,
+      limit: 20,
+    });
+    expect(result.hasNextPage).toBe(false);
+    expect(result.totalCount).toBe(12n);
+  });
+
+  it('calls streamCount in parallel with streamsBySender', async () => {
+    mockStreamsBySender.mockResolvedValue([]);
+    mockStreamCount.mockResolvedValue(5n);
+    const { StreamsModule } = await import('../streams.js');
+    const sdk = new StreamsModule(makeConfig(false));
+    await sdk.list({ sender: 'GAAZI4TCR3TY5OJHCTJC2A4QSY6CJWJH5IAJTGKIN2ER7LBNVKOCCWN' });
+    expect(mockStreamCount).toHaveBeenCalled();
   });
 });
 

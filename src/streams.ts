@@ -9,6 +9,7 @@ import type {
   CreateStreamParams,
   CreateStreamResult,
   ListStreamsParams,
+  PaginatedStreams,
   StreamEventHandlers,
   StreamInfo,
   Subscription,
@@ -219,18 +220,48 @@ export class StreamsModule {
   }
 
   /**
-   * List streams by sender or recipient.
-   * Resolves full StreamInfo for each ID — use sparingly with large sets.
+   * List streams by sender or recipient with pagination metadata.
+   * Returns a page of StreamInfo along with hasNextPage and totalCount so
+   * the frontend can implement infinite scrolling.
    */
-  async list(params: ListStreamsParams): Promise<StreamInfo[]> {
+  async list(params: ListStreamsParams): Promise<PaginatedStreams> {
     const { sender, recipient, offset = 0, limit = 20 } = params;
     let ids: bigint[] = [];
+
+    // Fetch stream IDs and total count in parallel — totalCount comes from
+    // stream_count() on the factory, which is a cheap Soroban simulate.
     if (sender) {
-      ids = await this._factory.streamsBySender(sender, offset, limit);
+      const [senderIds, totalCount] = await Promise.all([
+        this._factory.streamsBySender(sender, offset, limit),
+        this._factory.streamCount(),
+      ]);
+      ids = senderIds;
+      const streams = await Promise.all(ids.map(id => this.get(id)));
+      return {
+        streams,
+        hasNextPage: BigInt(offset) + BigInt(limit) < totalCount,
+        totalCount,
+        offset,
+        limit,
+      };
     } else if (recipient) {
-      ids = await this._factory.streamsByRecipient(recipient, offset, limit);
+      const [recipientIds, totalCount] = await Promise.all([
+        this._factory.streamsByRecipient(recipient, offset, limit),
+        this._factory.streamCount(),
+      ]);
+      ids = recipientIds;
+      const streams = await Promise.all(ids.map(id => this.get(id)));
+      return {
+        streams,
+        hasNextPage: BigInt(offset) + BigInt(limit) < totalCount,
+        totalCount,
+        offset,
+        limit,
+      };
     }
-    return Promise.all(ids.map(id => this.get(id)));
+
+    // Neither sender nor recipient — return empty page
+    return { streams: [], hasNextPage: false, totalCount: 0n, offset, limit };
   }
 
   /** Subscribe to on-chain stream events via polling. Returns an async subscription handle. */

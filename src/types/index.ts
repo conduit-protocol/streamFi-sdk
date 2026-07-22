@@ -70,6 +70,19 @@ export interface ListStreamsParams {
   limit?:     number;
 }
 
+export interface PaginatedStreams {
+  /** The stream info results for this page */
+  streams:    StreamInfo[];
+  /** Whether there are more results after this page */
+  hasNextPage: boolean;
+  /** Total number of stream IDs the factory tracks for this address */
+  totalCount:  bigint;
+  /** The offset used for this page */
+  offset:      number;
+  /** The limit used for this page */
+  limit:       number;
+}
+
 export interface GovernorConfig {
   feeBps:              number;
   feeRecipient:        string;
