@@ -5,6 +5,7 @@ import {
   calculateRate,
   streamProgress,
   withdrawableLocal,
+  bigintSafeStringify,
 } from '../utils.js';
 import type { StreamInfo } from '../types/index.js';
 
@@ -169,5 +170,66 @@ describe('withdrawableLocal', () => {
     const rate = 100n;
     const s    = makeStream({ ratePerSecond: rate, startTime: now - 1000, withdrawn: 50_000n });
     expect(withdrawableLocal(s, now)).toBe(rate * 1000n - 50_000n);
+  });
+});
+
+// ── bigintSafeStringify ─────────────────────────────────────────────────────
+
+describe('bigintSafeStringify', () => {
+  it('converts a top-level bigint to string', () => {
+    expect(bigintSafeStringify(123n)).toBe('123');
+  });
+
+  it('leaves primitives untouched', () => {
+    expect(bigintSafeStringify(42)).toBe(42);
+    expect(bigintSafeStringify('hello')).toBe('hello');
+    expect(bigintSafeStringify(true)).toBe(true);
+    expect(bigintSafeStringify(null)).toBe(null);
+    expect(bigintSafeStringify(undefined)).toBe(undefined);
+  });
+
+  it('converts bigint values inside a plain object', () => {
+    const input = { rate: 9007199254740993n, name: 'stream' };
+    const result = bigintSafeStringify(input);
+    expect(result).toEqual({ rate: '9007199254740993', name: 'stream' });
+  });
+
+  it('converts bigint values inside nested objects', () => {
+    const input = {
+      a: { b: { c: 100n } },
+      d: [1n, 2n, 3n],
+    };
+    const result = bigintSafeStringify(input);
+    expect(result).toEqual({
+      a: { b: { c: '100' } },
+      d: ['1', '2', '3'],
+    });
+  });
+
+  it('preserves non-object primitives untouched', () => {
+    const input = [1, 'two', null, undefined, 3.14];
+    expect(bigintSafeStringify(input)).toEqual([1, 'two', null, undefined, 3.14]);
+  });
+
+  it('handles a realistic stream payload with BigInt rate', () => {
+    const payload = {
+      token: 'CD...',
+      sender: 'GA...',
+      recipient: 'GB...',
+      amount: 1000,
+      ratePerSecond: BigInt('9007199254740993'),
+      deposit: 50000n,
+    };
+    const result = bigintSafeStringify(payload);
+    expect(result.ratePerSecond).toBe('9007199254740993');
+    expect(result.deposit).toBe('50000');
+    // Non-bigint fields are unchanged
+    expect(result.token).toBe('CD...');
+    expect(result.amount).toBe(1000);
+
+    // The result must survive JSON.stringify without throwing
+    const json = JSON.parse(JSON.stringify(result));
+    expect(json.ratePerSecond).toBe('9007199254740993');
+    expect(json.deposit).toBe('50000');
   });
 });
