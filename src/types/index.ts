@@ -1,3 +1,5 @@
+import type { Signer } from '../signer.js';
+
 export type Network = 'mainnet' | 'testnet' | 'local';
 
 export interface ConduitConfig {
@@ -5,6 +7,8 @@ export interface ConduitConfig {
   network: Network;
   /** Signing keypair — required for mutating operations */
   keypair?: import('@stellar/stellar-sdk').Keypair;
+  /** Custom signer plugin (KMS/HSM). Takes precedence over keypair when set. */
+  signer?: Signer;
   /** Override default Soroban RPC URL */
   rpcUrl?: string;
   /** Override deployed DripFactory contract ID */
