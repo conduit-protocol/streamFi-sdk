@@ -1,4 +1,5 @@
 export { ConduitClient } from './client.js';
+export { StreamBuilder, ConduitBatcher } from './builder.js';
 export {
   ConduitError,
   StreamErrorCode,
