@@ -1,5 +1,7 @@
 export { ConduitClient } from './client.js';
 export { StreamBuilder, ConduitBatcher } from './builder.js';
+export { KeypairSigner } from './signer.js';
+export type { Signer } from './signer.js';
 export {
   ConduitError,
   StreamErrorCode,

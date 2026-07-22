@@ -3,6 +3,7 @@
  */
 
 import { SorobanRpc, nativeToScVal, xdr, Address, Transaction } from '@stellar/stellar-sdk';
+import type { Signer } from './signer.js';
 import type {
   ConduitConfig,
   CreateStreamParams,
@@ -35,8 +36,28 @@ export class StreamsModule {
   constructor(private readonly config: ConduitConfig) {
     this.rpcUrl     = config.rpcUrl ?? DEFAULT_RPC[config.network];
     this.passphrase = NETWORK_PASSPHRASE[config.network];
-    this.callerAddr = config.keypair?.publicKey() ?? ZERO_ADDR;
+    this.callerAddr = this._signerPublicKey();
     this._factory   = new FactoryModule(config);
+  }
+
+  private _signer(): Signer | null {
+    return this.config.signer ?? null;
+  }
+
+  private _signerPublicKey(): string {
+    if (this.config.signer) return this.config.signer.publicKey();
+    if (this.config.keypair) return this.config.keypair.publicKey();
+    return ZERO_ADDR;
+  }
+
+  private async _applySign(tx: Transaction): Promise<void> {
+    if (this.config.signer) {
+      await this.config.signer.sign(tx);
+    } else if (this.config.keypair) {
+      tx.sign(this.config.keypair);
+    } else {
+      throw new Error('No signer or keypair configured for mutating operations');
+    }
   }
 
   /**
@@ -46,8 +67,8 @@ export class StreamsModule {
    * then signs and submits the assembled transaction.
    */
   async create(params: CreateStreamParams): Promise<CreateStreamResult> {
-    if (!this.config.keypair) {
-      throw new Error('keypair is required for mutating operations');
+    if (!this.config.keypair && !this.config.signer) {
+      throw new Error('keypair or signer is required for mutating operations');
     }
 
     const {
@@ -60,7 +81,7 @@ export class StreamsModule {
       throw new Error('Either durationSeconds or ratePerSecond must be provided');
     }
 
-    const senderAddr = this.config.keypair.publicKey();
+    const senderAddr = this._signerPublicKey();
     const factoryId  = this.config.factoryAddress ?? '';
 
     // `token` is an arbitrary contract address (see CreateStreamParams) — it
@@ -97,7 +118,7 @@ export class StreamsModule {
     }
 
     const assembled = SorobanRpc.assembleTransaction(tx, sim).build();
-    assembled.sign(this.config.keypair);
+    await this._applySign(assembled);
     const { hash: txHash, returnValue } = await this._sendAndPoll(server, assembled);
 
     // create_stream returns the new stream ID (u64). Read it from the
@@ -134,7 +155,7 @@ export class StreamsModule {
 
   /** Withdraw tokens as the recipient. Defaults to full available balance. */
   async withdraw(streamId: bigint | string, amount?: bigint): Promise<string> {
-    if (!this.config.keypair) throw new Error('keypair required');
+    if (!this.config.keypair && !this.config.signer) throw new Error('keypair or signer required');
     const id  = BigInt(streamId);
     const qty = amount ?? await this.withdrawable(id);
     return this._invoke(await this._resolveAddr(id), 'withdraw', [
@@ -144,25 +165,25 @@ export class StreamsModule {
 
   /** Cancel the stream (sender only). Settles all balances atomically. */
   async cancel(streamId: bigint | string): Promise<string> {
-    if (!this.config.keypair) throw new Error('keypair required');
+    if (!this.config.keypair && !this.config.signer) throw new Error('keypair or signer required');
     return this._invoke(await this._resolveAddr(BigInt(streamId)), 'cancel', []);
   }
 
   /** Pause the stream (sender only). */
   async pause(streamId: bigint | string): Promise<string> {
-    if (!this.config.keypair) throw new Error('keypair required');
+    if (!this.config.keypair && !this.config.signer) throw new Error('keypair or signer required');
     return this._invoke(await this._resolveAddr(BigInt(streamId)), 'pause', []);
   }
 
   /** Resume a paused stream (sender only). Shifts start/end times forward. */
   async resume(streamId: bigint | string): Promise<string> {
-    if (!this.config.keypair) throw new Error('keypair required');
+    if (!this.config.keypair && !this.config.signer) throw new Error('keypair or signer required');
     return this._invoke(await this._resolveAddr(BigInt(streamId)), 'resume', []);
   }
 
   /** Deposit additional tokens into the stream (sender only). */
   async topUp(streamId: bigint | string, amount: bigint): Promise<string> {
-    if (!this.config.keypair) throw new Error('keypair required');
+    if (!this.config.keypair && !this.config.signer) throw new Error('keypair or signer required');
     return this._invoke(await this._resolveAddr(BigInt(streamId)), 'top_up', [
       nativeToScVal(amount, { type: 'i128' }),
     ]);
@@ -173,9 +194,9 @@ export class StreamsModule {
    * Returns the amount reclaimed (simulated before submission).
    */
   async clawback(streamId: bigint | string): Promise<bigint> {
-    if (!this.config.keypair) throw new Error('keypair required');
+    if (!this.config.keypair && !this.config.signer) throw new Error('keypair or signer required');
     const addr   = await this._resolveAddr(BigInt(streamId));
-    const caller = this.config.keypair.publicKey();
+    const caller = this._signerPublicKey();
     const tx     = await buildContractCallTx(this.rpcUrl, this.passphrase, caller, addr, 'clawback', []);
     const server = this._server();
     const sim    = await server.simulateTransaction(tx);
@@ -185,7 +206,7 @@ export class StreamsModule {
     }
 
     const assembled = SorobanRpc.assembleTransaction(tx, sim).build();
-    assembled.sign(this.config.keypair);
+    await this._applySign(assembled);
     const { hash, returnValue } = await this._sendAndPoll(server, assembled);
 
     // Read the reclaimed amount from the confirmed transaction, not the
@@ -259,15 +280,15 @@ export class StreamsModule {
 
   /** Simulate → assemble → sign → submit → poll. Returns txHash. */
   private async _invoke(contractId: string, method: string, args: xdr.ScVal[]): Promise<string> {
-    const keypair = this.config.keypair!;
-    const tx      = await buildContractCallTx(this.rpcUrl, this.passphrase, keypair.publicKey(), contractId, method, args);
+    const caller  = this._signerPublicKey();
+    const tx      = await buildContractCallTx(this.rpcUrl, this.passphrase, caller, contractId, method, args);
     const server  = this._server();
     const sim     = await server.simulateTransaction(tx);
     if (SorobanRpc.Api.isSimulationError(sim)) {
       throw ConduitError.fromSorobanMessage('stream', sim.error);
     }
     const assembled = SorobanRpc.assembleTransaction(tx, sim).build();
-    assembled.sign(keypair);
+    await this._applySign(assembled);
     const { hash } = await this._sendAndPoll(server, assembled);
     return hash;
   }
