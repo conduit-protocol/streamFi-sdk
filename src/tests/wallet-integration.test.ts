@@ -1,5 +1,5 @@
 import { describe, it, expect, vi } from 'vitest';
-import { Keypair, Transaction, TransactionBuilder, Networks, BASE_FEE, Account } from '@stellar/stellar-sdk';
+import { Keypair, Transaction, Networks } from '@stellar/stellar-sdk';
 import { ConduitClient } from '../client.js';
 import { WalletConnectAdapter } from '../adapters/walletconnect.js';
 import type { WalletAdapter } from '../adapters/types.js';
@@ -26,7 +26,7 @@ describe('ConduitClient WalletAdapter Integration', () => {
   it('allows dynamically attaching a wallet adapter via setWallet()', async () => {
     const keypair = Keypair.random();
     const mockClient = {
-      request: vi.fn().mockImplementation(async ({ request }) => {
+      request: vi.fn().mockImplementation(async ({ request }: { request: { xdr: string } }) => {
         const tx = new Transaction(request.xdr, Networks.TESTNET);
         tx.sign(keypair);
         return tx.toXDR();

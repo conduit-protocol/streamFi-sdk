@@ -8,6 +8,21 @@ export interface WalletConnectAppMetadata {
   icons: string[];
 }
 
+export interface WalletConnectSignClient {
+  connect?: (opts: unknown) => Promise<{ session?: WalletConnectSession; approval?: () => Promise<WalletConnectSession> }>;
+  disconnect?: (opts: unknown) => Promise<void>;
+  request?: (opts: unknown) => Promise<unknown>;
+  [key: string]: unknown;
+}
+
+export interface WalletConnectSession {
+  topic?: string;
+  account?: string;
+  namespaces?: Record<string, { accounts?: string[] }>;
+  accounts?: string[];
+  [key: string]: unknown;
+}
+
 export interface WalletConnectAdapterOptions {
   /** WalletConnect v2 Project ID */
   projectId?: string;
@@ -16,9 +31,9 @@ export interface WalletConnectAdapterOptions {
   /** DApp metadata for WalletConnect modal/handshake */
   metadata?: WalletConnectAppMetadata;
   /** Optional pre-existing WalletConnect SignClient or provider instance */
-  client?: any;
+  client?: WalletConnectSignClient | unknown;
   /** Optional active session object or mock session */
-  session?: any;
+  session?: WalletConnectSession | unknown;
 }
 
 /**
@@ -29,22 +44,22 @@ export class WalletConnectAdapter implements WalletAdapter {
   private readonly projectId?: string | undefined;
   private readonly chainId: string;
   private readonly metadata?: WalletConnectAppMetadata | undefined;
-  private client: any;
-  private session: any;
+  private client: WalletConnectSignClient | null;
+  private session: WalletConnectSession | null;
 
   constructor(options: WalletConnectAdapterOptions = {}) {
     this.projectId = options.projectId;
     this.chainId   = options.chainId ?? 'stellar:pubnet';
     this.metadata  = options.metadata;
-    this.client    = options.client ?? null;
-    this.session   = options.session ?? null;
+    this.client    = (options.client as WalletConnectSignClient) ?? null;
+    this.session   = (options.session as WalletConnectSession) ?? null;
   }
 
   /**
    * Set or update active session.
    */
-  setSession(session: any): void {
-    this.session = session;
+  setSession(session: WalletConnectSession | unknown): void {
+    this.session = (session as WalletConnectSession) ?? null;
   }
 
   /**
@@ -146,7 +161,10 @@ export class WalletConnectAdapter implements WalletAdapter {
       },
     });
 
-    const signedXdr = typeof result === 'string' ? result : (result?.signedXdr ?? result?.xdr ?? result);
+    const resRecord = result as Record<string, unknown> | string | undefined;
+    const signedXdr = typeof resRecord === 'string'
+      ? resRecord
+      : (resRecord?.['signedXdr'] ?? resRecord?.['xdr'] ?? resRecord);
 
     if (typeof signedXdr !== 'string') {
       throw new Error('WalletConnect response did not return valid signed XDR.');
@@ -175,8 +193,8 @@ export class WalletConnectAdapter implements WalletAdapter {
 
     // CAIP-10 accounts in namespaces
     const namespaces = this.session.namespaces;
-    if (namespaces && namespaces.stellar && Array.isArray(namespaces.stellar.accounts)) {
-      const fullAccount = namespaces.stellar.accounts[0];
+    if (namespaces && namespaces['stellar'] && Array.isArray(namespaces['stellar'].accounts)) {
+      const fullAccount = namespaces['stellar'].accounts[0];
       if (fullAccount) {
         return fullAccount.includes(':') ? fullAccount.split(':').pop()! : fullAccount;
       }
