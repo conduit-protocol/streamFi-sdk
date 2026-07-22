@@ -74,18 +74,38 @@ const client = new ConduitClient(config: ConduitConfig);
 | Option | Type | Required | Description |
 |--------|------|----------|-------------|
 | `network` | `'mainnet' \| 'testnet' \| 'local'` | Yes | Network to connect to |
-| `keypair` | `Keypair` | Yes (for writes) | Signing keypair |
+| `keypair` | `Keypair` | Optional | Signing keypair (for secret key workflows) |
+| `wallet` | `WalletAdapter` | Optional | Custom wallet adapter (e.g. `WalletConnectAdapter`) |
 | `rpcUrl` | `string` | No | Override default Soroban RPC URL |
 | `factoryAddress` | `string` | No | Override deployed factory contract ID |
 | `governorAddress` | `string` | No | Override deployed governor contract ID |
 
-Default RPC URLs:
+### WalletConnect v2 Integration (Mobile & Browser Wallets)
 
-| Network | URL |
-|---------|-----|
-| `testnet` | `https://soroban-testnet.stellar.org` |
-| `mainnet` | `https://soroban-mainnet.stellar.org` |
-| `local` | `http://localhost:8000/soroban/rpc` |
+For web and mobile applications using WalletConnect v2:
+
+```typescript
+import { ConduitClient, WalletConnectAdapter } from '@conduit-protocol/sdk';
+
+const walletAdapter = new WalletConnectAdapter({
+  projectId: 'YOUR_WALLETCONNECT_PROJECT_ID',
+  chainId: 'stellar:testnet',
+});
+
+// Connect to mobile wallet
+await walletAdapter.connect();
+
+const client = new ConduitClient({
+  network: 'testnet',
+  wallet: walletAdapter,
+});
+```
+
+You can also update the active wallet dynamically:
+
+```typescript
+client.setWallet(walletAdapter);
+```
 
 ---
 

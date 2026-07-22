@@ -10,6 +10,7 @@ export {
 } from './errors.js';
 export type { ConduitContract } from './errors.js';
 export * from './types/index.js';
+export * from './adapters/index.js';
 
 // Utils are exported via the /utils subpath export, but also available here
 export {

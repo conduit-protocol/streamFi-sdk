@@ -7,6 +7,8 @@ export interface ConduitConfig {
   network: Network;
   /** Signing keypair — required for mutating operations */
   keypair?: import('@stellar/stellar-sdk').Keypair;
+  /** Custom wallet adapter (e.g. WalletConnectAdapter) for browser/mobile wallet signing */
+  wallet?: import('../adapters/types.js').WalletAdapter;
   /** Custom signer plugin (KMS/HSM). Takes precedence over keypair when set. */
   signer?: Signer;
   /** Override default Soroban RPC URL */

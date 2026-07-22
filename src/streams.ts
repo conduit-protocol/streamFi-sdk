@@ -14,6 +14,8 @@ import type {
   StreamInfo,
   Subscription,
 } from './types/index.js';
+import type { WalletAdapter } from './adapters/types.js';
+import { KeypairWalletAdapter } from './adapters/keypair.js';
 import { toStroops, calculateRate } from './utils.js';
 import {
   buildContractCallTx,
@@ -33,12 +35,26 @@ export class StreamsModule {
   private readonly passphrase: string;
   private readonly callerAddr: string;
   private readonly _factory:   FactoryModule;
+  private activeWallet?:       WalletAdapter;
 
   constructor(private readonly config: ConduitConfig) {
     this.rpcUrl     = config.rpcUrl ?? DEFAULT_RPC[config.network];
     this.passphrase = NETWORK_PASSPHRASE[config.network];
     this.callerAddr = this._signerPublicKey();
     this._factory   = new FactoryModule(config);
+
+    if (config.wallet) {
+      this.activeWallet = config.wallet;
+    } else if (config.keypair) {
+      this.activeWallet = new KeypairWalletAdapter(config.keypair);
+    }
+  }
+
+  /**
+   * Dynamically set or update the active wallet adapter.
+   */
+  setWallet(wallet: WalletAdapter): void {
+    this.activeWallet = wallet;
   }
 
   private _signer(): Signer | null {
@@ -46,19 +62,13 @@ export class StreamsModule {
   }
 
   private _signerPublicKey(): string {
+    if (this.activeWallet) {
+      const pk = this.activeWallet.getPublicKey();
+      if (typeof pk === 'string') return pk;
+    }
     if (this.config.signer) return this.config.signer.publicKey();
     if (this.config.keypair) return this.config.keypair.publicKey();
     return ZERO_ADDR;
-  }
-
-  private async _applySign(tx: Transaction): Promise<void> {
-    if (this.config.signer) {
-      await this.config.signer.sign(tx);
-    } else if (this.config.keypair) {
-      tx.sign(this.config.keypair);
-    } else {
-      throw new Error('No signer or keypair configured for mutating operations');
-    }
   }
 
   /**
@@ -68,10 +78,8 @@ export class StreamsModule {
    * then signs and submits the assembled transaction.
    */
   async create(params: CreateStreamParams): Promise<CreateStreamResult> {
-    if (!this.config.keypair && !this.config.signer) {
-      throw new Error('keypair or signer is required for mutating operations');
-    }
-
+    this._ensureCanMutate();
+    const senderAddr = await this._getSenderAddress();
     const {
       recipient, token, depositAmount,
       durationSeconds, ratePerSecond,
@@ -82,14 +90,9 @@ export class StreamsModule {
       throw new Error('Either durationSeconds or ratePerSecond must be provided');
     }
 
-    const senderAddr = this._signerPublicKey();
-    const factoryId  = this.config.factoryAddress ?? '';
+    const factoryId = this.config.factoryAddress ?? '';
 
-    // `token` is an arbitrary contract address (see CreateStreamParams) — it
-    // must not be assumed to use the native asset's 7 decimals. Query the
-    // token's own decimals() rather than defaulting toStroops/calculateRate
-    // to 7, or a non-7-decimal token's deposit/rate would be silently wrong
-    // by orders of magnitude.
+    // Query token decimals
     const decimals = await getTokenDecimals(this.rpcUrl, this.passphrase, senderAddr, token);
 
     const depositStroops = toStroops(depositAmount, decimals);
@@ -119,14 +122,9 @@ export class StreamsModule {
     }
 
     const assembled = SorobanRpc.assembleTransaction(tx, sim).build();
-    await this._applySign(assembled);
-    const { hash: txHash, returnValue } = await this._sendAndPoll(server, assembled);
+    const signed    = await this._signTx(assembled);
+    const { hash: txHash, returnValue } = await this._sendAndPoll(server, signed);
 
-    // create_stream returns the new stream ID (u64). Read it from the
-    // confirmed transaction's actual return value, not the pre-submission
-    // simulation — if another create_stream lands on the factory between
-    // this call's simulate and submit, the real assigned stream_id can
-    // differ from what was simulated.
     if (!returnValue) {
       throw new Error(`Transaction ${txHash} succeeded but returned no value`);
     }
@@ -156,7 +154,7 @@ export class StreamsModule {
 
   /** Withdraw tokens as the recipient. Defaults to full available balance. */
   async withdraw(streamId: bigint | string, amount?: bigint): Promise<string> {
-    if (!this.config.keypair && !this.config.signer) throw new Error('keypair or signer required');
+    this._ensureCanMutate();
     const id  = BigInt(streamId);
     const qty = amount ?? await this.withdrawable(id);
     return this._invoke(await this._resolveAddr(id), 'withdraw', [
@@ -166,25 +164,25 @@ export class StreamsModule {
 
   /** Cancel the stream (sender only). Settles all balances atomically. */
   async cancel(streamId: bigint | string): Promise<string> {
-    if (!this.config.keypair && !this.config.signer) throw new Error('keypair or signer required');
+    this._ensureCanMutate();
     return this._invoke(await this._resolveAddr(BigInt(streamId)), 'cancel', []);
   }
 
   /** Pause the stream (sender only). */
   async pause(streamId: bigint | string): Promise<string> {
-    if (!this.config.keypair && !this.config.signer) throw new Error('keypair or signer required');
+    this._ensureCanMutate();
     return this._invoke(await this._resolveAddr(BigInt(streamId)), 'pause', []);
   }
 
   /** Resume a paused stream (sender only). Shifts start/end times forward. */
   async resume(streamId: bigint | string): Promise<string> {
-    if (!this.config.keypair && !this.config.signer) throw new Error('keypair or signer required');
+    this._ensureCanMutate();
     return this._invoke(await this._resolveAddr(BigInt(streamId)), 'resume', []);
   }
 
   /** Deposit additional tokens into the stream (sender only). */
   async topUp(streamId: bigint | string, amount: bigint): Promise<string> {
-    if (!this.config.keypair && !this.config.signer) throw new Error('keypair or signer required');
+    this._ensureCanMutate();
     return this._invoke(await this._resolveAddr(BigInt(streamId)), 'top_up', [
       nativeToScVal(amount, { type: 'i128' }),
     ]);
@@ -195,9 +193,9 @@ export class StreamsModule {
    * Returns the amount reclaimed (simulated before submission).
    */
   async clawback(streamId: bigint | string): Promise<bigint> {
-    if (!this.config.keypair && !this.config.signer) throw new Error('keypair or signer required');
+    this._ensureCanMutate();
     const addr   = await this._resolveAddr(BigInt(streamId));
-    const caller = this._signerPublicKey();
+    const caller = await this._getSenderAddress();
     const tx     = await buildContractCallTx(this.rpcUrl, this.passphrase, caller, addr, 'clawback', []);
     const server = this._server();
     const sim    = await server.simulateTransaction(tx);
@@ -207,12 +205,9 @@ export class StreamsModule {
     }
 
     const assembled = SorobanRpc.assembleTransaction(tx, sim).build();
-    await this._applySign(assembled);
-    const { hash, returnValue } = await this._sendAndPoll(server, assembled);
+    const signed    = await this._signTx(assembled);
+    const { hash, returnValue } = await this._sendAndPoll(server, signed);
 
-    // Read the reclaimed amount from the confirmed transaction, not the
-    // pre-submission simulation — see create()'s comment for why these can
-    // genuinely differ (balance/withdrawn can shift between simulate and submit).
     if (!returnValue) {
       throw new Error(`Transaction ${hash} succeeded but returned no value`);
     }
@@ -289,6 +284,46 @@ export class StreamsModule {
 
   // ── Private helpers ──────────────────────────────────────────────────────
 
+  private _ensureCanMutate(): void {
+    if (!this.activeWallet && !this.config.signer && !this.config.keypair) {
+      throw new Error('keypair, wallet adapter, or signer is required for mutating operations');
+    }
+  }
+
+  private async _getSenderAddress(): Promise<string> {
+    if (this.activeWallet) {
+      return this.activeWallet.getPublicKey();
+    }
+    if (this.config.signer) {
+      return this.config.signer.publicKey();
+    }
+    if (this.config.keypair) {
+      return this.config.keypair.publicKey();
+    }
+    throw new Error('keypair, wallet adapter, or signer is required for mutating operations');
+  }
+
+  private async _signTx(tx: Transaction): Promise<Transaction> {
+    if (this.activeWallet) {
+      const signed = await this.activeWallet.signTransaction(tx, {
+        networkPassphrase: this.passphrase,
+      });
+      if (typeof signed === 'string') {
+        return new Transaction(signed, this.passphrase);
+      }
+      return signed;
+    }
+    if (this.config.signer) {
+      await this.config.signer.sign(tx);
+      return tx;
+    }
+    if (this.config.keypair) {
+      tx.sign(this.config.keypair);
+      return tx;
+    }
+    throw new Error('keypair, wallet adapter, or signer is required for mutating operations');
+  }
+
   private _server(): SorobanRpc.Server {
     return new SorobanRpc.Server(this.rpcUrl, { allowHttp: this.rpcUrl.startsWith('http://') });
   }
@@ -311,31 +346,19 @@ export class StreamsModule {
 
   /** Simulate → assemble → sign → submit → poll. Returns txHash. */
   private async _invoke(contractId: string, method: string, args: xdr.ScVal[]): Promise<string> {
-    const caller  = this._signerPublicKey();
-    const tx      = await buildContractCallTx(this.rpcUrl, this.passphrase, caller, contractId, method, args);
-    const server  = this._server();
-    const sim     = await server.simulateTransaction(tx);
+    const senderAddr = await this._getSenderAddress();
+    const tx         = await buildContractCallTx(this.rpcUrl, this.passphrase, senderAddr, contractId, method, args);
+    const server     = this._server();
+    const sim        = await server.simulateTransaction(tx);
     if (SorobanRpc.Api.isSimulationError(sim)) {
       throw ConduitError.fromSorobanMessage('stream', sim.error);
     }
     const assembled = SorobanRpc.assembleTransaction(tx, sim).build();
-    await this._applySign(assembled);
-    const { hash } = await this._sendAndPoll(server, assembled);
+    const signed    = await this._signTx(assembled);
+    const { hash }  = await this._sendAndPoll(server, signed);
     return hash;
   }
 
-  /**
-   * Submits `tx` and polls until it lands. Returns the confirmed transaction's
-   * hash and, for a SUCCESS status, its actual on-chain `returnValue` — the
-   * real executed result, not the pre-submission simulation.
-   *
-   * Callers that only need the hash (withdraw/cancel/pause/resume/topUp) can
-   * ignore `returnValue`; callers whose contract method returns something
-   * meaningful (create_stream's stream_id, clawback's reclaimed amount) must
-   * use it instead of trusting the simulated retval — the two can genuinely
-   * differ (e.g. another create_stream landing between this call's simulate
-   * and submit shifts the assigned stream_id).
-   */
   private async _sendAndPoll(
     server: SorobanRpc.Server,
     tx: Transaction,
