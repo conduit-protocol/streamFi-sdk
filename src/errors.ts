@@ -94,6 +94,51 @@ const MESSAGES_BY_CONTRACT: Record<ConduitContract, Record<number, string>> = {
   governor: GOVERNOR_MESSAGES,
 };
 
+// ── Network / chain validation ─────────────────────────────────────────────────
+
+/**
+ * The exhaustive list of network identifiers the Conduit SDK supports.
+ * Matches the `Network` type in `src/types/index.ts`.
+ */
+export const SUPPORTED_NETWORKS = ['mainnet', 'testnet', 'local'] as const;
+
+/**
+ * Thrown synchronously by `ConduitClient` constructor when an unrecognised
+ * network string is supplied — before any RPC connection is attempted.
+ *
+ * @example
+ * ```ts
+ * try {
+ *   const client = new ConduitClient({ network: 'ropsten' as any });
+ * } catch (err) {
+ *   if (err instanceof UnsupportedChainError) {
+ *     console.error(err.message);           // "Unsupported network: 'ropsten'. ..."
+ *     console.error(err.providedNetwork);   // "ropsten"
+ *     console.error(err.supportedNetworks); // ["mainnet", "testnet", "local"]
+ *   }
+ * }
+ * ```
+ */
+export class UnsupportedChainError extends Error {
+  /** The network value the caller passed in. */
+  readonly providedNetwork: string;
+  /** The full list of accepted network identifiers at the time of the throw. */
+  readonly supportedNetworks: readonly string[];
+
+  constructor(providedNetwork: string) {
+    const supported = SUPPORTED_NETWORKS.join(', ');
+    super(
+      `Unsupported network: '${providedNetwork}'. ` +
+      `The Conduit SDK currently supports: ${supported}.`,
+    );
+    this.name = 'UnsupportedChainError';
+    this.providedNetwork    = providedNetwork;
+    this.supportedNetworks  = SUPPORTED_NETWORKS;
+    // Maintain correct prototype chain for `instanceof` checks in transpiled JS.
+    Object.setPrototypeOf(this, new.target.prototype);
+  }
+}
+
 export class ConduitError extends Error {
   readonly contract: ConduitContract;
   readonly code: number;

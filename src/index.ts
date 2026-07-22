@@ -7,6 +7,8 @@ export {
   StreamErrorCode,
   FactoryErrorCode,
   GovernorErrorCode,
+  UnsupportedChainError,
+  SUPPORTED_NETWORKS,
 } from './errors.js';
 export type { ConduitContract } from './errors.js';
 export * from './types/index.js';
