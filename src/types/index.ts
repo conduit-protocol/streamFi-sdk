@@ -5,6 +5,8 @@ export interface ConduitConfig {
   network: Network;
   /** Signing keypair — required for mutating operations */
   keypair?: import('@stellar/stellar-sdk').Keypair;
+  /** Custom wallet adapter (e.g. WalletConnectAdapter) for browser/mobile wallet signing */
+  wallet?: import('../adapters/types.js').WalletAdapter;
   /** Override default Soroban RPC URL */
   rpcUrl?: string;
   /** Override deployed DripFactory contract ID */
