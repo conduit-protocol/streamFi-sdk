@@ -53,6 +53,25 @@ describe('StreamBuilder', () => {
     }).toThrow('Missing required parameters for StreamBuilder');
   });
 
+
+
+  it('rejects malformed builder inputs before producing a stream configuration', () => {
+    const malformedBuilders = [
+      () => new StreamBuilder().token('').sender('GA...').recipient('GB...').amount(1000).build(),
+      () => new StreamBuilder().token('   ').sender('GA...').recipient('GB...').amount(1000).build(),
+      () => new StreamBuilder().token('CD...').sender('').recipient('GB...').amount(1000).build(),
+      () => new StreamBuilder().token('CD...').sender('GA...').recipient('   ').amount(1000).build(),
+      () => new StreamBuilder().token('CD...').sender('GA...').recipient('GB...').amount(0).build(),
+      () => new StreamBuilder().token('CD...').sender('GA...').recipient('GB...').amount(-1).build(),
+      () => new StreamBuilder().token('CD...').sender('GA...').recipient('GB...').amount(Number.NaN).build(),
+      () => new StreamBuilder().token('CD...').sender('GA...').recipient('GB...').amount(Number.POSITIVE_INFINITY).build(),
+    ];
+
+    for (const buildMalformed of malformedBuilders) {
+      expect(buildMalformed).toThrow('Invalid StreamBuilder parameter');
+    }
+  });
+
   it('allows chaining calls in any order', () => {
     const stream = new StreamBuilder()
       .amount(500)
