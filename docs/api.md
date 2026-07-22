@@ -261,3 +261,47 @@ withdrawableLocal(streamInfo)  // → bigint (client-side estimate, no RPC call)
 ```
 
 `withdrawableLocal` is useful for building live counters without polling the chain on every render tick.
+
+---
+
+## Fluent Builder API
+
+The SDK provides `StreamBuilder` and `ConduitBatcher` to construct and execute stream operations fluently and in batches.
+
+### `StreamBuilder`
+
+A helper class to build stream configurations with method chaining.
+
+#### Methods
+
+* `token(address: string): this` - Sets the Soroban token contract address.
+* `sender(address: string): this` - Sets the sender address.
+* `recipient(address: string): this` - Sets the recipient address.
+* `amount(val: number): this` - Sets the deposit amount in the smallest unit (stroops).
+* `build(): StreamConfig` - Validates and returns the built stream configuration. Throws if any required field is missing.
+
+```typescript
+import { StreamBuilder } from '@conduit-protocol/sdk';
+
+const stream = new StreamBuilder()
+  .token('USDC')
+  .sender('GD...')
+  .recipient('GB...')
+  .amount(1000)
+  .build();
+```
+
+### `ConduitBatcher`
+
+A utility class to bundle multiple stream operations.
+
+#### Methods
+
+* `static execute(streams: Record<string, unknown>[]): BatchResult` - Bundles the list of stream configurations into a single transaction.
+
+```typescript
+import { ConduitBatcher } from '@conduit-protocol/sdk';
+
+const result = ConduitBatcher.execute([stream1, stream2]);
+```
+
