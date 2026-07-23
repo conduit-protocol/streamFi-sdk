@@ -6,7 +6,9 @@ import {
   streamProgress,
   withdrawableLocal,
   bigintSafeStringify,
+  isValidAddress,
 } from '../utils.js';
+import { Keypair } from '@stellar/stellar-sdk';
 import type { StreamInfo } from '../types/index.js';
 
 // ── toStroops / fromStroops ──────────────────────────────────────────────────
@@ -231,5 +233,39 @@ describe('bigintSafeStringify', () => {
     const json = JSON.parse(JSON.stringify(result));
     expect(json.ratePerSecond).toBe('9007199254740993');
     expect(json.deposit).toBe('50000');
+  });
+});
+
+// -- isValidAddress -----------------------------------------------------------
+
+describe('isValidAddress', () => {
+  it('returns true for a valid ed25519 public key', () => {
+    const kp = Keypair.random();
+    expect(isValidAddress(kp.publicKey())).toBe(true);
+  });
+
+  it('returns false for a corrupted checksum', () => {
+    const kp = Keypair.random();
+    const valid = kp.publicKey();
+    const tampered = valid.slice(0, -1) + (valid.endsWith('A') ? 'B' : 'A');
+    expect(isValidAddress(tampered)).toBe(false);
+  });
+
+  it('returns false for a secret key (S...) instead of a public key', () => {
+    const kp = Keypair.random();
+    expect(isValidAddress(kp.secret())).toBe(false);
+  });
+
+  it('returns false for empty string', () => {
+    expect(isValidAddress('')).toBe(false);
+  });
+
+  it('returns false for non-string input', () => {
+    expect(isValidAddress(null as unknown as string)).toBe(false);
+    expect(isValidAddress(undefined as unknown as string)).toBe(false);
+  });
+
+  it('returns false for a random unrelated string', () => {
+    expect(isValidAddress('not-a-stellar-address')).toBe(false);
   });
 });

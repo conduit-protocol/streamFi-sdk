@@ -1,4 +1,5 @@
 import type { StreamInfo } from './types/index.js';
+import { StrKey } from '@stellar/stellar-sdk';
 
 /** Convert a display amount string to stroops (bigint) */
 export function toStroops(amount: string, decimals = 7): bigint {
@@ -29,7 +30,7 @@ export function calculateRate(depositAmount: string, durationSecs: number, decim
 }
 
 /**
- * Current progress fraction (0–1) of a stream.
+ * Current progress fraction (0-1) of a stream.
  * Returns 0 if not started, 1 if ended.
  */
 export function streamProgress(stream: StreamInfo, nowSec = Math.floor(Date.now() / 1000)): number {
@@ -86,4 +87,20 @@ export function bigintSafeStringify<T>(value: T): T {
     return out as T;
   }
   return value;
+}
+
+/**
+ * Validates whether a string is a well-formed Stellar public key
+ * (account address, e.g. 'GABC...XYZ').
+ *
+ * Performs static format validation only (StrKey encoding, version byte,
+ * checksum) -- it does not check whether the account exists on-chain.
+ * Use this to fail fast before submission, e.g. before passing a recipient
+ * into client.streams.create().
+ */
+export function isValidAddress(address: string): boolean {
+  if (typeof address !== 'string' || address.length === 0) {
+    return false;
+  }
+  return StrKey.isValidEd25519PublicKey(address);
 }
