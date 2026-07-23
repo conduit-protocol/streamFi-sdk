@@ -13,6 +13,8 @@ import type {
   StreamEventHandlers,
   StreamInfo,
   Subscription,
+  BatchWithdrawItem,
+  BatchWithdrawResult,
 } from './types/index.js';
 import type { WalletAdapter } from './adapters/types.js';
 import { KeypairWalletAdapter } from './adapters/keypair.js';
@@ -160,6 +162,38 @@ export class StreamsModule {
     return this._invoke(await this._resolveAddr(id), 'withdraw', [
       nativeToScVal(qty, { type: 'i128' }),
     ]);
+  }
+
+  /**
+   * Withdraw from multiple streams concurrently.
+   *
+   * Note: Soroban currently permits only one invoke_host_function
+   * operation per transaction, so this cannot be assembled into a single
+   * atomic transaction the way classic Stellar payment operations can.
+   * Each withdrawal is submitted as its own transaction; they run
+   * concurrently and are reported independently so a failure on one
+   * streamId (e.g. StreamNotFound, insufficient balance) does not block
+   * or roll back the others.
+   */
+  async batchWithdraw(withdrawals: BatchWithdrawItem[]): Promise<BatchWithdrawResult[]> {
+    this._ensureCanMutate();
+
+    const settled = await Promise.allSettled(
+      withdrawals.map(w => this.withdraw(w.streamId, w.amount)),
+    );
+
+    return settled.map((result, i) => {
+      const streamId = BigInt(withdrawals[i]!.streamId);
+      if (result.status === 'fulfilled') {
+        return { streamId, success: true, txHash: result.value };
+      }
+      const err = result.reason;
+      return {
+        streamId,
+        success: false,
+        error: err instanceof Error ? err.message : String(err),
+      };
+    });
   }
 
   /** Cancel the stream (sender only). Settles all balances atomically. */
