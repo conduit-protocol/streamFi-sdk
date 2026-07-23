@@ -116,3 +116,18 @@ export interface StreamEventHandlers {
 export interface Subscription {
   unsubscribe: () => void;
 }
+
+// -- Batch operations ----------------------------------------------------------
+
+export interface BatchWithdrawItem {
+  streamId: bigint | string;
+  /** Amount in stroops. Defaults to the full withdrawable balance if omitted. */
+  amount?: bigint;
+}
+
+export interface BatchWithdrawResult {
+  streamId: bigint;
+  success: boolean;
+  txHash?: string;
+  error?: string;
+}
