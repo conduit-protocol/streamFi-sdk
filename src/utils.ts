@@ -60,3 +60,30 @@ export function withdrawableLocal(stream: StreamInfo, nowSec = Math.floor(Date.n
   const available = streamed - stream.withdrawn;
   return available > 0n ? available : 0n;
 }
+
+/**
+ * Recursively convert all bigint values in a value to their string
+ * representation.  Safe for objects, arrays, and primitives.
+ *
+ * Safari / WebKit serialises `bigint` values as `{}` inside
+ * `JSON.stringify`, which breaks payloads sent to the GraphQL
+ * indexer.  Call this before network submission to guarantee
+ * interoperability across all browsers.
+ */
+export function bigintSafeStringify<T>(value: T): T {
+  if (typeof value === 'bigint') {
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any
+    return value.toString() as any;
+  }
+  if (Array.isArray(value)) {
+    return value.map(bigintSafeStringify) as unknown as T;
+  }
+  if (value !== null && typeof value === 'object') {
+    const out: Record<string, unknown> = {};
+    for (const [k, v] of Object.entries(value as Record<string, unknown>)) {
+      out[k] = bigintSafeStringify(v);
+    }
+    return out as T;
+  }
+  return value;
+}

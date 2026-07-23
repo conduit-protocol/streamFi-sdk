@@ -1,4 +1,4 @@
-import { describe, it, expect } from 'vitest';
+import { describe, it, expect, vi } from 'vitest';
 import { StreamBuilder, ConduitBatcher } from '../builder.js';
 
 describe('StreamBuilder', () => {
@@ -87,6 +87,67 @@ describe('StreamBuilder', () => {
       amount: 500,
     });
   });
+
+  it('includes ratePerSecond as a number when set with a number', () => {
+    const stream = new StreamBuilder()
+      .token('CD...')
+      .sender('GA...')
+      .recipient('GB...')
+      .amount(1000)
+      .ratePerSecond(500)
+      .build();
+
+    expect(stream.ratePerSecond).toBe(500);
+  });
+
+  it('serialises bigint ratePerSecond to string', () => {
+    const rate = BigInt('9007199254740993'); // > Number.MAX_SAFE_INTEGER
+    const stream = new StreamBuilder()
+      .token('CD...')
+      .sender('GA...')
+      .recipient('GB...')
+      .amount(1000)
+      .ratePerSecond(rate)
+      .build();
+
+    expect(stream.ratePerSecond).toBe('9007199254740993');
+    // Must survive JSON.stringify (the Safari/WebKit fix)
+    const json = JSON.parse(JSON.stringify(stream));
+    expect(json.ratePerSecond).toBe('9007199254740993');
+  });
+
+  it('omits ratePerSecond from output when not set', () => {
+    const stream = new StreamBuilder()
+      .token('CD...')
+      .sender('GA...')
+      .recipient('GB...')
+      .amount(1000)
+      .build();
+
+    expect(stream).not.toHaveProperty('ratePerSecond');
+  });
+
+  it('rejects non-positive ratePerSecond values', () => {
+    const builder = () =>
+      new StreamBuilder()
+        .token('CD...')
+        .sender('GA...')
+        .recipient('GB...')
+        .amount(1000)
+        .ratePerSecond(0);
+
+    expect(builder).toThrow('Invalid StreamBuilder parameter: ratePerSecond');
+
+    const builderNeg = () =>
+      new StreamBuilder()
+        .token('CD...')
+        .sender('GA...')
+        .recipient('GB...')
+        .amount(1000)
+        .ratePerSecond(-1n);
+
+    expect(builderNeg).toThrow('Invalid StreamBuilder parameter: ratePerSecond');
+  });
 });
 
 describe('ConduitBatcher', () => {
@@ -110,5 +171,49 @@ describe('ConduitBatcher', () => {
     expect(result.success).toBe(true);
     expect(result.operations).toBe(2);
     expect(result.xdr).toBe('AAAA...mock...batch...XDR');
+  });
+
+  it('serialises bigint fields to strings before processing', () => {
+    const payload = {
+      token: 'CD...',
+      sender: 'GA...',
+      recipient: 'GB...',
+      rate: BigInt('9007199254740993'),
+      deposit: 50000n,
+    };
+
+    const spy = console.log as ReturnType<typeof vi.fn>;
+    const consoleSpy = vi.spyOn(console, 'log').mockImplementation(() => {});
+
+    const result = ConduitBatcher.execute([payload]);
+
+    consoleSpy.mockRestore();
+
+    expect(result.success).toBe(true);
+    expect(result.operations).toBe(1);
+  });
+
+  it('handles mixed bigint and non-bigint payloads', () => {
+    const streams = [
+      { id: 1n, rate: 2n, name: 'stream-a' },
+      { id: 3, rate: 4, name: 'stream-b' },
+      { nested: { deep: { val: 99n } } },
+    ];
+
+    const consoleSpy = vi.spyOn(console, 'log').mockImplementation(() => {});
+    const result = ConduitBatcher.execute(streams);
+    consoleSpy.mockRestore();
+
+    expect(result.success).toBe(true);
+    expect(result.operations).toBe(3);
+  });
+
+  it('returns zero operations for an empty array', () => {
+    const consoleSpy = vi.spyOn(console, 'log').mockImplementation(() => {});
+    const result = ConduitBatcher.execute([]);
+    consoleSpy.mockRestore();
+
+    expect(result.success).toBe(true);
+    expect(result.operations).toBe(0);
   });
 });
