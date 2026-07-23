@@ -182,7 +182,6 @@ describe('ConduitBatcher', () => {
       deposit: 50000n,
     };
 
-    const spy = console.log as ReturnType<typeof vi.fn>;
     const consoleSpy = vi.spyOn(console, 'log').mockImplementation(() => {});
 
     const result = ConduitBatcher.execute([payload]);
