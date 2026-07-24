@@ -74,6 +74,21 @@ export class StreamsModule {
   }
 
   /**
+   * Resolve the caller address, handling both sync and async getPublicKey().
+   * Unlike _signerPublicKey(), this can be used when the wallet adapter
+   * returns a promise — but it MUST only be called from async contexts.
+   */
+  private async _resolveCallerAddress(): Promise<string> {
+    if (this.activeWallet) {
+      const pk = await this.activeWallet.getPublicKey();
+      if (pk) return pk;
+    }
+    if (this.config.signer) return this.config.signer.publicKey();
+    if (this.config.keypair) return this.config.keypair.publicKey();
+    return ZERO_ADDR;
+  }
+
+  /**
    * Deploy a new DripStream via DripFactory.
    *
    * Simulates first to extract the assigned stream ID from the return value,
@@ -140,7 +155,8 @@ export class StreamsModule {
   async get(streamId: bigint | string): Promise<StreamInfo> {
     const id   = BigInt(streamId);
     const addr = await this._resolveAddr(id);
-    const tx   = await buildContractCallTx(this.rpcUrl, this.passphrase, this.callerAddr, addr, 'info', []);
+    const caller = await this._resolveCallerAddress();
+    const tx   = await buildContractCallTx(this.rpcUrl, this.passphrase, caller, addr, 'info', []);
     const val  = await this._simulateTx(tx);
     return parseStreamInfo(id, addr, val);
   }
@@ -149,7 +165,8 @@ export class StreamsModule {
   async withdrawable(streamId: bigint | string): Promise<bigint> {
     const id   = BigInt(streamId);
     const addr = await this._resolveAddr(id);
-    const tx   = await buildContractCallTx(this.rpcUrl, this.passphrase, this.callerAddr, addr, 'withdrawable', []);
+    const caller = await this._resolveCallerAddress();
+    const tx   = await buildContractCallTx(this.rpcUrl, this.passphrase, caller, addr, 'withdrawable', []);
     const val  = await this._simulateTx(tx);
     return scValToI128(val);
   }
@@ -310,7 +327,7 @@ export class StreamsModule {
     let stopped = false;
 
     this.subscribeAsync(streamId, handlers)
-      .then(sub => { if (stopped) sub.unsubscribe(); else inner = sub; })
+      .then(sub => { if (!stopped) inner = sub; else sub.unsubscribe(); })
       .catch(err => console.warn('[conduit-sdk] subscribe error:', err));
 
     return { unsubscribe: () => { stopped = true; inner?.unsubscribe(); } };
@@ -342,13 +359,19 @@ export class StreamsModule {
       const signed = await this.activeWallet.signTransaction(tx, {
         networkPassphrase: this.passphrase,
       });
+      if (signed == null) {
+        throw new Error('Wallet adapter signTransaction returned null or undefined');
+      }
       if (typeof signed === 'string') {
         return new Transaction(signed, this.passphrase);
       }
       return signed;
     }
     if (this.config.signer) {
-      await this.config.signer.sign(tx);
+      const result = this.config.signer.sign(tx);
+      if (result != null) {
+        await result;
+      }
       return tx;
     }
     if (this.config.keypair) {
