@@ -85,6 +85,7 @@ export function subscribeToStream(
   const pollInterval = handlers.pollInterval ?? 5000;
   let   startLedger  = 0;  // updated after each successful poll
   let   stopped      = false;
+  let   timer: ReturnType<typeof setTimeout> | undefined;
 
   async function poll() {
     if (stopped) return;
@@ -113,14 +114,25 @@ export function subscribeToStream(
       console.warn('[conduit-sdk] event polling error:', err);
     }
 
-    if (!stopped) setTimeout(poll, pollInterval);
+    if (!stopped) timer = setTimeout(poll, pollInterval);
   }
 
   // Start polling immediately
   poll();
 
   return {
-    unsubscribe: () => { stopped = true; },
+    // Clear the pending timer immediately rather than relying solely on the
+    // `stopped` flag — otherwise the scheduled setTimeout keeps its callback
+    // (and everything it closes over: server, handlers, startLedger) alive
+    // in the event loop until it fires on its own, up to `pollInterval` ms
+    // after the caller believed the subscription was torn down.
+    unsubscribe: () => {
+      stopped = true;
+      if (timer !== undefined) {
+        clearTimeout(timer);
+        timer = undefined;
+      }
+    },
   };
 }
 

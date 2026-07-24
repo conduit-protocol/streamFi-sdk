@@ -130,4 +130,25 @@ describe('subscribeToStream', () => {
     await vi.advanceTimersByTimeAsync(5000);
     expect(mockGetEvents).toHaveBeenCalledTimes(1);
   });
+
+  it('unsubscribe clears the pending poll timer immediately, not just on its next fire', async () => {
+    // Regression test: unsubscribe() must actually clearTimeout() the scheduled
+    // poll, not just flip a `stopped` flag that the timer's own callback checks
+    // once it eventually fires. Leaving the timer pending keeps its closure
+    // (server, handlers, startLedger) alive in the event loop for up to
+    // `pollInterval` ms after the caller believed the subscription was torn down.
+    mockGetEvents.mockResolvedValue({ events: [] });
+    const { subscribeToStream } = await import('../events.js');
+
+    const sub = subscribeToStream('http://localhost:8000', 'CSTREAM', { pollInterval: 5000 });
+    await vi.waitFor(() => expect(mockGetEvents).toHaveBeenCalledTimes(1));
+
+    // The next poll is scheduled and pending in the timer queue.
+    expect(vi.getTimerCount()).toBeGreaterThan(0);
+
+    sub.unsubscribe();
+
+    // The pending timer must be gone immediately — not merely inert.
+    expect(vi.getTimerCount()).toBe(0);
+  });
 });
