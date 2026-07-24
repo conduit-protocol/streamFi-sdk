@@ -143,7 +143,7 @@ describe('StreamsModule — _resolveCallerAddress handles async getPublicKey', (
       wallet: asyncWallet,
     });
 
-    const pk = await (sdk as { _resolveCallerAddress(): Promise<string> })._resolveCallerAddress();
+    const pk = await (sdk as unknown as { _resolveCallerAddress(): Promise<string> })._resolveCallerAddress();
     expect(pk).toBe(expectedKey);
   });
 
@@ -155,7 +155,7 @@ describe('StreamsModule — _resolveCallerAddress handles async getPublicKey', (
       signer: { sign: () => {}, publicKey: () => 'GSIGNERKEY...' },
     });
 
-    const pk = await (sdk as { _resolveCallerAddress(): Promise<string> })._resolveCallerAddress();
+    const pk = await (sdk as unknown as { _resolveCallerAddress(): Promise<string> })._resolveCallerAddress();
     expect(pk).toBe('GSIGNERKEY...');
   });
 
@@ -167,7 +167,7 @@ describe('StreamsModule — _resolveCallerAddress handles async getPublicKey', (
       factoryAddress: 'CCWAMYJ...',
     });
 
-    const pk = await (sdk as { _resolveCallerAddress(): Promise<string> })._resolveCallerAddress();
+    const pk = await (sdk as unknown as { _resolveCallerAddress(): Promise<string> })._resolveCallerAddress();
     expect(pk).toBe(ZERO_ADDR);
   });
 });
