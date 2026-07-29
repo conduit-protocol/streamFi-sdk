@@ -12,6 +12,7 @@ import type {
   PaginatedStreams,
   StreamEventHandlers,
   StreamInfo,
+  StreamConfig,
   Subscription,
   BatchWithdrawItem,
   BatchWithdrawResult,
@@ -21,6 +22,7 @@ import { KeypairWalletAdapter } from './adapters/keypair.js';
 import { toStroops, calculateRate, bigintSafeStringify } from './utils.js';
 import {
   buildContractCallTx,
+  buildBatchContractCallTx,
   scValToI128,
   scValToU64,
   boolToScVal,
@@ -34,6 +36,13 @@ import { FactoryModule } from './factory.js';
 import { ConduitError, RateLimitError, StreamErrorCode } from './errors.js';
 
 // Deprecation warnings
+
+/**
+ * Maximum number of stream-create operations per Soroban transaction.
+ * Soroban's transaction size limit restricts this to roughly 10-15
+ * operations per tx; 10 is a conservative default.
+ */
+const MAX_BATCH_SIZE = 10;
 
 /**
  * Tracks which v1-deprecated methods have already warned this session, so
@@ -206,6 +215,102 @@ export class StreamsModule {
 
     const streamAddress = await this._factory.streamAddress(streamId) ?? '';
     return { streamId, streamAddress, txHash };
+  }
+
+  /**
+   * Create multiple streams in a single batch.
+   *
+   * Configs are chunked into groups of up to {@link MAX_BATCH_SIZE} to
+   * respect Soroban's transaction size limit. Each chunk is assembled
+   * into a single transaction containing multiple `invokeHostFunction`
+   * operations (one per stream config). The method simulates and
+   * assembles each transaction, returning an array of prepared
+   * transactions that are ready to be signed and submitted.
+   *
+   * @param configs - Array of stream creation configurations.
+   * @returns Array of assembled, prepared transactions (one per chunk).
+   */
+  async createBatchStreams(configs: StreamConfig[]): Promise<Transaction[]> {
+    this._ensureCanMutate();
+
+    if (!Array.isArray(configs)) {
+      throw new Error('Batch configs must be an array');
+    }
+
+    if (configs.length === 0) {
+      return [];
+    }
+
+    const senderAddr = await this._getSenderAddress();
+    const factoryId = this.config.factoryAddress ?? '';
+
+    // Validate every config before starting any work
+    for (let i = 0; i < configs.length; i++) {
+      const params = configs[i]!;
+      if (!params.recipient || typeof params.recipient !== 'string' || !params.recipient.trim()) {
+        throw new Error(`Invalid recipient address at index ${i}: must be a non-empty string`);
+      }
+      if (!params.token || typeof params.token !== 'string' || !params.token.trim()) {
+        throw new Error(`Invalid token address at index ${i}: must be a non-empty string`);
+      }
+      if (!params.depositAmount || typeof params.depositAmount !== 'string' || !params.depositAmount.trim()) {
+        throw new Error(`Invalid deposit amount at index ${i}: must be a non-empty string`);
+      }
+      if (params.durationSeconds !== undefined && (typeof params.durationSeconds !== 'number' || params.durationSeconds <= 0)) {
+        throw new Error(`Invalid durationSeconds at index ${i}: must be a positive number`);
+      }
+      if (params.ratePerSecond !== undefined && (typeof params.ratePerSecond !== 'string' || !params.ratePerSecond.trim())) {
+        throw new Error(`Invalid ratePerSecond at index ${i}: must be a non-empty string`);
+      }
+      if (!params.durationSeconds && !params.ratePerSecond) {
+        throw new Error(`Either durationSeconds or ratePerSecond must be provided at index ${i}`);
+      }
+    }
+
+    const chunks = this._chunkArray(configs, MAX_BATCH_SIZE);
+    const transactions: Transaction[] = [];
+
+    for (const chunk of chunks) {
+      const argsArray: xdr.ScVal[][] = [];
+
+      for (const params of chunk) {
+        const decimals = await getTokenDecimals(this.rpcUrl, this.passphrase, senderAddr, params.token);
+        const depositStroops = toStroops(params.depositAmount, decimals);
+        const rateStroops = params.ratePerSecond
+          ? BigInt(params.ratePerSecond)
+          : calculateRate(params.depositAmount, params.durationSeconds!, decimals);
+        const start = params.startTime ?? Math.floor(Date.now() / 1000);
+        const end = params.durationSeconds ? start + params.durationSeconds : 0;
+
+        argsArray.push([
+          new Address(senderAddr).toScVal(),
+          new Address(params.recipient).toScVal(),
+          new Address(params.token).toScVal(),
+          nativeToScVal(depositStroops, { type: 'i128' }),
+          nativeToScVal(rateStroops,    { type: 'i128' }),
+          nativeToScVal(start,          { type: 'u64'  }),
+          nativeToScVal(end,            { type: 'u64'  }),
+          boolToScVal(params.clawbackEnabled ?? false),
+        ]);
+      }
+
+      const tx = await buildBatchContractCallTx(
+        this.rpcUrl, this.passphrase, senderAddr, factoryId,
+        'create_stream', argsArray,
+      );
+
+      const server = this._server();
+      const sim = await server.simulateTransaction(tx);
+
+      if (SorobanRpc.Api.isSimulationError(sim)) {
+        throw ConduitError.fromSorobanMessage('factory', sim.error);
+      }
+
+      const assembled = SorobanRpc.assembleTransaction(tx, sim).build();
+      transactions.push(assembled);
+    }
+
+    return transactions;
   }
 
   /** Fetch full stream state from the deployed DripStream contract. */
@@ -423,6 +528,14 @@ export class StreamsModule {
     if (!this.activeWallet && !this.config.signer && !this.config.keypair) {
       throw new Error('keypair, wallet adapter, or signer is required for mutating operations');
     }
+  }
+
+  private _chunkArray<T>(arr: T[], size: number): T[][] {
+    const chunks: T[][] = [];
+    for (let i = 0; i < arr.length; i += size) {
+      chunks.push(arr.slice(i, i + size));
+    }
+    return chunks;
   }
 
   private async _getSenderAddress(): Promise<string> {

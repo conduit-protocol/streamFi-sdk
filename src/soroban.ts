@@ -45,10 +45,7 @@ function normalizePollingOptions(options: ConfirmationPollingOptions = {}): Requ
 }
 
 /**
- * Build a contract-call transaction for simulate or submit.
- *
- * Fetches the caller's account from the RPC to get the current sequence
- * number, then wraps the call in a TransactionBuilder.
+ * Build a contract-call transaction with a single invokeHostFunction operation.
  */
 export async function buildContractCallTx(
   rpcUrl:      string,
@@ -76,6 +73,42 @@ export async function buildContractCallTx(
     .addOperation(contract.call(method, ...args))
     .setTimeout(30)
     .build();
+}
+
+/**
+ * Build a contract-call transaction with multiple invokeHostFunction operations
+ * (one per set of arguments). Used for batch operations where several contract
+ * calls are assembled into a single Soroban transaction.
+ */
+export async function buildBatchContractCallTx(
+  rpcUrl:      string,
+  passphrase:  string,
+  caller:      string,
+  contractId:  string,
+  method:      string,
+  argsArray:   xdr.ScVal[][],
+): Promise<ReturnType<TransactionBuilder['build']>> {
+  const server  = new SorobanRpc.Server(rpcUrl, { allowHttp: rpcUrl.startsWith('http://') });
+
+  let account;
+  try {
+    account = await server.getAccount(caller);
+  } catch (err) {
+    throw RateLimitError.fromRpcError(err) ?? err;
+  }
+
+  const contract = new Contract(contractId);
+
+  const builder = new TransactionBuilder(account, {
+    fee:            BASE_FEE,
+    networkPassphrase: passphrase,
+  });
+
+  for (const args of argsArray) {
+    builder.addOperation(contract.call(method, ...args));
+  }
+
+  return builder.setTimeout(30).build();
 }
 
 /**
