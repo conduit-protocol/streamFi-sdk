@@ -37,6 +37,7 @@ vi.mock('../soroban.js', async () => {
   return {
     ...actual,
     buildContractCallTx: vi.fn().mockResolvedValue({ _stub: 'tx' }),
+    buildBatchContractCallTx: vi.fn().mockResolvedValue({ _stub: 'batch-tx' }),
     getTokenDecimals:    mockGetTokenDecimals,
   };
 });
@@ -266,6 +267,131 @@ describe('StreamsModule.create() — success path', () => {
     await vi.advanceTimersByTimeAsync(250);
     await expect(promise).rejects.toThrow('Transaction timed out: deadbeef');
     expect(mockGetTransaction).toHaveBeenCalledTimes(2);
+  });
+});
+
+describe('StreamsModule.createBatchStreams()', () => {
+  const makeStreamConfig = (overrides: Record<string, unknown> = {}) => ({
+    recipient:       RECIPIENT,
+    token:           TOKEN,
+    depositAmount:   '1000',
+    durationSeconds: 3600,
+    ...overrides,
+  });
+
+  it('returns an array of assembled transactions, one per chunk', async () => {
+    mockSimulate.mockResolvedValue(simSuccess(u64Scv(1n)));
+
+    const { StreamsModule } = await import('../streams.js');
+    const sdk = new StreamsModule(makeConfig());
+
+    const configs = Array.from({ length: 25 }, () => makeStreamConfig());
+    const txs = await sdk.createBatchStreams(configs);
+
+    expect(txs).toHaveLength(3);
+    expect(mockSimulate).toHaveBeenCalledTimes(3);
+  });
+
+  it('returns an empty array for an empty configs array', async () => {
+    const { StreamsModule } = await import('../streams.js');
+    const sdk = new StreamsModule(makeConfig());
+
+    const txs = await sdk.createBatchStreams([]);
+    expect(txs).toEqual([]);
+    expect(mockSimulate).not.toHaveBeenCalled();
+  });
+
+  it('throws when no signer/keypair/wallet is configured', async () => {
+    const { StreamsModule } = await import('../streams.js');
+    const sdk = new StreamsModule({ network: 'testnet', factoryAddress: FACTORY_ADDR });
+
+    await expect(sdk.createBatchStreams([makeStreamConfig()])).rejects.toThrow(
+      /keypair, wallet adapter, or signer/,
+    );
+  });
+
+  it('throws when configs is not an array', async () => {
+    const { StreamsModule } = await import('../streams.js');
+    const sdk = new StreamsModule(makeConfig());
+
+    await expect(sdk.createBatchStreams(null as unknown as import('../types/index.js').StreamConfig[])).rejects.toThrow(
+      /Batch configs must be an array/,
+    );
+  });
+
+  it('throws when a config is missing recipient', async () => {
+    const { StreamsModule } = await import('../streams.js');
+    const sdk = new StreamsModule(makeConfig());
+
+    await expect(sdk.createBatchStreams([{ ...makeStreamConfig(), recipient: '' }])).rejects.toThrow(
+      /Invalid recipient address at index 0/,
+    );
+  });
+
+  it('throws when a config is missing token', async () => {
+    const { StreamsModule } = await import('../streams.js');
+    const sdk = new StreamsModule(makeConfig());
+
+    await expect(sdk.createBatchStreams([{ ...makeStreamConfig(), token: '' }])).rejects.toThrow(
+      /Invalid token address at index 0/,
+    );
+  });
+
+  it('throws when a config is missing depositAmount', async () => {
+    const { StreamsModule } = await import('../streams.js');
+    const sdk = new StreamsModule(makeConfig());
+
+    await expect(sdk.createBatchStreams([{ ...makeStreamConfig(), depositAmount: '' }])).rejects.toThrow(
+      /Invalid deposit amount at index 0/,
+    );
+  });
+
+  it('throws when a config has neither durationSeconds nor ratePerSecond', async () => {
+    const { StreamsModule } = await import('../streams.js');
+    const sdk = new StreamsModule(makeConfig());
+    const config = makeStreamConfig();
+    delete (config as Record<string, unknown>).durationSeconds;
+
+    await expect(sdk.createBatchStreams([config])).rejects.toThrow(
+      /Either durationSeconds or ratePerSecond must be provided at index 0/,
+    );
+  });
+
+  it('throws a ConduitError on simulation failure', async () => {
+    mockSimulate.mockResolvedValue(simError('HostError: Error(Contract, #8)'));
+
+    const { StreamsModule } = await import('../streams.js');
+    const sdk = new StreamsModule(makeConfig());
+
+    const err = await sdk.createBatchStreams([makeStreamConfig()]).catch(e => e);
+    expect(err).toBeInstanceOf(ConduitError);
+    expect((err as ConduitError).contract).toBe('factory');
+  });
+
+  it('chunks configs into groups of MAX_BATCH_SIZE', async () => {
+    mockSimulate.mockResolvedValue(simSuccess(u64Scv(1n)));
+
+    const { StreamsModule } = await import('../streams.js');
+    const sdk = new StreamsModule(makeConfig());
+
+    const configs = Array.from({ length: 10 }, () => makeStreamConfig());
+    const txs = await sdk.createBatchStreams(configs);
+
+    expect(txs).toHaveLength(1);
+    expect(mockSimulate).toHaveBeenCalledTimes(1);
+  });
+
+  it('passes the correct factory address and method name to buildBatchContractCallTx', async () => {
+    mockSimulate.mockResolvedValue(simSuccess(u64Scv(1n)));
+
+    const { StreamsModule } = await import('../streams.js');
+    const sdk = new StreamsModule(makeConfig());
+
+    await sdk.createBatchStreams([makeStreamConfig()]);
+
+    expect(mockGetTokenDecimals).toHaveBeenCalledWith(
+      expect.any(String), expect.any(String), expect.any(String), TOKEN,
+    );
   });
 });
 

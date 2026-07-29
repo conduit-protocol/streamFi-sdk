@@ -63,6 +63,9 @@ export interface CreateStreamParams {
   ratePerSecond?: string;
 }
 
+/** Configuration for a single stream in a batch creation. */
+export type StreamConfig = CreateStreamParams;
+
 export interface CreateStreamResult {
   streamId:      bigint;
   streamAddress: string;
