@@ -83,7 +83,8 @@ export function subscribeToStream(
 ): Subscription {
   const server       = createRpcServer(rpcUrl);
   const pollInterval = handlers.pollInterval ?? 5000;
-  let   startLedger  = 0;  // updated after each successful poll
+  let   startLedger  = 0;  // fallback cursor for the initial poll
+  let   cursor: string | undefined;
   let   stopped      = false;
   let   timer: ReturnType<typeof setTimeout> | undefined;
 
@@ -92,7 +93,7 @@ export function subscribeToStream(
 
     try {
       const response = await server.getEvents({
-        ...(startLedger > 0 ? { startLedger } : {}),
+        ...(cursor ? { cursor } : (startLedger > 0 ? { startLedger } : {})),
         filters: [{
           type:        'contract',
           contractIds: [streamAddress],
@@ -101,12 +102,17 @@ export function subscribeToStream(
       });
 
       if (response.events.length > 0) {
-        // Update startLedger to avoid replaying events
-        const maxLedger = Math.max(...response.events.map(e => e.ledger));
-        startLedger = maxLedger + 1;
-
         for (const event of response.events) {
           dispatchEvent(event, handlers);
+        }
+      }
+
+      if (response.cursor) {
+        cursor = response.cursor;
+      } else {
+        cursor = undefined;
+        if (response.latestLedger !== undefined) {
+          startLedger = response.latestLedger + 1;
         }
       }
     } catch (err) {
