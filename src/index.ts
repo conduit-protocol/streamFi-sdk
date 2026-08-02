@@ -83,3 +83,12 @@ export type {
   Module48Result,
   Module48Metrics,
 } from './module48.js';
+
+export { Module49 } from './module49.js';
+export type {
+  Module49Config,
+  StreamBatchItem49,
+  Module49Result,
+  Module49Metrics,
+} from './module49.js';
+

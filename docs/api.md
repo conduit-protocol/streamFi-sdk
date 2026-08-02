@@ -758,3 +758,30 @@ new Module48(config?: Module48Config)
 * `clearCache(): void` - Clears the internal lookup cache and metrics.
 * `getPerformanceMetrics(): Module48Metrics` - Returns `totalProcessed`, `cacheHits`, `cacheMisses`, `averageExecutionTimeMs`, and `measuredSpeedupPercent` (a real measurement derived from this instance's own accumulated hit/miss timings, `null` until both have occurred at least once — not a fixed assumed percentage).
 
+---
+
+## `Module49` (Feature #49)
+
+Streaming analytics and evaluation engine implementing Feature #49. Built with memoized cache algorithms and pre-allocated buffer iteration for fast stream batch evaluation.
+
+### Constructor
+
+```typescript
+new Module49(config?: Module49Config)
+```
+
+| Option | Type | Default | Notes |
+|--------|------|---------|-------|
+| `cacheSize` | `number` | `1000` | Max entries in memoization cache |
+| `enableOptimization` | `boolean` | `true` | Enables memoized lookup caching |
+| `batchChunkSize` | `number` | `50` | Stream chunk size for batch processing |
+
+### Methods
+
+* `processSingleItem(item: StreamBatchItem49): Module49Result` - Evaluates a stream's withdrawable balance and progress.
+* `processStreamBatch(items: StreamBatchItem49[]): Module49Result[]` - Processes batch array of streams in chunks.
+* `computeOptimizedYield(ratePerSecond: bigint, durationSecs: number): bigint` - Fast BigInt yield calculation.
+* `clearCache(): void` - Clears the internal lookup cache and metrics.
+* `getPerformanceMetrics(): Module49Metrics` - Returns real-time metrics (`totalProcessed`, `cacheHits`, `cacheMisses`, `hitRate`, `averageExecutionTimeMs`).
+
+
