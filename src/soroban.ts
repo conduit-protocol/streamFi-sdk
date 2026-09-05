@@ -19,6 +19,7 @@ import type { Network } from './types/index.js';
 import type { Signer } from './signer.js';
 import { RateLimitError, StreamFiNetworkError, InsufficientBalanceError } from './errors.js';
 import { withRetry } from './with-retry.js';
+import { recordSuccess, recordFailure } from './rpc-circuit-state.js';
 
 // ── RPC Server cache ─────────────────────────────────────────────────────────
 // Reusing SorobanRpc.Server instances avoids creating a new HTTP agent per
@@ -111,7 +112,15 @@ export function createRpcServer(rpcUrl: string): SorobanRpc.Server {
           return withRetry(
             () => (origMethod as (...a: unknown[]) => Promise<unknown>).apply(target, args),
             { maxRetries: 3, baseDelayMs: 500, backoffFactor: 2 },
-          );
+          )
+            .then((result) => {
+              recordSuccess(rpcUrl);
+              return result;
+            })
+            .catch((err) => {
+              recordFailure(rpcUrl);
+              throw err;
+            });
         };
       }
       return Reflect.get(target, propKey, receiver);

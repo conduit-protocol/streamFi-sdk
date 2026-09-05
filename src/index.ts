@@ -76,6 +76,7 @@ export {
 // RPC server lifecycle
 export { getServer, clearServerCache } from './soroban.js';
 export { getTokenDecimals, clearTokenDecimalsCache } from './soroban.js';
+export { getCircuitState, recordSuccess, recordFailure, resetCircuit, getAllCircuitStates, type CircuitState, type CircuitStatus } from "./rpc-circuit-state.js";
 
 export {
   formatAddress,
