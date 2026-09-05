@@ -1,4 +1,4 @@
-import { describe, it, expect } from 'vitest';
+﻿import { describe, it, expect } from 'vitest';
 import { StreamBuilder } from '../builder.js';
 
 describe('StreamBuilder', () => {
@@ -26,7 +26,7 @@ describe('StreamBuilder', () => {
         .recipient('GABAEAQCAIBAEAQCAIBAEAQCAIBAEAQCAIBAEAQCAIBAEAQCAIBAEJXA')
         .amount(1000)
         .build();
-    }).toThrow('Missing required parameters for StreamBuilder');
+    }).toThrow('Validation failed');
 
     expect(() => {
       new StreamBuilder()
@@ -34,7 +34,7 @@ describe('StreamBuilder', () => {
         .recipient('GABAEAQCAIBAEAQCAIBAEAQCAIBAEAQCAIBAEAQCAIBAEAQCAIBAEJXA')
         .amount(1000)
         .build();
-    }).toThrow('Missing required parameters for StreamBuilder');
+    }).toThrow('Validation failed');
 
     expect(() => {
       new StreamBuilder()
@@ -42,7 +42,7 @@ describe('StreamBuilder', () => {
         .sender('GAAQCAIBAEAQCAIBAEAQCAIBAEAQCAIBAEAQCAIBAEAQCAIBAEAQDZ7H')
         .amount(1000)
         .build();
-    }).toThrow('Missing required parameters for StreamBuilder');
+    }).toThrow('Validation failed');
 
     expect(() => {
       new StreamBuilder()
@@ -50,7 +50,7 @@ describe('StreamBuilder', () => {
         .sender('GAAQCAIBAEAQCAIBAEAQCAIBAEAQCAIBAEAQCAIBAEAQCAIBAEAQDZ7H')
         .recipient('GABAEAQCAIBAEAQCAIBAEAQCAIBAEAQCAIBAEAQCAIBAEAQCAIBAEJXA')
         .build();
-    }).toThrow('Missing required parameters for StreamBuilder');
+    }).toThrow('Validation failed');
   });
 
 
@@ -97,7 +97,7 @@ describe('StreamBuilder', () => {
       .ratePerSecond(500)
       .build();
 
-    // build()'s return type promises `ratePerSecond?: string` — the runtime
+    // build()'s return type promises `ratePerSecond?: string` 鈥?the runtime
     // value must match the declared type (see #459).
     expect(stream.ratePerSecond).toBe('500');
     expect(typeof stream.ratePerSecond).toBe('string');

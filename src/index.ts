@@ -1,5 +1,5 @@
 export { ConduitClient } from './client.js';
-export { StreamBuilder, ConduitBatcher } from './builder.js';
+export { StreamBuilder, ConduitBatcher, ValidationError } from './builder.js';
 export type {
   BatchOperation,
   BatchExecuteOptions,

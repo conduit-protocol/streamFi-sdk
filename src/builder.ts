@@ -50,6 +50,19 @@ class Semaphore {
   }
 }
 
+
+/**
+ * Aggregated validation error carrying all issues found during build().
+ */
+export class ValidationError extends Error {
+  readonly issues: string[];
+
+  constructor(issues: string[]) {
+    super(`Validation failed with ${issues.length} issue(s): ${issues.join('; ')}`);
+    this.name = 'ValidationError';
+    this.issues = issues;
+  }
+}
 /** Fluent builder for constructing stream configurations. */
 export class StreamBuilder {
   private _token?: string | undefined;
@@ -205,11 +218,21 @@ export class StreamBuilder {
     if (this.isDestroyed) {
       throw new Error('StreamBuilder has been destroyed');
     }
-    if (this._token === undefined || this._token === null ||
-        this._sender === undefined || this._sender === null ||
-        this._recipient === undefined || this._recipient === null ||
-        this._amount === undefined || this._amount === null) {
-      throw new Error('Missing required parameters for StreamBuilder');
+    const issues: string[] = [];
+    if (this._token === undefined || this._token === null) {
+      issues.push('token is required');
+    }
+    if (this._sender === undefined || this._sender === null) {
+      issues.push('sender is required');
+    }
+    if (this._recipient === undefined || this._recipient === null) {
+      issues.push('recipient is required');
+    }
+    if (this._amount === undefined || this._amount === null) {
+      issues.push('amount is required');
+    }
+    if (issues.length > 0) {
+      throw new ValidationError(issues);
     }
 
     const config: Record<string, unknown> = {

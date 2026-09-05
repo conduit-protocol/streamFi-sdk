@@ -1,8 +1,8 @@
-/**
+﻿/**
  * Regression tests for #435: StreamBuilder + ConduitBatcher payload shape
  * must match the real create_stream ABI
  * (sender, recipient, token, deposit_amount: i128, rate_per_sec: i128,
- * start_time: u64, end_time: u64, clawback_enabled: bool) — not a camelCase
+ * start_time: u64, end_time: u64, clawback_enabled: bool) 鈥?not a camelCase
  * map with an i64 amount, as `build()` alone produces.
  */
 
@@ -41,14 +41,14 @@ function decodeArgs(envelope: string) {
 }
 
 describe('StreamBuilder.toContractArgs()', () => {
-  it('throws when ratePerSecond was never set — the contract has no way to derive it', () => {
+  it('throws when ratePerSecond was never set 鈥?the contract has no way to derive it', () => {
     const builder = new StreamBuilder().token(TOKEN).sender(SENDER).recipient(RECIPIENT).amount(1000);
     expect(() => builder.toContractArgs()).toThrow('ratePerSecond is required');
   });
 
   it('throws the same missing-required-field error as build() when incomplete', () => {
     const builder = new StreamBuilder().token(TOKEN).sender(SENDER).ratePerSecond(10);
-    expect(() => builder.toContractArgs()).toThrow('Missing required parameters for StreamBuilder');
+    expect(() => builder.toContractArgs()).toThrow('Validation failed');
   });
 
   it('produces exactly 8 args in create_stream ABI order and type', () => {
