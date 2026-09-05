@@ -518,5 +518,41 @@ export function isConduitError(value: unknown): value is Error {
     'RpcServiceUnavailableError',
     'IndexerTimeoutError',
     'OperationAbortedError',
+    'ValidationError',
   ].includes(value.name);
+}
+
+// ── Validation error ─────────────────────────────────────────────────────────
+
+/**
+ * Thrown when a {@link StreamBuilder} fails validation with one or more
+ * issues. Unlike the previous behaviour of throwing on the first problem,
+ * `validate()` collects every issue and raises a single error so callers
+ * can surface the full list in a form or toast.
+ *
+ * @example
+ * ```ts
+ * try {
+ *   builder.build();
+ * } catch (err) {
+ *   if (err instanceof ValidationError) {
+ *     console.error(err.message);     // "3 validation issue(s) ..."
+ *     console.error(err.issues);      // ["token is required", ...]
+ *   }
+ * }
+ * ```
+ */
+export class ValidationError extends Error {
+  /** The individual validation messages collected by `validate()`. */
+  readonly issues: readonly string[];
+
+  constructor(issues: string[]) {
+    const summary = issues.length === 1
+      ? issues[0]
+      : `${issues.length} validation issue(s): ${issues.join('; ')}`;
+    super(summary);
+    this.name = 'ValidationError';
+    this.issues = Object.freeze(issues.slice());
+    Object.setPrototypeOf(this, new.target.prototype);
+  }
 }

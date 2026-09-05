@@ -13,7 +13,7 @@ const TEST_CONTEXT = {
 describe('StreamBuilder Network Interruption & Payload Queueing Regression Tests', () => {
   it('throws boundary check error when build is called with missing or null parameters', () => {
     const builder = new StreamBuilder();
-    expect(() => builder.build()).toThrow('Missing required parameters for StreamBuilder');
+    expect(() => builder.build()).toThrow('token is required');
 
     const nullTokenBuilder = new StreamBuilder();
     expect(() => nullTokenBuilder.token(null as any)).toThrow(
