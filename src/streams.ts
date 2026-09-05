@@ -897,6 +897,11 @@ export class StreamsModule {
     this._factory.clearAddressCache();
   }
 
+  /** Returns address-cache hit/miss metrics (delegates to FactoryModule). */
+  getCacheMetrics(): { hits: number; misses: number; size: number; hitRate: number } {
+    return this._factory.getCacheMetrics();
+  }
+
   /** Synchronous subscribe - resolves address lazily on first poll tick. */
   subscribe(streamId: bigint | string, handlers: StreamEventHandlers): Subscription {
     let inner: Subscription | null = null;

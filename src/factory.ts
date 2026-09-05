@@ -52,6 +52,8 @@ export class FactoryModule {
   // stream_address simulation for each of them on every refresh (#568).
   private readonly addressCache = new Map<string, string | null>();
   private readonly negativeCacheExpiry = new Map<string, number>();
+  private _cacheHits = 0;
+  private _cacheMisses = 0;
 
   constructor(private readonly config: ConduitConfig) {
     // Guard against direct construction with an unsupported network, which
@@ -128,6 +130,21 @@ export class FactoryModule {
   clearAddressCache(): void {
     this.addressCache.clear();
     this.negativeCacheExpiry.clear();
+    this._cacheHits = 0;
+    this._cacheMisses = 0;
+  }
+
+  /**
+   * Returns address-cache hit/miss metrics so consumers can tune cache size.
+   */
+  getCacheMetrics(): { hits: number; misses: number; size: number; hitRate: number } {
+    const total = this._cacheHits + this._cacheMisses;
+    return {
+      hits:     this._cacheHits,
+      misses:   this._cacheMisses,
+      size:     this.addressCache.size,
+      hitRate:  total > 0 ? this._cacheHits / total : 0,
+    };
   }
 
   /** Total number of streams ever created through this factory. */
@@ -148,13 +165,14 @@ export class FactoryModule {
 
     const cached = this.addressCache.get(key);
     if (cached !== undefined) {
-      if (cached !== null) return cached;
+      if (cached !== null) { this._cacheHits++; return cached; }
       // Negative hit — honour it only while its TTL is live (#568).
       const expiresAt = this.negativeCacheExpiry.get(key) ?? 0;
-      if (Date.now() < expiresAt) return null;
+      if (Date.now() < expiresAt) { this._cacheHits++; return null; }
       this.addressCache.delete(key);
       this.negativeCacheExpiry.delete(key);
     }
+    this._cacheMisses++;
 
     const caller = await this._resolveCallerAddress();
     const tx  = await buildContractCallTx(
