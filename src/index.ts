@@ -7,6 +7,8 @@ export type {
   BatchResult,
 } from './builder.js';
 export { withRetry, isTransientRpcError } from './with-retry.js';
+export { withCircuitBreaker, getCircuitState, CircuitOpenError, configureCircuitBreaker } from './circuit-breaker.js';
+export type { CircuitBreakerOptions, CircuitState } from './circuit-breaker.js';
 export type { WithRetryOptions } from './with-retry.js';
 export {
   buildBatchTransactions,
