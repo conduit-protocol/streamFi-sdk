@@ -50,6 +50,104 @@ export function getServer(rpcUrl: string): SorobanRpc.Server {
 export function clearServerCache(): void {
   _serverCache.clear();
   _proxiedServerCache.clear();
+  clearCircuitState();
+}
+
+// ── Circuit Breaker per-endpoint state ────────────────────────────────────────
+
+export type CircuitState = 'closed' | 'open' | 'half-open';
+
+export interface CircuitBreakerConfig {
+  /** Consecutive failures before tripping to open. Default: 3 */
+  failureThreshold?: number;
+  /** Cooldown time in ms before transitioning from open to half-open. Default: 15_000 */
+  resetTimeoutMs?: number;
+}
+
+export class CircuitBreakerOpenError extends Error {
+  readonly scope: string;
+  readonly resetAt: number;
+
+  constructor(scope: string, resetAt: number) {
+    super(`Circuit breaker is OPEN for RPC endpoint: ${scope}. Cooldown until ${new Date(resetAt).toISOString()}`);
+    this.name = 'CircuitBreakerOpenError';
+    this.scope = scope;
+    this.resetAt = resetAt;
+  }
+}
+
+interface CircuitRecord {
+  state: CircuitState;
+  consecutiveFailures: number;
+  lastFailureAt: number;
+  resetAt: number;
+}
+
+const DEFAULT_CIRCUIT_FAILURE_THRESHOLD = 3;
+const DEFAULT_CIRCUIT_RESET_TIMEOUT_MS = 15_000;
+
+const _circuitMap = new Map<string, CircuitRecord>();
+
+/**
+ * Returns the current circuit state for a given RPC scope/endpoint URL.
+ * Never throws; returns 'closed' | 'open' | 'half-open'.
+ * If the reset timeout has elapsed while open, automatically transitions to 'half-open'.
+ */
+export function getCircuitState(scope: string, config: CircuitBreakerConfig = {}): CircuitState {
+  const record = _circuitMap.get(scope);
+  if (!record) return 'closed';
+
+  if (record.state === 'open') {
+    const timeout = config.resetTimeoutMs ?? DEFAULT_CIRCUIT_RESET_TIMEOUT_MS;
+    if (Date.now() >= record.resetAt) {
+      record.state = 'half-open';
+      return 'half-open';
+    }
+  }
+
+  return record.state;
+}
+
+export function recordCircuitSuccess(scope: string): void {
+  const record = _circuitMap.get(scope);
+  if (record) {
+    record.state = 'closed';
+    record.consecutiveFailures = 0;
+  }
+}
+
+export function recordCircuitFailure(scope: string, config: CircuitBreakerConfig = {}): void {
+  const threshold = config.failureThreshold ?? DEFAULT_CIRCUIT_FAILURE_THRESHOLD;
+  const timeout = config.resetTimeoutMs ?? DEFAULT_CIRCUIT_RESET_TIMEOUT_MS;
+  const now = Date.now();
+
+  let record = _circuitMap.get(scope);
+  if (!record) {
+    record = {
+      state: 'closed',
+      consecutiveFailures: 0,
+      lastFailureAt: now,
+      resetAt: 0,
+    };
+    _circuitMap.set(scope, record);
+  }
+
+  record.consecutiveFailures += 1;
+  record.lastFailureAt = now;
+
+  if (record.consecutiveFailures >= threshold || record.state === 'half-open') {
+    record.state = 'open';
+    record.resetAt = now + timeout;
+  }
+}
+
+/** Clear circuit breaker state for a specific scope or all scopes. */
+export function clearCircuitState(scope?: string): void {
+  if (scope) {
+    _circuitMap.delete(scope);
+  } else {
+    _circuitMap.clear();
+  }
 }
 
 // ── Proxied server cache ─────────────────────────────────────────────────────
@@ -89,11 +187,15 @@ function normalizePollingOptions(options: ConfirmationPollingOptions = {}): Requ
 }
 
 /**
- * Creates a SorobanRpc.Server instance wrapped with an exponential backoff retry mechanism.
+ * Creates a SorobanRpc.Server instance wrapped with an exponential backoff retry mechanism
+ * and per-endpoint circuit breaker state tracking.
  * Retries on HTTP 429 rate limits (throttled — back off and retry the same
  * endpoint), but fails fast on HTTP 503, which is surfaced as a
  * {@link RpcServiceUnavailableError} so callers can fail over to a
  * different RPC URL instead of retrying a node that is down. See #456.
+ *
+ * Exposes per-endpoint circuit state via {@link getCircuitState} so consumers
+ * can observe 'RPC degraded' without catching thrown errors. See #630.
  */
 export function createRpcServer(rpcUrl: string): SorobanRpc.Server {
   const cached = _proxiedServerCache.get(rpcUrl);
@@ -108,10 +210,23 @@ export function createRpcServer(rpcUrl: string): SorobanRpc.Server {
       const origMethod = Reflect.get(target, propKey, receiver) as unknown;
       if (typeof origMethod === 'function' && typeof propKey === 'string' && !EXCLUDED_METHODS.includes(propKey)) {
         return async function (...args: unknown[]) {
-          return withRetry(
-            () => (origMethod as (...a: unknown[]) => Promise<unknown>).apply(target, args),
-            { maxRetries: 3, baseDelayMs: 500, backoffFactor: 2 },
-          );
+          const currentState = getCircuitState(rpcUrl);
+          if (currentState === 'open') {
+            const resetAt = _circuitMap.get(rpcUrl)?.resetAt ?? Date.now();
+            throw new CircuitBreakerOpenError(rpcUrl, resetAt);
+          }
+
+          try {
+            const result = await withRetry(
+              () => (origMethod as (...a: unknown[]) => Promise<unknown>).apply(target, args),
+              { maxRetries: 3, baseDelayMs: 500, backoffFactor: 2 },
+            );
+            recordCircuitSuccess(rpcUrl);
+            return result;
+          } catch (err) {
+            recordCircuitFailure(rpcUrl);
+            throw err;
+          }
         };
       }
       return Reflect.get(target, propKey, receiver);

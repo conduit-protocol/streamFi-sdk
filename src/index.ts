@@ -73,8 +73,16 @@ export {
   timeoutSignal,
 } from './utils.js';
 
-// RPC server lifecycle
-export { getServer, clearServerCache } from './soroban.js';
+// RPC server lifecycle & circuit state
+export {
+  getServer,
+  clearServerCache,
+  createRpcServer,
+  getCircuitState,
+  clearCircuitState,
+  CircuitBreakerOpenError,
+} from './soroban.js';
+export type { CircuitState, CircuitBreakerConfig } from './soroban.js';
 export { getTokenDecimals, clearTokenDecimalsCache } from './soroban.js';
 
 export {
