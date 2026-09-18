@@ -50,6 +50,28 @@ class Semaphore {
   }
 }
 
+/** Individual validation problem identified on a builder field. */
+export interface ValidationIssue {
+  field: string;
+  message: string;
+}
+
+/**
+ * Thrown by StreamBuilder.build() when one or more required fields are missing or invalid.
+ * Aggregates all validation problems into the `issues` array instead of failing on the first.
+ * See Issue #631.
+ */
+export class ValidationError extends Error {
+  readonly issues: ValidationIssue[];
+
+  constructor(issues: ValidationIssue[]) {
+    const detail = issues.map((i) => `${i.field}: ${i.message}`).join(', ');
+    super(`Missing required parameters for StreamBuilder: ${detail}`);
+    this.name = 'ValidationError';
+    this.issues = issues;
+  }
+}
+
 /** Fluent builder for constructing stream configurations. */
 export class StreamBuilder {
   private _token?: string | undefined;
@@ -205,11 +227,23 @@ export class StreamBuilder {
     if (this.isDestroyed) {
       throw new Error('StreamBuilder has been destroyed');
     }
-    if (this._token === undefined || this._token === null ||
-        this._sender === undefined || this._sender === null ||
-        this._recipient === undefined || this._recipient === null ||
-        this._amount === undefined || this._amount === null) {
-      throw new Error('Missing required parameters for StreamBuilder');
+
+    const issues: ValidationIssue[] = [];
+    if (this._token === undefined || this._token === null || this._token === '') {
+      issues.push({ field: 'token', message: 'token address is required' });
+    }
+    if (this._sender === undefined || this._sender === null || this._sender === '') {
+      issues.push({ field: 'sender', message: 'sender address is required' });
+    }
+    if (this._recipient === undefined || this._recipient === null || this._recipient === '') {
+      issues.push({ field: 'recipient', message: 'recipient address is required' });
+    }
+    if (this._amount === undefined || this._amount === null) {
+      issues.push({ field: 'amount', message: 'amount is required' });
+    }
+
+    if (issues.length > 0) {
+      throw new ValidationError(issues);
     }
 
     const config: Record<string, unknown> = {
