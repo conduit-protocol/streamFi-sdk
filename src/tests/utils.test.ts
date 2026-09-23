@@ -5,6 +5,8 @@ import {
   calculateRate,
   calculateYield,
   streamProgress,
+  remainingTime,
+  estimatedCompletionDate,
   normalizeProgress,
   withdrawableLocal,
   bigintSafeStringify,
@@ -197,6 +199,24 @@ describe('streamProgress', () => {
     const now = Math.floor(Date.now() / 1000);
     const s = makeStream({ startTime: now - 100, endTime: 0 });
     expect(Number.isNaN(streamProgress(s, now))).toBe(true);
+  });
+});
+
+describe('stream time helpers', () => {
+  it('returns seconds remaining and clamps completed streams to zero', () => {
+    const stream = makeStream({ startTime: 900, endTime: 2_000 });
+    expect(remainingTime(stream, 1_500)).toBe(500);
+    expect(remainingTime(stream, 2_001)).toBe(0);
+  });
+
+  it('returns zero for open-ended streams', () => {
+    expect(remainingTime(makeStream({ endTime: 0 }), 1_500)).toBe(0);
+  });
+
+  it('returns the stream end timestamp as a Date', () => {
+    expect(estimatedCompletionDate(makeStream({ endTime: 1_700_000_000 }))).toEqual(
+      new Date(1_700_000_000 * 1000),
+    );
   });
 });
 

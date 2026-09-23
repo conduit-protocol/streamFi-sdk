@@ -23,7 +23,7 @@ export type {
   BatchTxStatus,
   BatchSubmitOptions,
 } from './batch-tx.js';
-export { GraphQLIndexer, DEFAULT_INDEXER_TIMEOUT_MS } from './indexer.js';
+export { GraphQLIndexer, DEFAULT_INDEXER_TIMEOUT_MS, DEFAULT_INDEXER_MAX_PAGES } from './indexer.js';
 export type {
   GraphQLQueryOptions,
   GraphQLSubscriptionOptions,
@@ -67,6 +67,8 @@ export {
   calculateRate,
   calculateYield,
   streamProgress,
+  remainingTime,
+  estimatedCompletionDate,
   normalizeProgress,
   withdrawableLocal,
   bigintSafeStringify,
@@ -123,4 +125,3 @@ export type {
   StreamRiskAssessment,
   Module44Metrics,
 } from './module44.js';
-

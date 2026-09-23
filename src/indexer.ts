@@ -77,6 +77,8 @@ interface GraphQLServerMessage {
  * `dashboard/transaction-history.ts` and `examples/dashboard/.../apollo-client.ts`).
  */
 export const DEFAULT_INDEXER_TIMEOUT_MS = 15_000;
+/** Maximum number of pages fetched by {@link GraphQLIndexer.fetchAll}. */
+export const DEFAULT_INDEXER_MAX_PAGES = 1_000;
 /**
  * Computes the SHA-256 hex digest of `input` using the Web Crypto API,
  * falling back to Node's `crypto` module when `crypto.subtle` is not
@@ -106,6 +108,34 @@ function isPersistedQueryNotFound(body: unknown): boolean {
       typeof error === 'object' &&
       ((error as { message?: string }).message ?? '').includes('PERSISTED_QUERY_NOT_FOUND'),
   );
+}
+
+interface PaginatedCollection {
+  items: unknown[];
+  hasNextPage: boolean;
+  endCursor?: string;
+}
+
+function findPaginatedCollection(value: unknown): PaginatedCollection | undefined {
+  if (!value || typeof value !== 'object') return undefined;
+  for (const entry of Object.values(value as Record<string, unknown>)) {
+    if (!entry || typeof entry !== 'object') continue;
+    const candidate = entry as Record<string, unknown>;
+    const itemsKey = ['items', 'nodes', 'results'].find((key) => Array.isArray(candidate[key]));
+    const pageInfo = candidate.pageInfo;
+    if (itemsKey && pageInfo && typeof pageInfo === 'object') {
+      const info = pageInfo as Record<string, unknown>;
+      const result: PaginatedCollection = {
+        items: candidate[itemsKey] as unknown[],
+        hasNextPage: info.hasNextPage === true,
+      };
+      if (typeof info.endCursor === 'string') result.endCursor = info.endCursor;
+      return result;
+    }
+    const nested = findPaginatedCollection(entry);
+    if (nested) return nested;
+  }
+  return undefined;
 }
 
 
@@ -189,6 +219,41 @@ export class GraphQLIndexer {
     }
 
     return body?.data;
+  }
+
+  /**
+   * Fetches every page of a cursor-based GraphQL collection.
+   *
+   * The response is expected to contain one collection with an `items`,
+   * `nodes`, or `results` array and GraphQL-style `pageInfo`. The helper
+   * preserves the original query and updates its `variables.cursor` value.
+   */
+  async fetchAll(options: GraphQLQueryOptions): Promise<unknown[]> {
+    const results: unknown[] = [];
+    let cursor: unknown = options.variables?.cursor;
+
+    for (let page = 0; page < DEFAULT_INDEXER_MAX_PAGES; page++) {
+      const data = await this.query({
+        ...options,
+        variables: { ...(options.variables ?? {}), cursor },
+      });
+      const collection = findPaginatedCollection(data);
+      if (!collection) {
+        throw new Error('GraphQLIndexer.fetchAll expected a paginated collection response');
+      }
+      results.push(...collection.items);
+
+      if (!collection.hasNextPage) return results;
+      if (typeof collection.endCursor !== 'string' || collection.endCursor.length === 0) {
+        throw new Error('GraphQLIndexer.fetchAll received a page with no next cursor');
+      }
+      if (collection.endCursor === cursor) {
+        throw new Error('GraphQLIndexer.fetchAll received an unchanged pagination cursor');
+      }
+      cursor = collection.endCursor;
+    }
+
+    throw new Error(`GraphQLIndexer.fetchAll exceeded the maximum page limit of ${DEFAULT_INDEXER_MAX_PAGES}`);
   }
 
   /**

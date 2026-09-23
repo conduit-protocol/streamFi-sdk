@@ -105,6 +105,17 @@ export function streamProgress(stream: StreamInfo, nowSec = Math.floor(Date.now(
   return (nowSec - startTime) / (endTime - startTime);
 }
 
+/** Seconds remaining until a finite stream is fully vested. */
+export function remainingTime(stream: StreamInfo, nowSec = Math.floor(Date.now() / 1000)): number {
+  if (stream.endTime === 0 || nowSec >= stream.endTime) return 0;
+  return stream.endTime - nowSec;
+}
+
+/** Estimated wall-clock date at which a stream is fully vested. */
+export function estimatedCompletionDate(stream: StreamInfo): Date {
+  return new Date(stream.endTime * 1000);
+}
+
 /**
  * Normalizes a `streamProgress()` result for display/comparison purposes,
  * mapping the NaN case (open-ended stream that has started) to the
