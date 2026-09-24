@@ -82,6 +82,9 @@ export {
   timeoutSignal,
 } from './utils.js';
 
+// Constants
+export { MIN_STREAM_DURATION_SECONDS } from './constants.js';
+
 // RPC server lifecycle
 export { getServer, clearServerCache, resolveFee } from './soroban.js';
 export { getTokenDecimals, clearTokenDecimalsCache } from './soroban.js';
