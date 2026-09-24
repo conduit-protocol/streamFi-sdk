@@ -62,6 +62,25 @@ main().catch(console.error);
 
 ---
 
+## Security
+
+This SDK signs transactions using a `Keypair` (see [Quickstart](#quickstart)), which means it
+directly handles secret keys. Before you paste a secret key into anything:
+
+- **Never bundle a mainnet secret client-side.** A raw `Keypair` in browser-shipped code is
+  readable by anyone who opens dev tools. Keep `keypair`-based config to server-side code,
+  scripts, or testnet demos only.
+- **Prefer a `WalletAdapter` in browser contexts.** For any app a real user interacts with in a
+  browser, use `WalletConnectAdapter` (or another `WalletAdapter` implementation) so signing
+  happens in the user's own wallet, not in your app's memory. See
+  [WalletConnect v2 Integration](#walletconnect-v2-integration-mobile--browser-wallets) below,
+  and [Migrating from a keypair to a WalletAdapter](#migrating-from-a-keypair-to-a-walletadapter)
+  if you're starting from the quickstart pattern.
+- **Found a vulnerability?** Do not open a public issue. See [`SECURITY.md`](./SECURITY.md) for
+  the private disclosure process and a fuller list of SDK-level security considerations.
+
+---
+
 ## Installation
 
 ```bash
@@ -140,6 +159,56 @@ You can also update the active wallet dynamically:
 ```typescript
 client.setWallet(walletAdapter);
 ```
+
+### Migrating from a keypair to a WalletAdapter
+
+The [Quickstart](#quickstart) configures `ConduitClient` with a raw `Keypair`, which is fine for
+scripts and testnet demos but not for a production browser app (see [Security](#security)).
+Moving to adapter-based signing takes one of two forms:
+
+**Constructor-time (start the client already on an adapter):**
+
+```typescript
+// Before
+const client = new ConduitClient({
+  network: 'testnet',
+  keypair: Keypair.fromSecret(process.env.STELLAR_SECRET!),
+  factoryAddress: process.env.FACTORY_ADDRESS!,
+});
+
+// After
+const walletAdapter = new WalletConnectAdapter({
+  projectId: 'YOUR_WALLETCONNECT_PROJECT_ID',
+  chainId: 'stellar:testnet',
+});
+await walletAdapter.connect();
+
+const client = new ConduitClient({
+  network: 'testnet',
+  wallet: walletAdapter,
+  factoryAddress: process.env.FACTORY_ADDRESS!,
+});
+```
+
+**Runtime swap (client already exists, e.g. connecting a wallet after initial page load):**
+
+```typescript
+// Before: client was constructed with `keypair` (or no signer at all)
+const client = new ConduitClient({ network: 'testnet', factoryAddress: process.env.FACTORY_ADDRESS! });
+
+// After: swap in the adapter once the user connects their wallet
+const walletAdapter = new WalletConnectAdapter({
+  projectId: 'YOUR_WALLETCONNECT_PROJECT_ID',
+  chainId: 'stellar:testnet',
+});
+await walletAdapter.connect();
+client.setWallet(walletAdapter);
+```
+
+`setWallet()` only affects `client.streams` — `client.factory` and `client.governor` are
+read-only and keep using `config.keypair` (if any) for simulation fee sourcing. It throws
+`UnsupportedChainError` if the adapter's `chainId` doesn't match the network the client was
+configured for. See [`setWallet`](docs/api.md#clientstreams) in the API reference for details.
 
 ---
 

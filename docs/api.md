@@ -399,6 +399,37 @@ in each one.
 
 ---
 
+## Bounds & Limits
+
+Every min/max constraint the SDK is aware of, whether it's enforced on-chain by the
+contract, client-side by the SDK, or both. If a bound is enforced by the contract, an
+out-of-range call still reaches the network and fails there (see [Error Codes](#error-codes))
+— the SDK only pre-validates the ones marked "SDK" below to fail fast without a round trip.
+
+| Bound | Value | Enforced by | Constant |
+|-------|-------|-------------|----------|
+| Minimum stream duration | 3600 seconds (1 hour) | Contract (`DripGovernor.min_duration_seconds`) | Not exported — see [#736](https://github.com/conduit-protocol/streamFi-sdk/issues/736)-adjacent companion constants issue; currently only documented in the [Quickstart](../README.md#quickstart) code comment and the `create()` [Validation](../README.md#create-params) list |
+| Maximum rate per second | Governor-configured (`max_rate_per_second`) | Contract (`DripGovernor`) | Not exported; surfaced only via `FactoryErrorCode.RateExceedsMax` (code 8) if exceeded |
+| Deposit amount | `> 0` | Contract (`FactoryErrorCode.InvalidDeposit`) | Not exported |
+| Withdraw / top-up amount | `> 0` | Contract (`StreamErrorCode.InvalidAmount`) | Not exported |
+| Rate per second | `> 0` | Contract (`FactoryErrorCode.InvalidRate`) | Not exported |
+| `startTime` | `>= now` | Contract (`FactoryErrorCode.BackdatedStream`) | Not exported |
+| List pagination page size (default) | 20 | SDK, client-side | [`DEFAULT_LIST_LIMIT`](../src/constants.ts) |
+| List pagination page size (max) | 100 | SDK, client-side — clamped before the request is sent so an oversized `limit` never reaches `streams_by_sender` / `streams_by_recipient` (see [#489](https://github.com/conduit-protocol/streamFi-sdk/issues/489)) | [`MAX_LIST_LIMIT`](../src/constants.ts) via [`clampListLimit()`](../src/constants.ts) |
+| Pagination `offset` | `[0, 2^32 - 1]` (valid `u32` range) | SDK, client-side | [`clampOffset()`](../src/constants.ts) |
+| `batchWithdraw` / builder batch size (default max) | 50 | SDK, client-side | `DEFAULT_MAX_BATCH_SIZE` in [`src/builder.ts`](../src/builder.ts) — not re-exported from `src/constants.ts`; override via `maxBatchSize` in `TransactionBatcher` options |
+
+**Note on client-side vs. contract enforcement:** where a bound is contract-enforced only
+(no SDK-side constant), the SDK does not pre-validate the value — it relies on the
+contract to reject the call and surfaces the resulting error code (see
+[Error Codes](#error-codes)). Only the list-pagination and batch-size bounds have a
+dedicated exported constant in [`src/constants.ts`](../src/constants.ts); the duration,
+rate, deposit, and amount bounds above are contract-side only and should be treated as
+subject to change without a corresponding SDK release — always confirm against the
+deployed `DripGovernor` values for production use.
+
+---
+
 ## Utility functions
 
 ```typescript
