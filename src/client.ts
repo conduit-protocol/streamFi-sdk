@@ -1,10 +1,25 @@
-import type { ConduitConfig, CreateStreamParams, CreateStreamResult, ListStreamsParams, PaginatedStreams, StreamEventHandlers, StreamInfo, Subscription, FeeEstimate, StreamOperation } from './types/index.js';
-import type { WalletAdapter } from './adapters/types.js';
-import { DEFAULT_RPC }               from './soroban.js';
-import { StreamsModule }             from './streams.js';
-import { FactoryModule }             from './factory.js';
-import { GovernorModule }            from './governor.js';
-import { SUPPORTED_NETWORKS, UnsupportedChainError, CAIP2_TO_NETWORK } from './errors.js';
+import type {
+  ConduitConfig,
+  CreateStreamParams,
+  CreateStreamResult,
+  ListStreamsParams,
+  PaginatedStreams,
+  StreamEventHandlers,
+  StreamInfo,
+  Subscription,
+  FeeEstimate,
+  StreamOperation,
+} from "./types/index.js";
+import type { WalletAdapter } from "./adapters/types.js";
+import { DEFAULT_RPC } from "./soroban.js";
+import { StreamsModule } from "./streams.js";
+import { FactoryModule } from "./factory.js";
+import { GovernorModule } from "./governor.js";
+import {
+  SUPPORTED_NETWORKS,
+  UnsupportedChainError,
+  CAIP2_TO_NETWORK,
+} from "./errors.js";
 
 /**
  * Validate that `wallet`'s network/chain matches the SDK's configured
@@ -63,7 +78,7 @@ function assertWalletNetworkMatch(
  * ```
  */
 export class ConduitClient {
-  readonly streams:  StreamsModule;
+  readonly streams: StreamsModule;
   readonly governor: GovernorModule;
 
   /**
@@ -87,7 +102,8 @@ export class ConduitClient {
   }
   private _factory: FactoryModule | undefined;
 
-  private readonly config: Required<Pick<ConduitConfig, 'network' | 'rpcUrl'>> & ConduitConfig;
+  private readonly config: Required<Pick<ConduitConfig, "network" | "rpcUrl">> &
+    ConduitConfig;
 
   /**
    * Initializes a new ConduitClient instance.
@@ -116,7 +132,7 @@ export class ConduitClient {
       assertWalletNetworkMatch(this.config.wallet, this.config.network);
     }
 
-    this.streams  = new StreamsModule(this.config);
+    this.streams = new StreamsModule(this.config);
     this.governor = new GovernorModule(this.config);
   }
 
@@ -200,7 +216,10 @@ export class ConduitClient {
   }
 
   /** Transfer the recipient role to a new address (recipient only). */
-  async transferRecipient(streamId: string, newRecipient: string): Promise<string> {
+  async transferRecipient(
+    streamId: string,
+    newRecipient: string,
+  ): Promise<string> {
     return this.streams.transferRecipient(streamId, newRecipient);
   }
 
@@ -215,7 +234,10 @@ export class ConduitClient {
   }
 
   /** Subscribe to on-chain events for a stream. */
-  subscribe(streamAddress: string, handlers: StreamEventHandlers): Subscription {
+  subscribe(
+    streamAddress: string,
+    handlers: StreamEventHandlers,
+  ): Subscription {
     return this.streams.subscribe(streamAddress, handlers);
   }
 
@@ -256,6 +278,76 @@ export class ConduitClient {
   }
 
   /**
+   * Check connectivity to RPC and indexer endpoints independently.
+   *
+   * Performs lightweight connectivity checks against both dependencies,
+   * distinguishing between RPC-down and indexer-down states. A dashboard
+   * might continue functioning in degraded read-only mode if only one
+   * endpoint is unreachable.
+   *
+   * @returns Promise resolving to { rpc: boolean; indexer: boolean }
+   *   indicating whether each endpoint is reachable.
+   *
+   * @example
+   * ```typescript
+   * const health = await client.health();
+   * if (!health.rpc) console.error('RPC endpoint unreachable');
+   * if (!health.indexer) console.error('Indexer unreachable');
+   * if (health.rpc && health.indexer) {
+   *   // Safe to proceed with full functionality
+   * }
+   * ```
+   */
+  async health(): Promise<{ rpc: boolean; indexer: boolean }> {
+    const [rpcHealth, indexerHealth] = await Promise.all([
+      this._checkRpcHealth(),
+      this._checkIndexerHealth(),
+    ]);
+    return {
+      rpc: rpcHealth,
+      indexer: indexerHealth,
+    };
+  }
+
+  /**
+   * Check RPC endpoint connectivity with a lightweight call.
+   * @private
+   */
+  private async _checkRpcHealth(): Promise<boolean> {
+    try {
+      // Use getLatestLedger() as a lightweight RPC health check
+      // that works across all Soroban RPC endpoints.
+      const { SorobanRpc } = await import("@stellar/stellar-sdk");
+      const server = new SorobanRpc.Server(this.config.rpcUrl);
+      await server.getLatestLedger();
+      return true;
+    } catch {
+      return false;
+    }
+  }
+
+  /**
+   * Check indexer endpoint connectivity.
+   * @private
+   */
+  private async _checkIndexerHealth(): Promise<boolean> {
+    try {
+      // If factory address is not configured, we can't check the indexer
+      // but return true since the indexer is optional for read-only RPC operations
+      if (!this.config.factoryAddress) {
+        return true;
+      }
+
+      // Try a simple factory query — streamCount() is the lightest operation
+      // that hits the indexer
+      const count = await this.factory.streamCount();
+      return typeof count === "bigint";
+    } catch {
+      return false;
+    }
+  }
+
+  /**
    * Expose factory address-cache hit/miss counters so consumers can tune
    * cache size and concurrency. Returns `null` when the factory module is
    * not initialized (no factoryAddress was configured).
@@ -264,4 +356,3 @@ export class ConduitClient {
     return this._factory?.getCacheMetrics() ?? null;
   }
 }
-

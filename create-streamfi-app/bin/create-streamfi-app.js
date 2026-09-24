@@ -1,6 +1,6 @@
 #!/usr/bin/env node
 
-const { parseArguments, scaffold } = require('../lib/scaffold');
+const { parseArguments, scaffold } = require("../lib/scaffold");
 
 async function main() {
   try {
@@ -10,8 +10,9 @@ async function main() {
 
 Options:
   --template <name|url>  Starter to use: next-app, node-script, cron-worker, or a git URL to clone
-  --skip-install    Do not install dependencies
-  --help            Show this message`);
+  --hooks               Scaffold with @streamfi/react hooks instead of direct SDK usage
+  --skip-install        Do not install dependencies
+  --help                Show this message`);
       return;
     }
 

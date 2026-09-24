@@ -1,6 +1,13 @@
-import { createContext, useState, useCallback, useMemo, type ReactNode } from 'react';
-import { ConduitClient } from '@conduit-protocol/sdk';
-import type { ConduitConfig } from '@conduit-protocol/sdk';
+import {
+  createContext,
+  useState,
+  useCallback,
+  useMemo,
+  useEffect,
+  type ReactNode,
+} from "react";
+import { ConduitClient } from "@conduit-protocol/sdk";
+import type { ConduitConfig } from "@conduit-protocol/sdk";
 
 export interface StreamFiContextValue {
   client: ConduitClient | null;
@@ -17,42 +24,69 @@ export interface StreamFiProviderProps {
   children: ReactNode;
 }
 
-export function StreamFiProvider({ config, children }: StreamFiProviderProps) {
-  const [error, setError] = useState<Error | null>(null);
-  const [client, setClient] = useState<ConduitClient | null>(() => {
-    if (config) {
-      try {
-        return new ConduitClient(config);
-      } catch (err: unknown) {
-        // We can't setState inside initialization function safely in all React versions, 
-        // but since this is lazy initial state, we'll let it be null and set error in an effect, 
-        // or we just return null and we can't capture the error in initial state synchronously. 
-        // Wait, we can just throw it? No, the issue says "doesn't catch...".
-        // Let's just catch it.
-        console.error(err);
-      }
-    }
-    return null;
-  });
+function checkVersionMismatch() {
+  try {
+    // Get the version of @conduit-protocol/sdk that's actually installed
+    const sdkPackage = require("@conduit-protocol/sdk/package.json");
+    const installedVersion = sdkPackage.version;
 
-  // Let's do it properly without state mutation inside initializer
-  const [state, setState] = useState<{ client: ConduitClient | null; error: Error | null }>(() => {
+    // Get the peerDependencies from @streamfi/react's package.json
+    // The peerDependencies constraint is stored in our own package.json
+    const reactPackage = require("../../../package.json");
+    const peerConstraint =
+      reactPackage.peerDependencies["@conduit-protocol/sdk"];
+
+    if (!peerConstraint) return; // No peer dependency specified, skip check
+
+    // Simple semver check: if installed major version doesn't match the peer constraint's major version
+    const installedMajor = parseInt(installedVersion.split(".")[0], 10);
+    const constraintMajor = parseInt(peerConstraint.split(".")[0], 10);
+
+    if (installedMajor !== constraintMajor) {
+      console.warn(
+        `⚠️  Version mismatch: @streamfi/react expects @conduit-protocol/sdk@${peerConstraint}, ` +
+          `but @conduit-protocol/sdk@${installedVersion} is installed. ` +
+          `This may cause runtime errors. Please ensure compatible versions are installed.`,
+      );
+    }
+  } catch {
+    // Silently ignore errors in version checking
+    // (e.g., if package.json files aren't accessible in some environments)
+  }
+}
+
+export function StreamFiProvider({ config, children }: StreamFiProviderProps) {
+  const [state, setState] = useState<{
+    client: ConduitClient | null;
+    error: Error | null;
+  }>(() => {
     if (config) {
       try {
         return { client: new ConduitClient(config), error: null };
       } catch (err: unknown) {
-        return { client: null, error: err instanceof Error ? err : new Error(String(err)) };
+        return {
+          client: null,
+          error: err instanceof Error ? err : new Error(String(err)),
+        };
       }
     }
     return { client: null, error: null };
   });
+
+  // Check for version mismatches on mount
+  useEffect(() => {
+    checkVersionMismatch();
+  }, []);
 
   const connect = useCallback((cfg: ConduitConfig) => {
     try {
       const newClient = new ConduitClient(cfg);
       setState({ client: newClient, error: null });
     } catch (err: unknown) {
-      setState({ client: null, error: err instanceof Error ? err : new Error(String(err)) });
+      setState({
+        client: null,
+        error: err instanceof Error ? err : new Error(String(err)),
+      });
     }
   }, []);
 
@@ -61,12 +95,12 @@ export function StreamFiProvider({ config, children }: StreamFiProviderProps) {
   }, []);
 
   const value = useMemo<StreamFiContextValue>(
-    () => ({ 
-      client: state.client, 
-      isReady: state.client !== null, 
+    () => ({
+      client: state.client,
+      isReady: state.client !== null,
       error: state.error,
-      connect, 
-      disconnect 
+      connect,
+      disconnect,
     }),
     [state.client, state.error, connect, disconnect],
   );
