@@ -221,6 +221,22 @@ export function isValidAddress(address: string): boolean {
 }
 
 /**
+ * Sum of withdrawable balances across multiple streams.
+ *
+ * Computes the total amount currently withdrawable from an array of streams
+ * without making any contract calls. Each stream's local withdrawable balance
+ * is computed using the same logic as the on-chain `withdrawable()` query,
+ * accounting for stream state (paused/cancelled/completed) and time.
+ *
+ * @param streams Array of StreamInfo objects
+ * @param nowSec  Current time in seconds (defaults to now)
+ * @returns Total withdrawable amount in stroops across all streams
+ */
+export function sumWithdrawable(streams: StreamInfo[], nowSec = Math.floor(Date.now() / 1000)): bigint {
+  return streams.reduce((sum, stream) => sum + withdrawableLocal(stream, nowSec), 0n);
+}
+
+/**
  * A portable `AbortSignal` that aborts after `ms` milliseconds — pass it as
  * the `signal` option to any SDK method that accepts one, e.g.
  *
