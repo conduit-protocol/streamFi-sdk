@@ -365,6 +365,9 @@ describe('StreamsModule — withdraw/cancel/pause/resume/topUp success paths', (
   });
 
   it('withdraw() returns the confirmed transaction hash', async () => {
+    // withdraw() with an explicit amount still reads withdrawable() first,
+    // to validate the amount against it, so the mock needs an i128 retval.
+    mockSimulate.mockResolvedValueOnce(simSuccess(i128Scv(100n)));
     const { StreamsModule } = await import('../streams.js');
     const sdk = new StreamsModule(makeConfig());
     const hash = await runThroughFirstPoll(() => sdk.withdraw(1n, 100n));
