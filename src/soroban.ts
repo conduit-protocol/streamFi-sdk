@@ -17,7 +17,7 @@ import {
 } from '@stellar/stellar-sdk';
 import type { Network } from './types/index.js';
 import type { Signer } from './signer.js';
-import { RateLimitError, StreamFiNetworkError, InsufficientBalanceError } from './errors.js';
+import { RateLimitError, StreamFiNetworkError, InsufficientBalanceError, ConfirmationTimeoutError } from './errors.js';
 import { withRetry } from './with-retry.js';
 import { recordSuccess, recordFailure } from './rpc-circuit-state.js';
 
@@ -77,6 +77,12 @@ export const NETWORK_PASSPHRASE: Record<Network, string> = {
 export interface ConfirmationPollingOptions {
   pollIntervalMs?: number;
   maxAttempts?: number;
+  /**
+   * When `true`, `invokeContract` rejects with a typed {@link ConfirmationTimeoutError}
+   * if `maxAttempts` is reached without a terminal SUCCESS or FAILED status, instead
+   * of resolving the unconfirmed transaction hash as pending. Default is `false`.
+   */
+  strict?: boolean;
 }
 
 export const DEFAULT_CONFIRMATION_POLL_INTERVAL_MS = 1000;
@@ -86,8 +92,10 @@ function normalizePollingOptions(options: ConfirmationPollingOptions = {}): Requ
   return {
     pollIntervalMs: options.pollIntervalMs ?? DEFAULT_CONFIRMATION_POLL_INTERVAL_MS,
     maxAttempts: options.maxAttempts ?? DEFAULT_CONFIRMATION_MAX_ATTEMPTS,
+    strict: options.strict ?? false,
   };
 }
+
 
 /**
  * Creates a SorobanRpc.Server instance wrapped with an exponential backoff retry mechanism.
@@ -238,6 +246,13 @@ export async function invokeContract(
     try {
       status = await catchNetworkError('getTransaction', server.getTransaction(hash));
     } catch (err) {
+      if (polling.strict) {
+        throw new ConfirmationTimeoutError(
+          hash,
+          i + 1,
+          (i + 1) * polling.pollIntervalMs,
+        );
+      }
       // Transaction was already submitted; return the hash as pending.
       // Polling failures don't indicate submission failure.
       return hash;
@@ -249,8 +264,16 @@ export async function invokeContract(
       throw new Error(`Transaction failed: ${hash}`);
     }
   }
+  if (polling.strict) {
+    throw new ConfirmationTimeoutError(
+      hash,
+      polling.maxAttempts,
+      polling.maxAttempts * polling.pollIntervalMs,
+    );
+  }
   // Polling timed out but transaction was submitted; return hash as pending.
   return hash;
+
 }
 
 /**

@@ -668,6 +668,37 @@ export class OperationAbortedError extends Error {
   }
 }
 
+// ── Confirmation timeout error (#596) ─────────────────────────────────────────
+
+/**
+ * Thrown by `invokeContract()` when confirmation polling exceeds `maxAttempts`
+ * without reaching a terminal `SUCCESS` or `FAILED` status, and `strict: true`
+ * is enabled in the polling options.
+ *
+ * This allows callers to distinguish a confirmed transaction from an unconfirmed
+ * or timed-out submission, while preserving access to the submitted transaction `hash`.
+ */
+export class ConfirmationTimeoutError extends Error {
+  /** The transaction hash that was submitted to the network. */
+  readonly hash: string;
+  /** The number of poll attempts performed before timing out. */
+  readonly attempts: number;
+  /** The total polling duration in milliseconds before timing out. */
+  readonly timeoutMs: number;
+
+  constructor(hash: string, attempts: number, timeoutMs: number) {
+    super(
+      `Transaction confirmation timed out after ${attempts} attempts (${timeoutMs}ms): ${hash}. ` +
+      `The transaction was submitted and may still confirm on-chain.`,
+    );
+    this.name = 'ConfirmationTimeoutError';
+    this.hash = hash;
+    this.attempts = attempts;
+    this.timeoutMs = timeoutMs;
+    Object.setPrototypeOf(this, new.target.prototype);
+  }
+}
+
 // ── Type guard ────────────────────────────────────────────────────────────────
 
 /**
@@ -688,6 +719,7 @@ export class OperationAbortedError extends Error {
  * - {@link UnauthorizedStreamActionError}
  * - {@link InvalidStreamStateError}
  * - {@link ClawbackNotEnabledError}
+ * - {@link ConfirmationTimeoutError}
  */
 export function isConduitError(value: unknown): value is Error {
   if (!(value instanceof Error)) return false;
@@ -704,6 +736,7 @@ export function isConduitError(value: unknown): value is Error {
     'UnauthorizedStreamActionError',
     'InvalidStreamStateError',
     'ClawbackNotEnabledError',
+    'ConfirmationTimeoutError',
     'ValidationError',
   ].includes(value.name);
 }

@@ -50,8 +50,10 @@ export {
   UnauthorizedStreamActionError,
   InvalidStreamStateError,
   ClawbackNotEnabledError,
+  ConfirmationTimeoutError,
   isConduitError,
   SUPPORTED_NETWORKS,
+
   CAIP2_TO_NETWORK,
   UNKNOWN_CONTRACT_ERROR_CODE,
 } from './errors.js';
