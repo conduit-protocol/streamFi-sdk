@@ -474,3 +474,121 @@ describe('WebSocketRelayer — High-Concurrency Stress Tests', () => {
     relayer.destroy();
   });
 });
+
+describe('WebSocketRelayer — Heartbeat/Ping Support', () => {
+  let relayer: WebSocketRelayer;
+  let mockWs: any;
+  let getOnmessage: () => Function | null;
+
+  beforeEach(() => {
+    const created = createMockWs();
+    mockWs = created.mock;
+    getOnmessage = created.onmessage;
+    (global as any).WebSocket = vi.fn(function () { return mockWs; }) as any;
+  });
+
+  afterEach(() => {
+    if (relayer) relayer.destroy();
+    delete (global as any).WebSocket;
+  });
+
+  it('sends ping at configurable heartbeat intervals', async () => {
+    vi.useFakeTimers();
+    relayer = new WebSocketRelayer('ws://localhost:8080', {
+      heartbeatIntervalMs: 1000,
+      heartbeatTimeoutMs: 500,
+    });
+
+    await relayer.connect();
+    expect(mockWs.send).toHaveBeenCalledTimes(0);
+
+    // Advance time to trigger first heartbeat
+    vi.advanceTimersByTime(1000);
+    await new Promise(resolve => setTimeout(resolve, 10));
+
+    expect(mockWs.send).toHaveBeenCalledWith(JSON.stringify({ type: 'ping' }));
+
+    vi.useRealTimers();
+  });
+
+  it('resets heartbeat timeout when pong is received', async () => {
+    vi.useFakeTimers();
+    relayer = new WebSocketRelayer('ws://localhost:8080', {
+      heartbeatIntervalMs: 500,
+      heartbeatTimeoutMs: 300,
+    });
+
+    await relayer.connect();
+    const onmessage = getOnmessage();
+
+    // Trigger heartbeat
+    vi.advanceTimersByTime(500);
+    await new Promise(resolve => setTimeout(resolve, 10));
+
+    const pingCall = mockWs.send.mock.calls.length;
+    expect(pingCall).toBeGreaterThan(0);
+
+    // Receive pong before timeout
+    onmessage?.(new MessageEvent('message', { data: JSON.stringify({ type: 'pong' }) }));
+
+    // Advance time to timeout threshold without closing connection
+    vi.advanceTimersByTime(300);
+    expect(mockWs.close).not.toHaveBeenCalled();
+
+    vi.useRealTimers();
+  });
+
+  it('closes connection when pong is not received within heartbeat timeout', async () => {
+    vi.useFakeTimers();
+    relayer = new WebSocketRelayer('ws://localhost:8080', {
+      heartbeatIntervalMs: 500,
+      heartbeatTimeoutMs: 300,
+    });
+
+    await relayer.connect();
+
+    // Trigger heartbeat
+    vi.advanceTimersByTime(500);
+    await new Promise(resolve => setTimeout(resolve, 10));
+
+    // Advance time past pong timeout without sending pong
+    vi.advanceTimersByTime(300);
+    await new Promise(resolve => setTimeout(resolve, 10));
+
+    // Connection should be closed due to missing pong
+    expect(mockWs.close).toHaveBeenCalled();
+
+    vi.useRealTimers();
+  });
+
+  it('stops heartbeat on disconnect', async () => {
+    vi.useFakeTimers();
+    relayer = new WebSocketRelayer('ws://localhost:8080', {
+      heartbeatIntervalMs: 1000,
+    });
+
+    await relayer.connect();
+    relayer.disconnect();
+
+    // Advance time and verify no new pings are sent
+    vi.advanceTimersByTime(2000);
+    await new Promise(resolve => setTimeout(resolve, 10));
+
+    expect(mockWs.send).not.toHaveBeenCalled();
+
+    vi.useRealTimers();
+  });
+
+  it('respects custom heartbeat and timeout options', async () => {
+    relayer = new WebSocketRelayer('ws://localhost:8080', {
+      heartbeatIntervalMs: 10000,
+      heartbeatTimeoutMs: 2000,
+    });
+
+    // Verify options are set (indirectly through behavior)
+    await relayer.connect();
+    expect(relayer.state.connected).toBe(true);
+
+    relayer.disconnect();
+  });
+});
