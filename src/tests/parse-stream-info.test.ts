@@ -194,3 +194,45 @@ describe('parseStreamInfo — flags (#521)', () => {
     expect(info.cancelled).toBe(false);
   });
 });
+
+describe('parseStreamInfo — malformed flags (#617)', () => {
+  it('falls back to flags=0 when flags is a non-U32 ScVal (bool)', async () => {
+    mockSimulate.mockResolvedValue(simSuccess(baseStreamMap({
+      flags: xdr.ScVal.scvBool(true),
+    })));
+    const { StreamsModule } = await import('../streams.js');
+    const sdk = new StreamsModule({ network: 'testnet', factoryAddress: FACTORY_ADDR, keypair: Keypair.random() });
+
+    const info = await sdk.get(1n);
+    expect(info.paused).toBe(false);
+    expect(info.cancelled).toBe(false);
+    expect(info.clawbackEnabled).toBe(false);
+  });
+
+  it('falls back to flags=0 when flags is a non-U32 ScVal (string)', async () => {
+    mockSimulate.mockResolvedValue(simSuccess(baseStreamMap({
+      flags: xdr.ScVal.scvString('not-a-u32'),
+    })));
+    const { StreamsModule } = await import('../streams.js');
+    const sdk = new StreamsModule({ network: 'testnet', factoryAddress: FACTORY_ADDR, keypair: Keypair.random() });
+
+    const info = await sdk.get(1n);
+    expect(info.paused).toBe(false);
+    expect(info.cancelled).toBe(false);
+    expect(info.clawbackEnabled).toBe(false);
+  });
+
+  it('falls back to flags=0 when flags is a non-U32 ScVal (i128)', async () => {
+    mockSimulate.mockResolvedValue(simSuccess(baseStreamMap({
+      flags: i128Scv(42n),
+    })));
+    const { StreamsModule } = await import('../streams.js');
+    const sdk = new StreamsModule({ network: 'testnet', factoryAddress: FACTORY_ADDR, keypair: Keypair.random() });
+
+    const info = await sdk.get(1n);
+    expect(info.paused).toBe(false);
+    expect(info.cancelled).toBe(false);
+    expect(info.clawbackEnabled).toBe(false);
+  });
+});
+

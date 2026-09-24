@@ -50,6 +50,12 @@ export interface ConduitConfig {
    * Ignored when `fee` is set. Defaults to `1` (BASE_FEE, unchanged).
    */
   feeMultiplier?: number;
+  /**
+   * Override the negative address cache TTL in milliseconds. When a stream
+   * address is not found, the null result is cached for this duration before
+   * retrying. Default 30_000 (30 seconds).
+   */
+  negativeCacheTtlMs?: number;
 }
 
 export interface StreamInfo {

@@ -1,0 +1,15 @@
+{
+  "entryPoints": ["src/index.ts"],
+  "out": "docs/api",
+  "name": "@conduit-protocol/sdk",
+  "includeVersion": true,
+  "excludePrivate": true,
+  "excludeProtected": true,
+  "excludeExternals": true,
+  "sort": ["source-order"],
+  "kindSortOrder": ["Document", "Project", "Module", "Namespace", "Enum", "EnumMember", "Class", "Interface", "TypeAlias", "Constructor", "Property", "Variable", "Function", "Accessor", "Method", "Parameter", "TypeParameter"],
+  "navigation": {
+    "includeCategories": false,
+    "includeGroups": false
+  }
+}
