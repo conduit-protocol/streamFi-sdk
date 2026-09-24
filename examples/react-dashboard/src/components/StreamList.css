@@ -1,0 +1,22 @@
+.stream-list {
+  padding: 1.5rem;
+}
+
+.stream-count {
+  font-size: 0.875rem;
+  color: var(--color-text-light);
+  margin-bottom: 1rem;
+  font-weight: 500;
+}
+
+.stream-grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fill, minmax(300px, 1fr));
+  gap: 1.5rem;
+}
+
+@media (max-width: 768px) {
+  .stream-grid {
+    grid-template-columns: 1fr;
+  }
+}
