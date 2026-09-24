@@ -9,6 +9,7 @@ import {
   estimatedCompletionDate,
   normalizeProgress,
   withdrawableLocal,
+  sumWithdrawable,
   bigintSafeStringify,
   isValidAddress,
 } from '../utils.js';
@@ -320,6 +321,76 @@ describe('withdrawableLocal', () => {
       pausedAt:      now - 400, // pause began while still running
     });
     expect(withdrawableLocal(s, now)).toBe(rate * 600n);
+  });
+});
+
+// ── sumWithdrawable ──────────────────────────────────────────────────────────
+
+describe('sumWithdrawable', () => {
+  it('returns 0 for empty array', () => {
+    expect(sumWithdrawable([])).toBe(0n);
+  });
+
+  it('sums withdrawable across multiple active streams', () => {
+    const now = Math.floor(Date.now() / 1000);
+    const streams = [
+      makeStream({ ratePerSecond: 100n, startTime: now - 1000, endTime: now + 1000 }),
+      makeStream({ ratePerSecond: 200n, startTime: now - 500, endTime: now + 1500 }),
+      makeStream({ ratePerSecond: 50n, startTime: now - 2000, endTime: now + 500 }),
+    ];
+    const result = sumWithdrawable(streams, now);
+    const expected = (100n * 1000n) + (200n * 500n) + (50n * 2000n);
+    expect(result).toBe(expected);
+  });
+
+  it('excludes cancelled streams from sum', () => {
+    const now = Math.floor(Date.now() / 1000);
+    const streams = [
+      makeStream({ ratePerSecond: 100n, startTime: now - 1000, endTime: now + 1000 }),
+      makeStream({ ratePerSecond: 200n, startTime: now - 500, endTime: now + 1500, cancelled: true }),
+    ];
+    const result = sumWithdrawable(streams, now);
+    expect(result).toBe(100n * 1000n); // Only the first stream counts
+  });
+
+  it('handles mixed stream states (active, paused, completed)', () => {
+    const now = Math.floor(Date.now() / 1000);
+    const streams = [
+      // Active stream
+      makeStream({ ratePerSecond: 100n, startTime: now - 1000, endTime: now + 1000 }),
+      // Paused stream
+      makeStream({ ratePerSecond: 200n, startTime: now - 1000, endTime: now + 1000, paused: true, pausedAt: now - 500 }),
+      // Completed stream
+      makeStream({ ratePerSecond: 50n, startTime: now - 2000, endTime: now - 1000 }),
+    ];
+    const result = sumWithdrawable(streams, now);
+    const expected = (100n * 1000n) + (200n * 500n) + (50n * 1000n);
+    expect(result).toBe(expected);
+  });
+
+  it('respects already withdrawn amounts', () => {
+    const now = Math.floor(Date.now() / 1000);
+    const streams = [
+      makeStream({ ratePerSecond: 100n, startTime: now - 1000, endTime: now + 1000, withdrawn: 50_000n }),
+      makeStream({ ratePerSecond: 200n, startTime: now - 500, endTime: now + 1500, withdrawn: 75_000n }),
+    ];
+    const result = sumWithdrawable(streams, now);
+    const expected = (100n * 1000n - 50_000n) + (200n * 500n - 75_000n);
+    expect(result).toBe(expected);
+  });
+
+  it('uses provided nowSec parameter', () => {
+    const baseTime = Math.floor(Date.now() / 1000);
+    const streams = [
+      makeStream({ ratePerSecond: 100n, startTime: baseTime - 1000, endTime: baseTime + 1000 }),
+      makeStream({ ratePerSecond: 200n, startTime: baseTime - 500, endTime: baseTime + 1500 }),
+    ];
+    // Sum at baseTime
+    const atBase = sumWithdrawable(streams, baseTime);
+    // Sum at baseTime + 100 (100 more seconds elapsed)
+    const later = sumWithdrawable(streams, baseTime + 100);
+    // Each stream should have 100 more stroops (rate × 100)
+    expect(later - atBase).toBe((100n + 200n) * 100n);
   });
 });
 
