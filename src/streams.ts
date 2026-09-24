@@ -49,7 +49,14 @@ import {
 import { buildBatchTransactions } from './batch-tx.js';
 import type { BatchTransactionContext } from './batch-tx.js';
 import { FactoryModule } from './factory.js';
-import { ConduitError, RateLimitError, InsufficientBalanceError, StreamErrorCode } from './errors.js';
+import {
+  ConduitError,
+  RateLimitError,
+  InsufficientBalanceError,
+  StreamErrorCode,
+  AmountExceedsWithdrawableError,
+  translateStreamError,
+} from './errors.js';
 
 // Deprecation warnings
 
@@ -395,7 +402,15 @@ export class StreamsModule {
     if (amount !== undefined && amount <= 0n) {
       throw new Error('Invalid amount: must be greater than zero');
     }
-    const qty = amount ?? await this.withdrawable(id);
+    // Always resolve the current withdrawable balance so an explicit amount
+    // can be validated against it: an over-withdraw is rejected here, with
+    // the real available amount attached, instead of round-tripping to the
+    // contract just to fail generically.
+    const available = await this.withdrawable(id);
+    if (amount !== undefined && amount > available) {
+      throw new AmountExceedsWithdrawableError(available, amount);
+    }
+    const qty = amount ?? available;
     return this._invoke(await this._resolveAddr(id), 'withdraw', [
       nativeToScVal(qty, { type: 'i128' }),
     ]);
@@ -668,7 +683,7 @@ export class StreamsModule {
     const sim    = await catchNetworkError('simulateTransaction (clawback)', server.simulateTransaction(tx));
 
     if (SorobanRpc.Api.isSimulationError(sim)) {
-      throw ConduitError.fromSorobanMessage('stream', sim.error);
+      translateStreamError(ConduitError.fromSorobanMessage('stream', sim.error), 'clawback', caller);
     }
 
     const assembled = SorobanRpc.assembleTransaction(tx, sim).build();
@@ -1011,7 +1026,7 @@ export class StreamsModule {
     const server     = this._server();
     const sim        = await catchNetworkError('simulateTransaction (invoke)', server.simulateTransaction(tx));
     if (SorobanRpc.Api.isSimulationError(sim)) {
-      throw ConduitError.fromSorobanMessage('stream', sim.error);
+      translateStreamError(ConduitError.fromSorobanMessage('stream', sim.error), method, senderAddr);
     }
     const assembled = SorobanRpc.assembleTransaction(tx, sim).build();
     const signed    = await this._signTx(assembled);

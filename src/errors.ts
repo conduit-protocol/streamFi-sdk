@@ -223,6 +223,184 @@ export class ConduitError extends Error {
   }
 }
 
+// ── DripStream typed lifecycle errors ───────────────────────────────────────────
+
+/**
+ * Thrown by {@link StreamsModule.withdraw} when the requested amount is
+ * larger than what {@link StreamsModule.withdrawable} currently reports.
+ * Carries the actual withdrawable amount so a UI can immediately show
+ * "you can withdraw up to X" without a second round trip.
+ *
+ * @example
+ * ```ts
+ * try {
+ *   await client.streams.withdraw(streamId, tooMuch);
+ * } catch (err) {
+ *   if (err instanceof AmountExceedsWithdrawableError) {
+ *     console.error(`You can withdraw up to ${err.available} stroops.`);
+ *   }
+ * }
+ * ```
+ */
+export class AmountExceedsWithdrawableError extends ConduitError {
+  /** The actual amount currently withdrawable, in stroops. */
+  readonly available: bigint;
+
+  constructor(available: bigint, requested: bigint) {
+    super(
+      'stream',
+      StreamErrorCode.NothingToWithdraw,
+      `Requested amount (${requested}) exceeds the withdrawable balance (${available}).`,
+    );
+    this.name = 'AmountExceedsWithdrawableError';
+    this.available = available;
+    Object.setPrototypeOf(this, new.target.prototype);
+  }
+}
+
+/**
+ * Thrown when a caller who is neither the stream's sender nor recipient
+ * (depending on the action) attempts a lifecycle action restricted to one
+ * of them — e.g. `cancel`, `pause`, `transferRecipient`, `clawback`.
+ * Carries the attempted operation and the rejected caller address so a UI
+ * can show "you don't have permission to do this" instead of a raw RPC
+ * error string.
+ *
+ * @example
+ * ```ts
+ * try {
+ *   await client.streams.cancel(streamId);
+ * } catch (err) {
+ *   if (err instanceof UnauthorizedStreamActionError) {
+ *     console.error(`${err.caller} cannot ${err.operation} this stream.`);
+ *   }
+ * }
+ * ```
+ */
+export class UnauthorizedStreamActionError extends ConduitError {
+  /** The lifecycle method that was attempted, e.g. "cancel", "withdraw". */
+  readonly operation: string;
+  /** The address that was rejected by the contract's auth check. */
+  readonly caller: string;
+
+  constructor(operation: string, caller: string) {
+    super(
+      'stream',
+      StreamErrorCode.NotAuthorized,
+      `'${caller}' is not authorized to perform '${operation}' on this stream.`,
+    );
+    this.name = 'UnauthorizedStreamActionError';
+    this.operation = operation;
+    this.caller = caller;
+    Object.setPrototypeOf(this, new.target.prototype);
+  }
+}
+
+/**
+ * The human-readable state names {@link InvalidStreamStateError} can carry,
+ * derived from the specific {@link StreamErrorCode} the contract rejected
+ * the call with.
+ */
+export type StreamLifecycleState = 'cancelled' | 'not_started' | 'ended' | 'paused' | 'active';
+
+const STATE_BY_CODE: Partial<Record<StreamErrorCode, StreamLifecycleState>> = {
+  [StreamErrorCode.StreamCancelled]:  'cancelled',
+  [StreamErrorCode.StreamNotStarted]: 'not_started',
+  [StreamErrorCode.StreamEnded]:      'ended',
+  [StreamErrorCode.AlreadyPaused]:    'paused',
+  [StreamErrorCode.NotPaused]:        'active',
+};
+
+/**
+ * Thrown when a lifecycle action (`withdraw`, `cancel`, `pause`, `resume`,
+ * `forceCancel`) is rejected because the stream is in the wrong state for
+ * it — e.g. already cancelled, already paused, or not paused when trying to
+ * resume. Carries the attempted operation and, where the rejected contract
+ * error code maps to one, the stream's current state.
+ *
+ * @example
+ * ```ts
+ * try {
+ *   await client.streams.resume(streamId);
+ * } catch (err) {
+ *   if (err instanceof InvalidStreamStateError) {
+ *     console.error(`Cannot ${err.operation}: stream is ${err.currentState ?? 'in an invalid state'}.`);
+ *   }
+ * }
+ * ```
+ */
+export class InvalidStreamStateError extends ConduitError {
+  /** The lifecycle method that was attempted, e.g. "resume", "withdraw". */
+  readonly operation: string;
+  /** The stream's current state, if it could be inferred from the contract error code. */
+  readonly currentState: StreamLifecycleState | undefined;
+
+  constructor(operation: string, code: StreamErrorCode) {
+    const currentState = STATE_BY_CODE[code];
+    super(
+      'stream',
+      code,
+      currentState
+        ? `Cannot ${operation}: stream is ${currentState}.`
+        : `Cannot ${operation}: stream is in an invalid state for this action.`,
+    );
+    this.name = 'InvalidStreamStateError';
+    this.operation = operation;
+    this.currentState = currentState;
+    Object.setPrototypeOf(this, new.target.prototype);
+  }
+}
+
+/**
+ * Thrown by {@link StreamsModule.clawback} when the stream was created
+ * without `clawbackEnabled: true`. Distinct from a generic RPC/contract
+ * rejection so a caller can tell "clawback isn't enabled for this stream"
+ * apart from any other failure.
+ *
+ * @example
+ * ```ts
+ * try {
+ *   await client.streams.clawback(streamId);
+ * } catch (err) {
+ *   if (err instanceof ClawbackNotEnabledError) {
+ *     console.error('This stream was not created with clawback enabled.');
+ *   }
+ * }
+ * ```
+ */
+export class ClawbackNotEnabledError extends ConduitError {
+  constructor() {
+    super('stream', StreamErrorCode.ClawbackDisabled);
+    this.name = 'ClawbackNotEnabledError';
+    Object.setPrototypeOf(this, new.target.prototype);
+  }
+}
+
+/**
+ * Inspects a {@link ConduitError} raised from a `DripStream` contract call
+ * and, when its code matches a known lifecycle failure, rethrows the more
+ * specific typed error ({@link UnauthorizedStreamActionError},
+ * {@link InvalidStreamStateError}, or {@link ClawbackNotEnabledError})
+ * instead. Any other error (including non-stream `ConduitError`s and plain
+ * network errors) is rethrown unchanged.
+ *
+ * @internal
+ */
+export function translateStreamError(err: unknown, operation: string, caller: string): never {
+  if (err instanceof ConduitError && err.contract === 'stream') {
+    if (err.code === StreamErrorCode.NotAuthorized) {
+      throw new UnauthorizedStreamActionError(operation, caller);
+    }
+    if (err.code === StreamErrorCode.ClawbackDisabled) {
+      throw new ClawbackNotEnabledError();
+    }
+    if (err.code in STATE_BY_CODE) {
+      throw new InvalidStreamStateError(operation, err.code as StreamErrorCode);
+    }
+  }
+  throw err;
+}
+
 // ── Network error ──────────────────────────────────────────────────────────────
 
 /**
@@ -506,6 +684,10 @@ export class OperationAbortedError extends Error {
  * - {@link RpcServiceUnavailableError}
  * - {@link IndexerTimeoutError}
  * - {@link OperationAbortedError}
+ * - {@link AmountExceedsWithdrawableError}
+ * - {@link UnauthorizedStreamActionError}
+ * - {@link InvalidStreamStateError}
+ * - {@link ClawbackNotEnabledError}
  */
 export function isConduitError(value: unknown): value is Error {
   if (!(value instanceof Error)) return false;
@@ -518,5 +700,9 @@ export function isConduitError(value: unknown): value is Error {
     'RpcServiceUnavailableError',
     'IndexerTimeoutError',
     'OperationAbortedError',
+    'AmountExceedsWithdrawableError',
+    'UnauthorizedStreamActionError',
+    'InvalidStreamStateError',
+    'ClawbackNotEnabledError',
   ].includes(value.name);
 }

@@ -43,12 +43,16 @@ export {
   RpcServiceUnavailableError,
   IndexerTimeoutError,
   OperationAbortedError,
+  AmountExceedsWithdrawableError,
+  UnauthorizedStreamActionError,
+  InvalidStreamStateError,
+  ClawbackNotEnabledError,
   isConduitError,
   SUPPORTED_NETWORKS,
   CAIP2_TO_NETWORK,
   UNKNOWN_CONTRACT_ERROR_CODE,
 } from './errors.js';
-export type { ConduitContract } from './errors.js';
+export type { ConduitContract, StreamLifecycleState } from './errors.js';
 export * from './types/index.js';
 export type { GetStreamInfosOptions, GetStreamInfosResult, GetStreamInfosFailure } from './types/index.js';
 export * from './adapters/index.js';
