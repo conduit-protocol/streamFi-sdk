@@ -76,7 +76,6 @@ const sharedOutput = {
       'src/constants.ts',
       'src/indexer.ts',
       'src/fee-estimator.ts',
-      'src/nonce/NonceManager.ts',
       'src/relayer/WebSocketRelayer.ts',
       'src/relayer/ErrorMapper.ts',
       'src/adapters/index.ts',

@@ -26,7 +26,7 @@ describe('StreamBuilder', () => {
         .recipient('GABAEAQCAIBAEAQCAIBAEAQCAIBAEAQCAIBAEAQCAIBAEAQCAIBAEJXA')
         .amount(1000)
         .build();
-    }).toThrow('Missing required parameters for StreamBuilder');
+    }).toThrow('token is required');
 
     expect(() => {
       new StreamBuilder()
@@ -34,7 +34,7 @@ describe('StreamBuilder', () => {
         .recipient('GABAEAQCAIBAEAQCAIBAEAQCAIBAEAQCAIBAEAQCAIBAEAQCAIBAEJXA')
         .amount(1000)
         .build();
-    }).toThrow('Missing required parameters for StreamBuilder');
+    }).toThrow('sender is required');
 
     expect(() => {
       new StreamBuilder()
@@ -42,7 +42,7 @@ describe('StreamBuilder', () => {
         .sender('GAAQCAIBAEAQCAIBAEAQCAIBAEAQCAIBAEAQCAIBAEAQCAIBAEAQDZ7H')
         .amount(1000)
         .build();
-    }).toThrow('Missing required parameters for StreamBuilder');
+    }).toThrow('recipient is required');
 
     expect(() => {
       new StreamBuilder()
@@ -50,7 +50,35 @@ describe('StreamBuilder', () => {
         .sender('GAAQCAIBAEAQCAIBAEAQCAIBAEAQCAIBAEAQCAIBAEAQCAIBAEAQDZ7H')
         .recipient('GABAEAQCAIBAEAQCAIBAEAQCAIBAEAQCAIBAEAQCAIBAEAQCAIBAEJXA')
         .build();
-    }).toThrow('Missing required parameters for StreamBuilder');
+    }).toThrow('amount is required');
+  });
+
+  it('aggregates multiple missing required fields', () => {
+    expect(() => {
+      new StreamBuilder().build();
+    }).toThrow('4 validation issue(s)');
+  });
+
+  it('exposes all issues on ValidationError without throwing from validate()', () => {
+    const builder = new StreamBuilder();
+    expect(builder.validate()).toEqual([
+      'token is required',
+      'sender is required',
+      'recipient is required',
+      'amount is required',
+    ]);
+
+    try {
+      builder.build();
+    } catch (err: any) {
+      expect(err.name).toBe('ValidationError');
+      expect(err.issues).toEqual([
+        'token is required',
+        'sender is required',
+        'recipient is required',
+        'amount is required',
+      ]);
+    }
   });
 
 

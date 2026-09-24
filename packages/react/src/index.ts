@@ -11,3 +11,13 @@ export type {
   UseCreateStreamResult,
   CreateStreamFn,
 } from './hooks/useCreateStream.js';
+export { useWithdrawStream } from './hooks/useWithdrawStream.js';
+export type { UseWithdrawStreamResult, WithdrawStreamFn } from './hooks/useWithdrawStream.js';
+export { useCancelStream } from './hooks/useCancelStream.js';
+export type { UseCancelStreamResult, CancelStreamFn } from './hooks/useCancelStream.js';
+export { usePauseStream } from './hooks/usePauseStream.js';
+export type { UsePauseStreamResult, PauseStreamFn } from './hooks/usePauseStream.js';
+export { useResumeStream } from './hooks/useResumeStream.js';
+export type { UseResumeStreamResult, ResumeStreamFn } from './hooks/useResumeStream.js';
+export { useTopUpStream } from './hooks/useTopUpStream.js';
+export type { UseTopUpStreamResult, TopUpStreamFn } from './hooks/useTopUpStream.js';

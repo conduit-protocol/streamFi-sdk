@@ -316,8 +316,9 @@ export class StreamsModule {
   }
 
   /** Fetch full stream state from the deployed DripStream contract. */
-  async get(streamId: bigint | string): Promise<StreamInfo> {
+  async get(streamId: bigint | string, signal?: AbortSignal): Promise<StreamInfo> {
     const id   = BigInt(streamId);
+    if (signal?.aborted) throw new DOMException('Aborted', 'AbortError');
     const addr = await this._resolveAddr(id);
     const caller = await this._resolveCallerAddress();
     const tx   = await buildContractCallTx(this.rpcUrl, this.passphrase, caller, addr, 'info', []);
@@ -356,8 +357,9 @@ export class StreamsModule {
   }
 
   /** Get withdrawable balance - read-only, no transaction. */
-  async withdrawable(streamId: bigint | string): Promise<bigint> {
+  async withdrawable(streamId: bigint | string, signal?: AbortSignal): Promise<bigint> {
     const id   = BigInt(streamId);
+    if (signal?.aborted) throw new DOMException('Aborted', 'AbortError');
     const addr = await this._resolveAddr(id);
     const caller = await this._resolveCallerAddress();
     const tx   = await buildContractCallTx(this.rpcUrl, this.passphrase, caller, addr, 'withdrawable', []);
@@ -373,8 +375,9 @@ export class StreamsModule {
    * useful for progress displays that shouldn't reset visually after a
    * withdrawal. Read-only, no transaction.
    */
-  async streamedTotal(streamId: bigint | string): Promise<bigint> {
+  async streamedTotal(streamId: bigint | string, signal?: AbortSignal): Promise<bigint> {
     const id   = BigInt(streamId);
+    if (signal?.aborted) throw new DOMException('Aborted', 'AbortError');
     const addr = await this._resolveAddr(id);
     const caller = await this._resolveCallerAddress();
     const tx   = await buildContractCallTx(this.rpcUrl, this.passphrase, caller, addr, 'streamed_total', []);
@@ -383,8 +386,9 @@ export class StreamsModule {
   }
 
   /** Withdraw tokens as the recipient. Defaults to full available balance. */
-  async withdraw(streamId: bigint | string, amount?: bigint): Promise<string> {
+  async withdraw(streamId: bigint | string, amount?: bigint, signal?: AbortSignal): Promise<string> {
     this._ensureCanMutate();
+    if (signal?.aborted) throw new DOMException('Aborted', 'AbortError');
     const id  = BigInt(streamId);
     // Fail fast on invalid amounts, the same way create() validates its
     // payload client-side, instead of paying for a full simulate+reject
@@ -592,26 +596,30 @@ export class StreamsModule {
   }
 
   /** Cancel the stream (sender only). Settles all balances atomically. */
-  async cancel(streamId: bigint | string): Promise<string> {
+  async cancel(streamId: bigint | string, signal?: AbortSignal): Promise<string> {
     this._ensureCanMutate();
-    return this._invoke(await this._resolveAddr(BigInt(streamId)), 'cancel', []);
+    if (signal?.aborted) throw new DOMException('Aborted', 'AbortError');
+    return this._invoke(await this._resolveAddr(BigInt(streamId), signal), 'cancel', [], signal);
   }
 
   /** Pause the stream (sender only). */
-  async pause(streamId: bigint | string): Promise<string> {
+  async pause(streamId: bigint | string, signal?: AbortSignal): Promise<string> {
     this._ensureCanMutate();
-    return this._invoke(await this._resolveAddr(BigInt(streamId)), 'pause', []);
+    if (signal?.aborted) throw new DOMException('Aborted', 'AbortError');
+    return this._invoke(await this._resolveAddr(BigInt(streamId), signal), 'pause', [], signal);
   }
 
   /** Resume a paused stream (sender only). Shifts start/end times forward. */
-  async resume(streamId: bigint | string): Promise<string> {
+  async resume(streamId: bigint | string, signal?: AbortSignal): Promise<string> {
     this._ensureCanMutate();
-    return this._invoke(await this._resolveAddr(BigInt(streamId)), 'resume', []);
+    if (signal?.aborted) throw new DOMException('Aborted', 'AbortError');
+    return this._invoke(await this._resolveAddr(BigInt(streamId), signal), 'resume', [], signal);
   }
 
   /** Deposit additional tokens into the stream (sender only). */
-  async topUp(streamId: bigint | string, amount: bigint): Promise<string> {
+  async topUp(streamId: bigint | string, amount: bigint, signal?: AbortSignal): Promise<string> {
     this._ensureCanMutate();
+    if (signal?.aborted) throw new DOMException('Aborted', 'AbortError');
     // Client-side guard mirroring the contract's StreamErrorCode.InvalidAmount
     // so a zero/negative top-up fails fast instead of round-tripping.
     if (amount <= 0n) {
@@ -635,8 +643,9 @@ export class StreamsModule {
    * sender from indefinitely pausing a stream to hold unstreamed tokens
    * hostage.
    */
-  async forceCancel(streamId: bigint | string): Promise<string> {
+  async forceCancel(streamId: bigint | string, signal?: AbortSignal): Promise<string> {
     this._ensureCanMutate();
+    if (signal?.aborted) throw new DOMException('Aborted', 'AbortError');
     return this._invoke(await this._resolveAddr(BigInt(streamId)), 'force_cancel', []);
   }
 
@@ -645,8 +654,9 @@ export class StreamsModule {
    * The new recipient inherits all rights, including the withdrawable
    * balance accrued up to the moment of transfer.
    */
-  async transferRecipient(streamId: bigint | string, newRecipient: string): Promise<string> {
+  async transferRecipient(streamId: bigint | string, newRecipient: string, signal?: AbortSignal): Promise<string> {
     this._ensureCanMutate();
+    if (signal?.aborted) throw new DOMException('Aborted', 'AbortError');
     if (!newRecipient || typeof newRecipient !== 'string' || !newRecipient.trim()) {
       throw new Error('Invalid recipient address: must be a non-empty string');
     }
@@ -659,8 +669,9 @@ export class StreamsModule {
    * Clawback unstreamed tokens (sender; only if enabled at creation).
    * Returns the amount reclaimed (simulated before submission).
    */
-  async clawback(streamId: bigint | string): Promise<bigint> {
+  async clawback(streamId: bigint | string, signal?: AbortSignal): Promise<bigint> {
     this._ensureCanMutate();
+    if (signal?.aborted) throw new DOMException('Aborted', 'AbortError');
     const addr   = await this._resolveAddr(BigInt(streamId));
     const caller = await this._getSenderAddress();
     const tx     = await buildContractCallTx(this.rpcUrl, this.passphrase, caller, addr, 'clawback', [], this._fee);
@@ -686,8 +697,9 @@ export class StreamsModule {
    * Soroban simulation. Returns the resource fee (CPU/RAM), base fee, and
    * total estimated fee in stroops.
    */
-  async estimateFee(operation: StreamOperation): Promise<FeeEstimate> {
+  async estimateFee(operation: StreamOperation, signal?: AbortSignal): Promise<FeeEstimate> {
     const callerAddr = await this._getSenderAddress();
+    if (signal?.aborted) throw new DOMException('Aborted', 'AbortError');
     const server = this._server();
 
     let tx: Transaction;
@@ -787,8 +799,9 @@ export class StreamsModule {
    * Returns a page of StreamInfo along with pagination metadata so the
    * frontend can implement infinite scrolling.
    */
-  async list(params: ListStreamsParams): Promise<PaginatedStreams> {
+  async list(params: ListStreamsParams, signal?: AbortSignal): Promise<PaginatedStreams> {
     const { sender, recipient } = params;
+    if (signal?.aborted) throw new DOMException('Aborted', 'AbortError');
     // Clamp here (not just in FactoryModule) so hasNextPage/nextCursor math
     // below stays consistent with the limit actually sent to the contract —
     // otherwise a caller-supplied limit above the max would silently break
@@ -985,7 +998,8 @@ export class StreamsModule {
     return this._rpcServerProxy;
   }
 
-  private async _resolveAddr(id: bigint): Promise<string> {
+  private async _resolveAddr(id: bigint, signal?: AbortSignal): Promise<string> {
+    if (signal?.aborted) throw new DOMException('Aborted', 'AbortError');
     // Use the factory's bounded LRU cache for address resolution.
     // Stream contract addresses are immutable once assigned by the factory,
     // so the cache never needs invalidation.
@@ -994,7 +1008,8 @@ export class StreamsModule {
     return addr;
   }
 
-  private async _simulateTx(tx: Transaction): Promise<xdr.ScVal> {
+  private async _simulateTx(tx: Transaction, signal?: AbortSignal): Promise<xdr.ScVal> {
+    if (signal?.aborted) throw new DOMException('Aborted', 'AbortError');
     const server = this._server();
     const result = await catchNetworkError('simulateTransaction', server.simulateTransaction(tx));
     if (SorobanRpc.Api.isSimulationError(result)) {
@@ -1005,7 +1020,7 @@ export class StreamsModule {
   }
 
   /** Simulate -> assemble -> sign -> submit -> poll. Returns txHash. */
-  private async _invoke(contractId: string, method: string, args: xdr.ScVal[]): Promise<string> {
+  private async _invoke(contractId: string, method: string, args: xdr.ScVal[], signal?: AbortSignal): Promise<string> {
     const senderAddr = await this._getSenderAddress();
     const tx         = await buildContractCallTx(this.rpcUrl, this.passphrase, senderAddr, contractId, method, args, this._fee);
     const server     = this._server();
@@ -1015,13 +1030,13 @@ export class StreamsModule {
     }
     const assembled = SorobanRpc.assembleTransaction(tx, sim).build();
     const signed    = await this._signTx(assembled);
-    const { hash }  = await this._sendAndPoll(server, signed);
+    const { hash }  = await this._sendAndPoll(server, signed, signal);
     return hash;
   }
 
   private async _sendAndPoll(
     server: SorobanRpc.Server,
-    tx: Transaction,
+    tx: Transaction, signal?: AbortSignal,
   ): Promise<{ hash: string; returnValue: xdr.ScVal | undefined }> {
     let sent;
     try {
@@ -1037,6 +1052,7 @@ export class StreamsModule {
     const pollIntervalMs = this.config.confirmationPollIntervalMs ?? DEFAULT_CONFIRMATION_POLL_INTERVAL_MS;
     for (let i = 0; i < maxAttempts; i++) {
       await sleep(pollIntervalMs);
+      if (signal?.aborted) throw new DOMException("Aborted", "AbortError");
       let s;
       try {
         s = await catchNetworkError('getTransaction', server.getTransaction(hash));
@@ -1068,7 +1084,16 @@ function parseStreamInfo(id: bigint, address: string, val: xdr.ScVal): StreamInf
   // (see contracts/stream/src/storage.rs). Reading `m['paused']` etc. always
   // yields `undefined`; derive the booleans by masking `flags`, mirroring
   // `StreamInfo::is_paused()` / `is_cancelled()` / `is_clawback_enabled()`.
-  const flags = m['flags'] ? scValToU32(m['flags']) : 0;
+  // Defensive: if `flags` is present but not a U32 ScVal (wrong type from a
+  // contract upgrade or malformed data), fall back to 0 instead of throwing.
+  let flags = 0;
+  if (m['flags']) {
+    try {
+      flags = scValToU32(m['flags']);
+    } catch {
+      flags = 0;
+    }
+  }
 
   const info: StreamInfo = {
     id,

@@ -555,9 +555,16 @@ new GraphQLIndexer(endpoint: string)
 
 Throws if `endpoint` is empty.
 
-### `query(options) → Promise<unknown>`
+### `query<T = unknown>(options) → Promise<T>`
 
-Issues a single GraphQL query as an HTTP POST and returns the parsed JSON response.
+Issues a single GraphQL query as an HTTP POST and returns the unwrapped `data` payload.
+
+> [!NOTE]
+> **Return Contract (Unwrapped Data)**: Unlike standard GraphQL clients that return the raw
+> `{ data, errors }` envelope, `query()` automatically unpacks the response and returns `body.data`
+> directly. If the GraphQL endpoint returns any errors in `errors[]`, `query()` throws a
+> `ConduitError` containing the aggregated error messages. Pass a type parameter
+> `query<T>()` to strongly type the returned data.
 
 | Field | Type | Required |
 |-------|------|----------|
@@ -574,8 +581,8 @@ timed out). Pass `timeoutMs: 0`/`Infinity` to disable the SDK timeout. A caller-
 aborts the in-flight request and rejects with the underlying `AbortError` — use it to cancel on
 unmount or navigation.
 
-**Throws** if `query` is empty, if the HTTP response is not `ok`, or with an
-`IndexerTimeoutError` when the request exceeds `timeoutMs`.
+**Throws** if `query` is empty, if the HTTP response is not `ok`, if GraphQL errors are returned
+(as a `ConduitError`), or with an `IndexerTimeoutError` when the request exceeds `timeoutMs`.
 
 ### `subscribe(options) → IndexerSubscription`
 

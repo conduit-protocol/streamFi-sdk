@@ -386,6 +386,8 @@ export interface BatchTxOutcome {
   txHash?: string;
   /** Human-readable reason, present when status is 'FAILED', 'SKIPPED', or 'ERROR'. */
   error?: string;
+  /** True when this outcome was produced by a dry-run (no on-chain submission). */
+  dryRun?: boolean;
 }
 
 /** Overall result returned by {@link submitBatch}. */
@@ -401,6 +403,30 @@ export interface BatchSubmitResult {
    */
   firstFailureIndex: number;
   outcomes: BatchTxOutcome[];
+}
+
+/**
+ * Typed error thrown when a batch submission has a mid-batch failure.
+ * Carries the index of the first failing transaction and the indices of
+ * all transactions that were skipped as a result.
+ */
+export class BatchPartiallySubmittedError extends Error {
+  readonly firstFailureIndex: number;
+  readonly skippedIndices: number[];
+  readonly result: BatchSubmitResult;
+
+  constructor(result: BatchSubmitResult) {
+    super(
+      `Batch submission failed at transaction ${result.firstFailureIndex}. ` +
+      `${result.outcomes.filter(o => o.status === 'SKIPPED').length} transaction(s) skipped.`,
+    );
+    this.name = 'BatchPartiallySubmittedError';
+    this.firstFailureIndex = result.firstFailureIndex;
+    this.skippedIndices = result.outcomes
+      .filter(o => o.status === 'SKIPPED')
+      .map(o => o.index);
+    this.result = result;
+  }
 }
 
 export interface BatchSubmitOptions {
@@ -433,6 +459,10 @@ export interface BatchSubmitOptions {
    * terminal state (SUCCESS, FAILED, SKIPPED, or ERROR).
    */
   onProgress?: (progress: { index: number; method: string; status: BatchTxStatus }) => void;
+  /** When true, simulates every transaction and returns would-be outcomes without submitting. */
+  dryRun?: boolean;
+  /** When true, throws BatchPartiallySubmittedError if any tx fails. Default false. */
+  throwOnError?: boolean;
 }
 
 const DEFAULT_SUBMIT_POLL_INTERVAL_MS = 1_000;
@@ -511,6 +541,20 @@ export async function submitBatch(
       continue;
     }
 
+
+    // Dry-run: skip signing, submission, and polling. Return a synthetic
+    // SUCCESS outcome for each transaction so pre-flight UIs can show
+    // what would be submitted without touching the network (#608).
+    if (options.dryRun) {
+      outcomes.push({
+        index:  built.index,
+        method: built.method,
+        status: 'SUCCESS',
+        txHash: `dry-run:${built.index}`,
+        dryRun: true,
+      });
+      continue;
+    }
     // Optionally re-sign the XDR (e.g. hardware wallet, async key service).
     let xdrToSubmit = built.xdr;
     if (options.sign) {
@@ -590,9 +634,15 @@ export async function submitBatch(
     }
   }
 
-  return {
+  const result = {
     allSucceeded:      firstFailureIndex === -1,
     firstFailureIndex,
     outcomes,
   };
+
+  if (options.throwOnError && !result.allSucceeded) {
+    throw new BatchPartiallySubmittedError(result);
+  }
+
+  return result;
 }
