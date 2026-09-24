@@ -13,7 +13,14 @@ function pow10(decimals: number): bigint {
   return decimals < POW10.length ? POW10[decimals]! : BigInt(10 ** decimals);
 }
 
-/** Convert a display amount string to stroops (bigint) */
+/**
+ * Convert a display amount string to stroops (bigint).
+ *
+ * @example
+ * toStroops('10')        // 100_000_000n  (10 XLM in stroops)
+ * toStroops('0.0000001') //           1n  (1 stroop)
+ * toStroops('1.5')       //  15_000_000n
+ */
 export function toStroops(amount: string, decimals = 7): bigint {
   if (!/^\d*(\.\d*)?$/.test(amount) || amount === '.' || amount === '') {
     throw new Error(`Invalid amount format: "${amount}"`);
@@ -35,7 +42,14 @@ export function toStroops(amount: string, decimals = 7): bigint {
   return BigInt(whole) * pow10(decimals) + roundedFrac;
 }
 
-/** Convert stroops (bigint) to a display amount string */
+/**
+ * Convert stroops (bigint) to a display amount string.
+ *
+ * @example
+ * fromStroops(100_000_000n) // '10.0'   (100 000 000 stroops = 10 XLM)
+ * fromStroops(1n)           // '0.0000001'
+ * fromStroops(-50_000_000n) // '-5.0'
+ */
 export function fromStroops(stroops: bigint, decimals = 7): string {
   const neg = stroops < 0n;
   const abs = neg ? -stroops : stroops;
@@ -57,6 +71,13 @@ export function fromStroops(stroops: bigint, decimals = 7): string {
  * @param depositAmount  Display amount string, e.g. '1000'
  * @param durationSecs   Duration in seconds
  * @param decimals       Token decimal places (default 7 for Stellar assets)
+ *
+ * @example
+ * // Stream 3 600 XLM over 1 year (31 536 000 s) ≈ 1141 stroops/s
+ * calculateRate('3600', 31_536_000) // 1141n
+ *
+ * // Stream 100 XLM over 30 days (2 592 000 s)
+ * calculateRate('100', 2_592_000)   // 3858n
  */
 export function calculateRate(depositAmount: string, durationSecs: number, decimals = 7): bigint {
   if (!Number.isInteger(durationSecs) || durationSecs <= 0) {
@@ -212,6 +233,12 @@ export function bigintSafeStringify<T>(value: T): T {
  * checksum) -- it does not check whether the account or contract exists on-chain.
  * Use this to fail fast before submission, e.g. before passing a recipient
  * into client.streams.create().
+ *
+ * @example
+ * isValidAddress('GAHJJJKMOKYE4RVPZEWZTKH5FVI4PA3VL7GK2LFNUBSGBV3CCWFCNJJJ') // true  — G... account
+ * isValidAddress('CAHJJJKMOKYE4RVPZEWZTKH5FVI4PA3VL7GK2LFNUBSGBV3CCWFCNJJJ') // true  — C... contract
+ * isValidAddress('not-an-address')                                              // false
+ * isValidAddress('')                                                            // false
  */
 export function isValidAddress(address: string): boolean {
   if (typeof address !== 'string' || address.length === 0) {
