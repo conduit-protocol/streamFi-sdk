@@ -647,6 +647,102 @@ export class GraphQLIndexer {
     this.activeSubscriptions.clear();
   }
 
+  /**
+   * Convenience method to query all streams sent by a specific address.
+   *
+   * Builds and executes a GraphQL query to fetch all streams where the given
+   * address is the sender. Uses the standard pagination pattern expected by
+   * most Conduit indexers.
+   *
+   * @template T The type of stream objects returned by the indexer
+   * @param senderAddress The sender's Stellar account address
+   * @param options Optional query configuration (timeoutMs, signal, etc.)
+   * @returns The query response data (typically contains paginated stream results)
+   */
+  async streamsBySender<T = unknown>(
+    senderAddress: string,
+    options?: Omit<GraphQLQueryOptions, 'query' | 'variables'>,
+  ): Promise<T> {
+    const query = `
+      query StreamsBySender($sender: String!) {
+        streamsBySender(sender: $sender) {
+          items {
+            id
+            sender
+            recipient
+            token
+            ratePerSecond
+            startTime
+            endTime
+            withdrawn
+            deposited
+            paused
+            pausedAt
+            cancelled
+            clawbackEnabled
+          }
+          pageInfo {
+            hasNextPage
+            endCursor
+          }
+        }
+      }
+    `;
+    return this.query<T>({
+      ...options,
+      query,
+      variables: { sender: senderAddress },
+    });
+  }
+
+  /**
+   * Convenience method to query all streams received by a specific address.
+   *
+   * Builds and executes a GraphQL query to fetch all streams where the given
+   * address is the recipient. Uses the standard pagination pattern expected by
+   * most Conduit indexers.
+   *
+   * @template T The type of stream objects returned by the indexer
+   * @param recipientAddress The recipient's Stellar account address
+   * @param options Optional query configuration (timeoutMs, signal, etc.)
+   * @returns The query response data (typically contains paginated stream results)
+   */
+  async streamsByRecipient<T = unknown>(
+    recipientAddress: string,
+    options?: Omit<GraphQLQueryOptions, 'query' | 'variables'>,
+  ): Promise<T> {
+    const query = `
+      query StreamsByRecipient($recipient: String!) {
+        streamsByRecipient(recipient: $recipient) {
+          items {
+            id
+            sender
+            recipient
+            token
+            ratePerSecond
+            startTime
+            endTime
+            withdrawn
+            deposited
+            paused
+            pausedAt
+            cancelled
+            clawbackEnabled
+          }
+          pageInfo {
+            hasNextPage
+            endCursor
+          }
+        }
+      }
+    `;
+    return this.query<T>({
+      ...options,
+      query,
+      variables: { recipient: recipientAddress },
+    });
+  }
+
   private getWebSocketCtor(): (new (url: string | URL, protocols?: string | string[]) => WebSocket) | null {
     if (typeof globalThis !== 'undefined' && 'WebSocket' in globalThis && typeof (globalThis as unknown as { WebSocket?: typeof WebSocket }).WebSocket === 'function') {
       return (globalThis as unknown as { WebSocket?: typeof WebSocket }).WebSocket ?? null;
