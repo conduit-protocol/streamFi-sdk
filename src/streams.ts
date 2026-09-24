@@ -45,6 +45,7 @@ import {
   STREAM_FLAG_PAUSED,
   STREAM_FLAG_CANCELLED,
   STREAM_FLAG_CLAWBACK_ENABLED,
+  MIN_STREAM_DURATION_SECONDS,
 } from './constants.js';
 import { buildBatchTransactions } from './batch-tx.js';
 import type { BatchTransactionContext } from './batch-tx.js';
@@ -244,6 +245,9 @@ export class StreamsModule {
     }
     if (durationSeconds !== undefined && (typeof durationSeconds !== 'number' || durationSeconds <= 0)) {
       throw new Error('Invalid durationSeconds: must be a positive number');
+    }
+    if (durationSeconds !== undefined && durationSeconds < MIN_STREAM_DURATION_SECONDS) {
+      throw new Error(`Invalid durationSeconds: must be at least ${MIN_STREAM_DURATION_SECONDS} seconds (1 hour)`);
     }
     if (ratePerSecond !== undefined && (typeof ratePerSecond !== 'string' || !ratePerSecond.trim())) {
       throw new Error('Invalid ratePerSecond: must be a non-empty string');

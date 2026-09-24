@@ -200,6 +200,18 @@ describe('StreamsModule — create() param validation', () => {
       depositAmount: '100',
     })).rejects.toThrow(/durationSeconds|ratePerSecond/);
   });
+
+  it('throws when durationSeconds is below MIN_STREAM_DURATION_SECONDS', async () => {
+    const { StreamsModule } = await import('../streams.js');
+    const { MIN_STREAM_DURATION_SECONDS } = await import('../constants.js');
+    const sdk = new StreamsModule(makeConfig(true));
+    await expect(sdk.create({
+      recipient:       'GBBD47IF6LWK7P7MDEVSCWR7DPUWV3NY3DTQEVFL4NAT4AQH3ZLLFLA5',
+      token:           'CDLZFC3SYJYDZT7K67VZ75HPJVIEUVNIXF47ZG2FB2RMQQVU2HHGCN3',
+      depositAmount:   '100',
+      durationSeconds: MIN_STREAM_DURATION_SECONDS - 1,
+    })).rejects.toThrow(/durationSeconds.*at least.*3600/);
+  });
 });
 
 describe('StreamsModule — _resolveAddr via get()', () => {

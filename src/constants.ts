@@ -26,6 +26,9 @@ for (const [network, issuer] of Object.entries(USDC_ISSUER)) {
   }
 }
 
+/** Minimum stream duration (in seconds). Streams cannot be created with duration less than this. */
+export const MIN_STREAM_DURATION_SECONDS = 3600;
+
 /** Default page size for `ProductionModule` / `StreamsModule.list()` pagination. */
 export const DEFAULT_LIST_LIMIT = 20;
 
