@@ -226,6 +226,45 @@ describe('Module44 (SDK Feature #44)', () => {
     });
   });
 
+  describe('open-ended streams (endTime === 0) — #610', () => {
+    it('classifies open-ended stream as healthy regardless of timestamp', () => {
+      const stream = { ...mockStream, endTime: 0 };
+      const r1 = module44.assessSingleItem({ id: 's1', stream, timestamp: now });
+      const r2 = module44.assessSingleItem({ id: 's1', stream, timestamp: now + 999_999 });
+      expect(r1.runwaySecs).toBeNull();
+      expect(r1.riskLevel).toBe('healthy');
+      expect(r2.runwaySecs).toBeNull();
+      expect(r2.riskLevel).toBe('healthy');
+    });
+
+    it('classifies open-ended paused stream as inactive (not healthy)', () => {
+      const stream = { ...mockStream, endTime: 0, paused: true };
+      const result = module44.assessSingleItem({ id: 's1', stream, timestamp: now });
+      expect(result.riskLevel).toBe('inactive');
+      expect(result.runwaySecs).toBe(0);
+    });
+
+    it('classifies open-ended cancelled stream as inactive', () => {
+      const stream = { ...mockStream, endTime: 0, cancelled: true };
+      const result = module44.assessSingleItem({ id: 's1', stream, timestamp: now });
+      expect(result.riskLevel).toBe('inactive');
+      expect(result.runwaySecs).toBe(0);
+    });
+
+    it('classifies open-ended zero-rate stream as inactive', () => {
+      const stream = { ...mockStream, endTime: 0, ratePerSecond: 0n };
+      const result = module44.assessSingleItem({ id: 's1', stream, timestamp: now });
+      expect(result.riskLevel).toBe('inactive');
+      expect(result.runwaySecs).toBe(0);
+    });
+
+    it('returns 0n top-up for open-ended stream with extremely large target', () => {
+      const stream = { ...mockStream, endTime: 0, ratePerSecond: 1_000_000n };
+      expect(module44.estimateTopUpNeeded(stream, Number.MAX_SAFE_INTEGER, now)).toBe(0n);
+    });
+
+  });
+
   describe('clearCache & Metrics', () => {
     it('resets cache state and performance counters', () => {
       const item = { id: 's1', stream: mockStream, timestamp: now };

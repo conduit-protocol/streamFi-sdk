@@ -39,7 +39,7 @@ export interface GraphQLSubscriptionOptions {
   onError?: (error: Error) => void;
   /** Matches WebSocketRelayer: how many reconnects after an unexpected close. Default 5. */
   maxReconnectAttempts?: number;
-  /** Base delay in ms; actual wait is delay * attempt number. Default 1000. */
+  /** Base delay in ms; actual wait uses capped exponential backoff (max 30s) with jitter. Default 1000. */
   reconnectDelayMs?: number;
 }
 
@@ -469,7 +469,10 @@ export class GraphQLIndexer {
           return;
         }
         reconnectAttempts += 1;
-        const delay = reconnectDelayMs * reconnectAttempts;
+        const baseDelay = reconnectDelayMs * reconnectAttempts;
+        const cappedDelay = Math.min(baseDelay, 30_000);
+        const jitter = Math.random() * 0.3 * cappedDelay;
+        const delay = cappedDelay + jitter;
         reconnectTimer = setTimeout(() => {
           reconnectTimer = null;
           if (unsubscribed || this.isDestroyed) return;
