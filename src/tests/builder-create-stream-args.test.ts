@@ -48,7 +48,7 @@ describe('StreamBuilder.toContractArgs()', () => {
 
   it('throws the same missing-required-field error as build() when incomplete', () => {
     const builder = new StreamBuilder().token(TOKEN).sender(SENDER).ratePerSecond(10);
-    expect(() => builder.toContractArgs()).toThrow('Missing required parameters for StreamBuilder');
+    expect(() => builder.toContractArgs()).toThrow('2 validation issue(s)');
   });
 
   it('produces exactly 8 args in create_stream ABI order and type', () => {

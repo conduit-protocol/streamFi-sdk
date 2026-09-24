@@ -12,6 +12,7 @@ export {
   buildBatchTransactions,
   buildBatchTransactionsSync,
   BatchBuildError,
+  BatchPartiallySubmittedError,
   submitBatch,
 } from './batch-tx.js';
 export type {
@@ -24,6 +25,8 @@ export type {
   BatchSubmitOptions,
 } from './batch-tx.js';
 export { GraphQLIndexer, DEFAULT_INDEXER_TIMEOUT_MS } from './indexer.js';
+export { MockGraphQLIndexer, createMockIndexer } from './mock-indexer.js';
+export type { MockQueryMap, MockSubscriptionMap, MockIndexerOptions } from './mock-indexer.js';
 export type {
   GraphQLQueryOptions,
   GraphQLSubscriptionOptions,
@@ -57,8 +60,6 @@ export type { FeeEstimateOptions } from './fee-estimator.js';
 export { WebSocketRelayer } from './relayer/WebSocketRelayer.js';
 export { ErrorMapper } from './relayer/ErrorMapper.js';
 export type { MappedErrorHandler } from './relayer/ErrorMapper.js';
-export { NonceManager } from './nonce/NonceManager.js';
-export type { NonceLock, NonceManagerOptions } from './nonce/NonceManager.js';
 
 // Utils are exported via the /utils subpath export, but also available here
 export {
@@ -74,8 +75,9 @@ export {
 } from './utils.js';
 
 // RPC server lifecycle
-export { getServer, clearServerCache } from './soroban.js';
+export { getServer, clearServerCache, resolveFee } from './soroban.js';
 export { getTokenDecimals, clearTokenDecimalsCache } from './soroban.js';
+export { getCircuitState, recordSuccess, recordFailure, resetCircuit, getAllCircuitStates, type CircuitState, type CircuitStatus } from "./rpc-circuit-state.js";
 
 export {
   formatAddress,

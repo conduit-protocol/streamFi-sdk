@@ -254,5 +254,14 @@ export class ConduitClient {
   clearAddressCache(): void {
     this.streams.clearAddressCache();
   }
+
+  /**
+   * Expose factory address-cache hit/miss counters so consumers can tune
+   * cache size and concurrency. Returns `null` when the factory module is
+   * not initialized (no factoryAddress was configured).
+   */
+  getCacheMetrics(): { hits: number; misses: number; size: number } | null {
+    return this._factory?.getCacheMetrics() ?? null;
+  }
 }
 

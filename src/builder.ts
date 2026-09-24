@@ -7,7 +7,7 @@ import {
   paramToScVal,
   validateContext,
 } from './batch-tx.js';
-import { OperationAbortedError } from './errors.js';
+import { OperationAbortedError, ValidationError } from './errors.js';
 import type { BatchTransactionContext, BuiltBatchTransaction, ScValType } from './batch-tx.js';
 
 export interface SubmitOptions {
@@ -201,15 +201,37 @@ export class StreamBuilder {
    * @returns An object containing `token`, `sender`, `recipient`, `amount`, and optionally `ratePerSecond`.
    * @throws {Error} If any required field (`token`, `sender`, `recipient`, `amount`) is missing or malformed.
    */
+  /**
+   * Collects every validation problem with the current builder state
+   * without mutating anything. Returns an array of human-readable issue
+   * strings; an empty array means the builder is valid.
+   */
+  validate(): string[] {
+    const issues: string[] = [];
+
+    if (this._token === undefined || this._token === null) {
+      issues.push('token is required');
+    }
+    if (this._sender === undefined || this._sender === null) {
+      issues.push('sender is required');
+    }
+    if (this._recipient === undefined || this._recipient === null) {
+      issues.push('recipient is required');
+    }
+    if (this._amount === undefined || this._amount === null) {
+      issues.push('amount is required');
+    }
+
+    return issues;
+  }
+
   build() {
     if (this.isDestroyed) {
       throw new Error('StreamBuilder has been destroyed');
     }
-    if (this._token === undefined || this._token === null ||
-        this._sender === undefined || this._sender === null ||
-        this._recipient === undefined || this._recipient === null ||
-        this._amount === undefined || this._amount === null) {
-      throw new Error('Missing required parameters for StreamBuilder');
+    const issues = this.validate();
+    if (issues.length > 0) {
+      throw new ValidationError(issues);
     }
 
     const config: Record<string, unknown> = {

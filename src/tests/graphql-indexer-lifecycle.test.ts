@@ -39,9 +39,11 @@ describe('GraphQLIndexer.subscribe() — WebSocket transport', () => {
       return mockWs;
     });
     (globalThis as any).WebSocket = wsCtor;
+    vi.spyOn(Math, 'random').mockReturnValue(0);
   });
 
   afterEach(() => {
+    vi.restoreAllMocks();
     vi.useRealTimers();
     delete (globalThis as any).WebSocket;
   });
@@ -237,6 +239,7 @@ describe('GraphQLIndexer.subscribe() — WebSocket transport', () => {
     });
 
     indexer.cleanup();
+    vi.restoreAllMocks();
     vi.useRealTimers();
   });
 
@@ -265,6 +268,7 @@ describe('GraphQLIndexer.subscribe() — WebSocket transport', () => {
     expect(sockets).toHaveLength(1);
     expect(indexer.getSubscriptionCount()).toBe(0);
     indexer.cleanup();
+    vi.restoreAllMocks();
     vi.useRealTimers();
   });
 
@@ -292,6 +296,7 @@ describe('GraphQLIndexer.subscribe() — WebSocket transport', () => {
 
     expect(sockets).toHaveLength(1);
     expect(indexer.getSubscriptionCount()).toBe(0);
+    vi.restoreAllMocks();
     vi.useRealTimers();
   });
 
@@ -327,6 +332,7 @@ describe('GraphQLIndexer.subscribe() — WebSocket transport', () => {
       expect.objectContaining({ message: expect.stringMatching(/exhausted/i) }),
     );
     expect(indexer.getSubscriptionCount()).toBe(0);
+    vi.restoreAllMocks();
     vi.useRealTimers();
   });
 
@@ -372,9 +378,62 @@ describe('GraphQLIndexer.subscribe() — WebSocket transport', () => {
     expect(indexer.getSubscriptionCount()).toBe(0);
     expect(wsCtor).toHaveBeenCalledTimes(1);
   });
-});
 
-// ── SSE / fetch fallback transport (used when no WebSocket is available) ──
+  it('uses capped exponential backoff with jitter on reconnect (#597)', () => {
+    vi.useFakeTimers();
+    const randomSpy = vi.spyOn(Math, 'random').mockReturnValue(0.5);
+    const sockets: Array<ReturnType<typeof createMockWs>> = [];
+    wsCtor.mockImplementation(function () {
+      const socket = createMockWs();
+      sockets.push(socket);
+      return socket;
+    });
+
+    const indexer = new GraphQLIndexer(endpoint);
+    indexer.subscribe({
+      query: 'subscription { x }',
+      onData: () => {},
+      onError: () => {},
+      maxReconnectAttempts: 10,
+      reconnectDelayMs: 10_000,
+    });
+
+    // Attempt 1: base 10_000, jitter +1_500 => 11_500 total
+    sockets[0]!.onclose!();
+    vi.advanceTimersByTime(10_000);
+    expect(sockets).toHaveLength(1);  // not yet (jitter adds 1_500)
+    vi.advanceTimersByTime(1_500);
+    expect(sockets).toHaveLength(2);  // reconnected
+
+    // Attempt 2: base 20_000, jitter +3_000 => 23_000 total
+    sockets[1]!.onclose!();
+    vi.advanceTimersByTime(20_000);
+    expect(sockets).toHaveLength(2);  // not yet
+    vi.advanceTimersByTime(3_000);
+    expect(sockets).toHaveLength(3);  // reconnected
+
+    // Attempt 3: base 30_000, cap 30_000, jitter +4_500 => 34_500 total
+    sockets[2]!.onclose!();
+    vi.advanceTimersByTime(30_000);
+    expect(sockets).toHaveLength(3);  // not yet
+    vi.advanceTimersByTime(4_500);
+    expect(sockets).toHaveLength(4);  // reconnected
+
+    // Attempt 4: base 40_000 but capped at 30_000, jitter +4_500 => 34_500 total (not 44_500)
+    sockets[3]!.onclose!();
+    vi.advanceTimersByTime(34_500);
+    expect(sockets).toHaveLength(5);  // reconnected at capped delay
+    vi.advanceTimersByTime(10_000);   // would only reach 44_500 if uncapped - no new socket
+    expect(sockets).toHaveLength(5);
+
+    indexer.cleanup();
+    randomSpy.mockRestore();
+    vi.restoreAllMocks();
+    vi.useRealTimers();
+  });
+
+
+});
 
 function sseBodyFromLines(lines: string[]): { getReader: () => any } {
   const encoder = new TextEncoder();

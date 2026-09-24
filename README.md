@@ -101,6 +101,18 @@ const client = new ConduitClient(config: ConduitConfig);
 | `rpcUrl` | `string` | No | Override default Soroban RPC URL |
 | `factoryAddress` | `string` | No | Override deployed factory contract ID |
 | `governorAddress` | `string` | No | Override deployed governor contract ID |
+| `fee` | `string` | No | Explicit inclusion fee in stroops (overrides feeMultiplier) |
+| `feeMultiplier` | `number` | No | Multiplier applied to BASE_FEE when fee is not set |
+
+### Fee Precedence
+
+When both `fee` and `feeMultiplier` are present, `fee` wins. The precedence is:
+
+1. **`fee`** — explicit inclusion fee in stroops (e.g. `"5000"`)
+2. **`feeMultiplier`** — multiplied by `BASE_FEE` when `fee` is absent
+3. **`BASE_FEE`** — hardcoded fallback when neither is set
+
+Use `resolveFee(config)` to compute the effective fee for a given `ConduitConfig`.
 
 ### WalletConnect v2 Integration (Mobile & Browser Wallets)
 

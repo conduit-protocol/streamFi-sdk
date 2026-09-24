@@ -1,4 +1,4 @@
-import { describe, it, expect } from 'vitest';
+﻿import { describe, it, expect } from 'vitest';
 import { StreamBuilder, ConduitBatcher } from '../builder.js';
 
 /** Real chain context so the batcher can build genuine transaction XDR. */
@@ -13,7 +13,7 @@ const TEST_CONTEXT = {
 describe('StreamBuilder Network Interruption & Payload Queueing Regression Tests', () => {
   it('throws boundary check error when build is called with missing or null parameters', () => {
     const builder = new StreamBuilder();
-    expect(() => builder.build()).toThrow('Missing required parameters for StreamBuilder');
+    expect(() => builder.build()).toThrow('4 validation issue(s)');
 
     const nullTokenBuilder = new StreamBuilder();
     expect(() => nullTokenBuilder.token(null as any)).toThrow(
@@ -63,7 +63,7 @@ describe('StreamBuilder Network Interruption & Payload Queueing Regression Tests
     );
 
     // The payload is removed from pendingQueue on final failure too, not just
-    // on success — leaving it there after the caller has already seen the
+    // on success 鈥?leaving it there after the caller has already seen the
     // rejection is what issue #188 reported as a leak.
     expect(builder.getPendingQueue().length).toBe(0);
 

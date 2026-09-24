@@ -52,6 +52,9 @@ export class FactoryModule {
   // stream_address simulation for each of them on every refresh (#568).
   private readonly addressCache = new Map<string, string | null>();
   private readonly negativeCacheExpiry = new Map<string, number>();
+  private readonly _negativeCacheTtlMs: number;
+  private _cacheHits = 0;
+  private _cacheMisses = 0;
 
   constructor(private readonly config: ConduitConfig) {
     // Guard against direct construction with an unsupported network, which
@@ -72,6 +75,7 @@ export class FactoryModule {
       );
     }
     this.factoryId  = config.factoryAddress;
+    this._negativeCacheTtlMs = config.negativeCacheTtlMs ?? NEGATIVE_ADDRESS_CACHE_TTL_MS;
 
     if (config.wallet) {
       this.activeWallet = config.wallet;
@@ -130,8 +134,24 @@ export class FactoryModule {
     this.negativeCacheExpiry.clear();
   }
 
+  /** Cache performance counters so consumers can tune cache size / TTL. */
+  getCacheMetrics(): { hits: number; misses: number; size: number } {
+    return {
+      hits: this._cacheHits,
+      misses: this._cacheMisses,
+      size: this.addressCache.size,
+    };
+  }
+
+  resetCacheStats(): void {
+    this._cacheHits = 0;
+    this._cacheMisses = 0;
+  }
+
   /** Total number of streams ever created through this factory. */
-  async streamCount(): Promise<bigint> {
+  async streamCount(signal?: AbortSignal): Promise<bigint> {
+    if (signal?.aborted) throw new DOMException("Aborted", "AbortError");
+    this._cacheMisses++;
     const caller = await this._resolveCallerAddress();
     const tx  = await buildContractCallTx(
       this.rpcUrl, this.passphrase, caller,
@@ -142,12 +162,14 @@ export class FactoryModule {
   }
 
   /** Resolve a stream ID to its deployed contract address. Returns null if not found. */
-  async streamAddress(streamId: bigint | string): Promise<string | null> {
+  async streamAddress(streamId: bigint | string, signal?: AbortSignal): Promise<string | null> {
     const id  = BigInt(streamId);
     const key = id.toString();
+    if (signal?.aborted) throw new DOMException("Aborted", "AbortError");
 
     const cached = this.addressCache.get(key);
     if (cached !== undefined) {
+      this._cacheHits++;
       if (cached !== null) return cached;
       // Negative hit — honour it only while its TTL is live (#568).
       const expiresAt = this.negativeCacheExpiry.get(key) ?? 0;
@@ -156,6 +178,7 @@ export class FactoryModule {
       this.negativeCacheExpiry.delete(key);
     }
 
+    this._cacheMisses++;
     const caller = await this._resolveCallerAddress();
     const tx  = await buildContractCallTx(
       this.rpcUrl, this.passphrase, caller,
@@ -181,7 +204,7 @@ export class FactoryModule {
 
   private _cacheNegative(key: string): void {
     this.addressCache.set(key, null);
-    this.negativeCacheExpiry.set(key, Date.now() + NEGATIVE_ADDRESS_CACHE_TTL_MS);
+    this.negativeCacheExpiry.set(key, Date.now() + this._negativeCacheTtlMs);
   }
 
   /**
@@ -190,7 +213,9 @@ export class FactoryModule {
    * enforce this itself, so an out-of-range value is silently clamped rather
    * than sent through as-is (see #489).
    */
-  async streamsBySender(address: string, offset = 0, limit = DEFAULT_LIST_LIMIT): Promise<bigint[]> {
+  async streamsBySender(address: string, offset = 0, limit = DEFAULT_LIST_LIMIT, signal?: AbortSignal): Promise<bigint[]> {
+    if (signal?.aborted) throw new DOMException("Aborted", "AbortError");
+    this._cacheMisses++;
     const caller = await this._resolveCallerAddress();
     const tx  = await buildContractCallTx(
       this.rpcUrl, this.passphrase, caller,
@@ -211,7 +236,9 @@ export class FactoryModule {
    * enforce this itself, so an out-of-range value is silently clamped rather
    * than sent through as-is (see #489).
    */
-  async streamsByRecipient(address: string, offset = 0, limit = DEFAULT_LIST_LIMIT): Promise<bigint[]> {
+  async streamsByRecipient(address: string, offset = 0, limit = DEFAULT_LIST_LIMIT, signal?: AbortSignal): Promise<bigint[]> {
+    if (signal?.aborted) throw new DOMException("Aborted", "AbortError");
+    this._cacheMisses++;
     const caller = await this._resolveCallerAddress();
     const tx  = await buildContractCallTx(
       this.rpcUrl, this.passphrase, caller,
@@ -227,7 +254,9 @@ export class FactoryModule {
   }
 
   /** Current protocol fee in basis points (e.g. 30 = 0.3%). */
-  async protocolFeeBps(): Promise<number> {
+  async protocolFeeBps(signal?: AbortSignal): Promise<number> {
+    if (signal?.aborted) throw new DOMException("Aborted", "AbortError");
+    this._cacheMisses++;
     const caller = await this._resolveCallerAddress();
     const tx  = await buildContractCallTx(
       this.rpcUrl, this.passphrase, caller,
