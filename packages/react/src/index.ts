@@ -27,3 +27,17 @@ export { useTransferStreamRecipient } from './hooks/useTransferStreamRecipient.j
 export type { UseTransferStreamRecipientResult, TransferRecipientFn } from './hooks/useTransferStreamRecipient.js';
 export { useClawbackStream } from './hooks/useClawbackStream.js';
 export type { UseClawbackStreamResult, ClawbackStreamFn } from './hooks/useClawbackStream.js';
+export { useBatchWithdraw } from './hooks/useBatchWithdraw.js';
+export type { UseBatchWithdrawState, UseBatchWithdrawResult, BatchWithdrawFn } from './hooks/useBatchWithdraw.js';
+export { useCreateBatchStreams } from './hooks/useCreateBatchStreams.js';
+export type { UseCreateBatchStreamsState, UseCreateBatchStreamsResult, CreateBatchStreamsFn } from './hooks/useCreateBatchStreams.js';
+export { useEstimateStreamFee } from './hooks/useEstimateStreamFee.js';
+export type { UseEstimateStreamFeeResult } from './hooks/useEstimateStreamFee.js';
+export { useWithdrawableAmount } from './hooks/useWithdrawableAmount.js';
+export type { UseWithdrawableAmountResult } from './hooks/useWithdrawableAmount.js';
+export { useStreamedTotal } from './hooks/useStreamedTotal.js';
+export type { UseStreamedTotalResult } from './hooks/useStreamedTotal.js';
+export { useFactoryStreamCount } from './hooks/useFactoryStreamCount.js';
+export type { UseFactoryStreamCountResult } from './hooks/useFactoryStreamCount.js';
+export { useProtocolFeeBps } from './hooks/useProtocolFeeBps.js';
+export type { UseProtocolFeeBpsResult } from './hooks/useProtocolFeeBps.js';
