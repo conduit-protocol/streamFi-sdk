@@ -15,6 +15,9 @@ import { DEFAULT_RPC } from "./soroban.js";
 import { StreamsModule } from "./streams.js";
 import { FactoryModule } from "./factory.js";
 import { GovernorModule } from "./governor.js";
+import { Module26 } from "./module26.js";
+import { Module36 } from "./module36.js";
+import { Module44 } from "./module44.js";
 import {
   SUPPORTED_NETWORKS,
   UnsupportedChainError,
@@ -101,6 +104,45 @@ export class ConduitClient {
     return this._factory;
   }
   private _factory: FactoryModule | undefined;
+
+  /**
+   * Access the Module26 portfolio tracking module.
+   *
+   * Provides stream portfolio aggregation and analysis features.
+   */
+  get portfolio(): Module26 {
+    if (!this._portfolio) {
+      this._portfolio = new Module26();
+    }
+    return this._portfolio;
+  }
+  private _portfolio: Module26 | undefined;
+
+  /**
+   * Access the Module36 stream snapshot/diff module.
+   *
+   * Provides stream snapshot tracking and differential analysis features.
+   */
+  get snapshots(): Module36 {
+    if (!this._snapshots) {
+      this._snapshots = new Module36();
+    }
+    return this._snapshots;
+  }
+  private _snapshots: Module36 | undefined;
+
+  /**
+   * Access the Module44 risk assessment module.
+   *
+   * Provides stream liquidity risk assessment and runway calculation features.
+   */
+  get risk(): Module44 {
+    if (!this._risk) {
+      this._risk = new Module44();
+    }
+    return this._risk;
+  }
+  private _risk: Module44 | undefined;
 
   private readonly config: Required<Pick<ConduitConfig, "network" | "rpcUrl">> &
     ConduitConfig;

@@ -219,6 +219,20 @@ export class ConduitError extends Error {
     if (!match || !match[1]) return new Error(message);
     const code = Number(match[1]);
     if (!(code in MESSAGES_BY_CONTRACT[contract])) return new Error(message);
+
+    // Return typed factory errors for high-value error codes
+    if (contract === 'factory') {
+      if (code === FactoryErrorCode.RateExceedsMax) {
+        return new RateExceedsMaxError();
+      }
+      if (code === FactoryErrorCode.DurationTooShort) {
+        return new DurationTooShortError();
+      }
+      if (code === FactoryErrorCode.BackdatedStream) {
+        return new BackdatedStreamError();
+      }
+    }
+
     return new ConduitError(contract, code, `${MESSAGES_BY_CONTRACT[contract][code]} (${message})`);
   }
 }
@@ -372,6 +386,87 @@ export class ClawbackNotEnabledError extends ConduitError {
   constructor() {
     super('stream', StreamErrorCode.ClawbackDisabled);
     this.name = 'ClawbackNotEnabledError';
+    Object.setPrototypeOf(this, new.target.prototype);
+  }
+}
+
+/**
+ * Thrown by {@link FactoryModule} when the stream's rate per second exceeds
+ * the governor's configured maximum rate. Carries the rate and limit so a UI
+ * can show "your rate (X stroops/sec) exceeds the maximum (Y stroops/sec)".
+ *
+ * @example
+ * ```ts
+ * try {
+ *   await client.factory.create({ ... });
+ * } catch (err) {
+ *   if (err instanceof RateExceedsMaxError) {
+ *     console.error(`Rate ${err.rate} exceeds max ${err.max}`);
+ *   }
+ * }
+ * ```
+ */
+export class RateExceedsMaxError extends ConduitError {
+  constructor() {
+    super(
+      'factory',
+      FactoryErrorCode.RateExceedsMax,
+    );
+    this.name = 'RateExceedsMaxError';
+    Object.setPrototypeOf(this, new.target.prototype);
+  }
+}
+
+/**
+ * Thrown by {@link FactoryModule} when the stream duration is below the
+ * governor's configured minimum duration. Carries the duration and minimum
+ * so a UI can show "your duration (X seconds) is below the minimum (Y seconds)".
+ *
+ * @example
+ * ```ts
+ * try {
+ *   await client.factory.create({ ... });
+ * } catch (err) {
+ *   if (err instanceof DurationTooShortError) {
+ *     console.error(`Duration ${err.duration} is below minimum ${err.minimum}`);
+ *   }
+ * }
+ * ```
+ */
+export class DurationTooShortError extends ConduitError {
+  constructor() {
+    super(
+      'factory',
+      FactoryErrorCode.DurationTooShort,
+    );
+    this.name = 'DurationTooShortError';
+    Object.setPrototypeOf(this, new.target.prototype);
+  }
+}
+
+/**
+ * Thrown by {@link FactoryModule} when the stream's start time is in the past.
+ * A stream can only be created with a start time equal to or after the current
+ * timestamp to avoid immediate backdated accrual.
+ *
+ * @example
+ * ```ts
+ * try {
+ *   await client.factory.create({ ... });
+ * } catch (err) {
+ *   if (err instanceof BackdatedStreamError) {
+ *     console.error('Stream start time cannot be in the past');
+ *   }
+ * }
+ * ```
+ */
+export class BackdatedStreamError extends ConduitError {
+  constructor() {
+    super(
+      'factory',
+      FactoryErrorCode.BackdatedStream,
+    );
+    this.name = 'BackdatedStreamError';
     Object.setPrototypeOf(this, new.target.prototype);
   }
 }
@@ -719,6 +814,9 @@ export class ConfirmationTimeoutError extends Error {
  * - {@link UnauthorizedStreamActionError}
  * - {@link InvalidStreamStateError}
  * - {@link ClawbackNotEnabledError}
+ * - {@link RateExceedsMaxError}
+ * - {@link DurationTooShortError}
+ * - {@link BackdatedStreamError}
  * - {@link ConfirmationTimeoutError}
  */
 export function isConduitError(value: unknown): value is Error {
@@ -736,6 +834,9 @@ export function isConduitError(value: unknown): value is Error {
     'UnauthorizedStreamActionError',
     'InvalidStreamStateError',
     'ClawbackNotEnabledError',
+    'RateExceedsMaxError',
+    'DurationTooShortError',
+    'BackdatedStreamError',
     'ConfirmationTimeoutError',
     'ValidationError',
   ].includes(value.name);
