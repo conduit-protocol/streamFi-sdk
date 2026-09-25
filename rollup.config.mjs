@@ -3,15 +3,7 @@ import typescript from '@rollup/plugin-typescript';
 import terser     from '@rollup/plugin-terser';
 import { visualizer } from 'rollup-plugin-visualizer';
 
-/**
- * Packages that consumers must install themselves — never bundle these.
- * @stellar/stellar-sdk is ~400KB+ and would blow up the bundle.
- * tslib is a runtime helper that consumers may already have.
- */
-const external = [
-  '@stellar/stellar-sdk',
-  'tslib',
-];
+const external = ['@stellar/stellar-sdk', 'react', 'react-dom', 'react/jsx-runtime'];
 
 const shared = {
   input: {

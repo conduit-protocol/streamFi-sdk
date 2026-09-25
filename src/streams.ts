@@ -14,14 +14,12 @@ import type {
   Subscription,
   BatchWithdrawItem,
   BatchWithdrawResult,
-  BatchCreateStreamResult,
-  StreamConfig,
   StreamOperation,
-  FeeEstimate,
 } from './types/index.js';
 import type { WalletAdapter } from './adapters/types.js';
 import type { Signer } from './signer.js';
 import { KeypairWalletAdapter } from './adapters/keypair.js';
+import { FeeEstimator } from './fee-estimator.js';
 import { toStroops, calculateRate, bigintSafeStringify } from './utils.js';
 import {
   buildContractCallTx,
@@ -117,10 +115,12 @@ function warnV1Deprecated(methodName: string, replacement: string): void {
 import { ZERO_ADDR, DEFAULT_LIST_LIMIT, clampListLimit, USDC_ISSUER } from './constants.js';
 
 export class StreamsModule {
-  private readonly rpcUrl:     string;
-  private readonly passphrase: string;
-  private readonly _factory:   FactoryModule;
-  private activeWallet?:       WalletAdapter;
+  private readonly rpcUrl:       string;
+  private readonly passphrase:   string;
+  private readonly callerAddr:   string;
+  private readonly _factory:     FactoryModule;
+  private readonly feeEstimator: FeeEstimator = new FeeEstimator();
+  private activeWallet?:         WalletAdapter;
 
   /**
    * Inclusion (bid) fee, in stroops, for transactions this module submits.
@@ -649,39 +649,40 @@ export class StreamsModule {
     ]);
   }
 
-  /** Top up a stream using string parameters (convenience wrapper). */
-  async topUpStream(streamId: string, amount: string): Promise<string> {
-    return this.topUp(streamId, BigInt(amount));
-  }
-
-  /**
-   * Force-cancel a paused stream as the recipient once the 30-day pause
-   * threshold has elapsed (recipient only). Settles atomically like
-   * cancel(): the recipient's earned-but-unwithdrawn tokens are paid out
-   * and the unstreamed remainder is refunded to the sender. Prevents a
-   * sender from indefinitely pausing a stream to hold unstreamed tokens
-   * hostage.
-   */
-  async forceCancel(streamId: bigint | string, signal?: AbortSignal): Promise<string> {
+  /** Transfer recipient of the stream (sender only). */
+  async transferRecipient(streamId: bigint | string, newRecipient: string): Promise<string> {
     this._ensureCanMutate();
-    if (signal?.aborted) throw new DOMException('Aborted', 'AbortError');
-    return this._invoke(await this._resolveAddr(BigInt(streamId)), 'force_cancel', []);
-  }
-
-  /**
-   * Transfer the recipient role to a new address (current recipient only).
-   * The new recipient inherits all rights, including the withdrawable
-   * balance accrued up to the moment of transfer.
-   */
-  async transferRecipient(streamId: bigint | string, newRecipient: string, signal?: AbortSignal): Promise<string> {
-    this._ensureCanMutate();
-    if (signal?.aborted) throw new DOMException('Aborted', 'AbortError');
-    if (!newRecipient || typeof newRecipient !== 'string' || !newRecipient.trim()) {
-      throw new Error('Invalid recipient address: must be a non-empty string');
-    }
     return this._invoke(await this._resolveAddr(BigInt(streamId)), 'transfer_recipient', [
       new Address(newRecipient).toScVal(),
     ]);
+  }
+
+  /** Estimate network fee for a stream operation. */
+  async estimateFee(operation?: StreamOperation): Promise<number> {
+    return this.feeEstimator.estimateFee(async () => {
+      const base = 100;
+      if (!operation) return base;
+      const opType = typeof operation === 'string' ? operation : operation.type;
+      switch (opType) {
+        case 'create':
+          return 500;
+        case 'batchWithdraw': {
+          const count =
+            typeof operation === 'object' && operation !== null && 'items' in operation && Array.isArray(operation.items)
+              ? operation.items.length
+              : 1;
+          return 100 * Math.max(1, count);
+        }
+        case 'withdraw':
+        case 'cancel':
+        case 'pause':
+        case 'resume':
+        case 'topUp':
+        case 'transferRecipient':
+        default:
+          return 100;
+      }
+    });
   }
 
   /**

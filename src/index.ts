@@ -61,6 +61,7 @@ export type { ConduitContract, StreamLifecycleState } from './errors.js';
 export * from './types/index.js';
 export type { GetStreamInfosOptions, GetStreamInfosResult, GetStreamInfosFailure } from './types/index.js';
 export * from './adapters/index.js';
+export * from './react/index.js';
 export { FeeEstimator } from './fee-estimator.js';
 export type { FeeEstimateOptions } from './fee-estimator.js';
 export { WebSocketRelayer } from './relayer/WebSocketRelayer.js';

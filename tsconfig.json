@@ -9,6 +9,7 @@
     "useUnknownInCatchVariables": true,
     "noUncheckedIndexedAccess": true,
     "exactOptionalPropertyTypes": true,
+    "jsx": "react-jsx",
     "forceConsistentCasingInFileNames": true,
     "declaration":             true,
     "declarationDir":          "dist/types",

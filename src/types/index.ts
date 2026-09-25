@@ -283,64 +283,27 @@ export interface BatchWithdrawResult {
   error?: string;
 }
 
-export interface BatchCreateStreamResult {
-  /** Index into the configs array passed to createBatchStreams(). */
-  index: number;
-  success: boolean;
-  streamId?: bigint;
-  streamAddress?: string;
-  txHash?: string;
-  error?: string;
-}
+// -- Stream Operations & Fee Estimation ---------------------------------------
 
-// -- Fee estimation ----------------------------------------------------------
+export type StreamOperationType =
+  | 'create'
+  | 'withdraw'
+  | 'cancel'
+  | 'pause'
+  | 'resume'
+  | 'topUp'
+  | 'transferRecipient'
+  | 'batchWithdraw';
 
 export type StreamOperation =
-  | {
-      type: 'create';
-      token: string;
-      sender: string;
-      recipient: string;
-      depositAmount: string;
-      durationSeconds?: number;
-      ratePerSecond?: string;
-      startTime?: number;
-      clawbackEnabled?: boolean;
-    }
-  | {
-      type: 'withdraw';
-      streamId: bigint | string;
-      amount?: bigint;
-    }
-  | {
-      type: 'cancel';
-      streamId: bigint | string;
-    }
-  | {
-      type: 'pause';
-      streamId: bigint | string;
-    }
-  | {
-      type: 'resume';
-      streamId: bigint | string;
-    }
-  | {
-      type: 'topUp';
-      streamId: bigint | string;
-      amount: bigint;
-    }
-  | {
-      type: 'clawback';
-      streamId: bigint | string;
-    };
+  | StreamOperationType
+  | { type: 'create'; params?: CreateStreamParams }
+  | { type: 'withdraw'; streamId?: bigint | string; amount?: bigint }
+  | { type: 'cancel'; streamId?: bigint | string }
+  | { type: 'pause'; streamId?: bigint | string }
+  | { type: 'resume'; streamId?: bigint | string }
+  | { type: 'topUp'; streamId?: bigint | string; amount?: bigint }
+  | { type: 'transferRecipient'; streamId?: bigint | string; newRecipient?: string }
+  | { type: 'batchWithdraw'; items?: BatchWithdrawItem[] }
+  | { type: string; [key: string]: unknown };
 
-export interface FeeEstimate {
-  /** Total estimated fee in stroops (bigint, per the SDK's stroops convention). */
-  totalFee: bigint;
-  /** Resource fee component (CPU/RAM) in stroops (bigint). */
-  resourceFee: bigint;
-  /** Base (inclusion) fee component in stroops (bigint). */
-  baseFee: bigint;
-  /** Estimated CPU instructions (bigint, avoids IEEE-754 precision loss on large counts). */
-  instructions: bigint;
-}
