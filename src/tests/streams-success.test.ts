@@ -1,6 +1,6 @@
 import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
 import { Keypair, StrKey, xdr } from '@stellar/stellar-sdk';
-import { ConduitError, RateLimitError } from '../errors.js';
+import { ConduitError, RateLimitError, StreamNotFoundError } from '../errors.js';
 import type { ConduitConfig } from '../types/index.js';
 
 // ── Mocks ─────────────────────────────────────────────────────────────────────
@@ -317,16 +317,17 @@ describe('StreamsModule.streamedTotal() — read-only wrapper', () => {
     expect(total).toBe(1_000_000n);
   });
 
-  it('throws a ConduitError scoped to "stream" on simulation failure', async () => {
+  it('throws StreamNotFoundError when the read reports an unknown stream', async () => {
     mockSimulate.mockResolvedValue(simError('HostError: Error(Contract, #2)')); // StreamNotFound
 
     const { StreamsModule } = await import('../streams.js');
     const sdk = new StreamsModule(makeConfig());
 
     const err = await sdk.streamedTotal(999n).catch(e => e);
-    expect(err).toBeInstanceOf(ConduitError);
+    expect(err).toBeInstanceOf(StreamNotFoundError);
     expect((err as ConduitError).contract).toBe('stream');
     expect((err as ConduitError).code).toBe(2);
+    expect((err as StreamNotFoundError).streamId).toBe(999n);
   });
 });
 

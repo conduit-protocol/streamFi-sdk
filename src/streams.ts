@@ -53,6 +53,7 @@ import {
   RateLimitError,
   InsufficientBalanceError,
   StreamErrorCode,
+  StreamNotFoundError,
   AmountExceedsWithdrawableError,
   translateStreamError,
 } from './errors.js';
@@ -333,7 +334,7 @@ export class StreamsModule {
     const addr = await this._resolveAddr(id);
     const caller = await this._resolveCallerAddress();
     const tx   = await buildContractCallTx(this.rpcUrl, this.passphrase, caller, addr, 'info', []);
-    const val  = await this._simulateTx(tx);
+    const val  = await this._simulateTx(tx, signal, id);
     return parseStreamInfo(id, addr, val);
   }
 
@@ -374,7 +375,7 @@ export class StreamsModule {
     const addr = await this._resolveAddr(id);
     const caller = await this._resolveCallerAddress();
     const tx   = await buildContractCallTx(this.rpcUrl, this.passphrase, caller, addr, 'withdrawable', []);
-    const val  = await this._simulateTx(tx);
+    const val  = await this._simulateTx(tx, signal, id);
     return scValToI128(val);
   }
 
@@ -392,7 +393,7 @@ export class StreamsModule {
     const addr = await this._resolveAddr(id);
     const caller = await this._resolveCallerAddress();
     const tx   = await buildContractCallTx(this.rpcUrl, this.passphrase, caller, addr, 'streamed_total', []);
-    const val  = await this._simulateTx(tx);
+    const val  = await this._simulateTx(tx, signal, id);
     return scValToI128(val);
   }
 
@@ -1024,19 +1025,39 @@ export class StreamsModule {
     // Stream contract addresses are immutable once assigned by the factory,
     // so the cache never needs invalidation.
     const addr = await this._factory.streamAddress(id);
-    if (!addr) throw new ConduitError('stream', StreamErrorCode.StreamNotFound, `Stream ${id} not found`);
+    if (!addr) throw new StreamNotFoundError(id);
     return addr;
   }
 
-  private async _simulateTx(tx: Transaction, signal?: AbortSignal): Promise<xdr.ScVal> {
+  private async _simulateTx(
+    tx: Transaction,
+    signal?: AbortSignal,
+    streamId?: bigint,
+  ): Promise<xdr.ScVal> {
     if (signal?.aborted) throw new DOMException('Aborted', 'AbortError');
     const server = this._server();
     const result = await catchNetworkError('simulateTransaction', server.simulateTransaction(tx));
     if (SorobanRpc.Api.isSimulationError(result)) {
-      throw ConduitError.fromSorobanMessage('stream', result.error);
+      const error = ConduitError.fromSorobanMessage('stream', result.error);
+      if (
+        streamId !== undefined &&
+        error instanceof ConduitError &&
+        error.contract === 'stream' &&
+        error.code === StreamErrorCode.StreamNotFound
+      ) {
+        throw new StreamNotFoundError(streamId);
+      }
+      throw error;
     }
     if (!result.result) throw new Error('Simulation returned no result');
-    return xdr.ScVal.fromXDR(result.result.retval.toXDR());
+    const value = xdr.ScVal.fromXDR(result.result.retval.toXDR());
+    // A successful read returning void is the contract's empty/not-found
+    // representation. Do not let the subsequent decoder turn it into an
+    // opaque XDR error.
+    if (streamId !== undefined && value.switch().name === 'scvVoid') {
+      throw new StreamNotFoundError(streamId);
+    }
+    return value;
   }
 
   /** Simulate -> assemble -> sign -> submit -> poll. Returns txHash. */
