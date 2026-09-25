@@ -223,6 +223,39 @@ export class ConduitError extends Error {
   }
 }
 
+// ── DripStream typed read errors ──────────────────────────────────────────────
+
+/**
+ * Thrown when a stream ID cannot be resolved to an existing DripStream
+ * contract. This is distinct from a transport failure or an invalid ID: the
+ * lookup itself succeeded, but the contract returned no stream for the
+ * requested ID.
+ *
+ * @example
+ * ```ts
+ * try {
+ *   await client.streams.get(999n);
+ * } catch (err) {
+ *   if (err instanceof StreamNotFoundError) {
+ *     console.error(`No stream exists for ID ${err.streamId}.`);
+ *   }
+ * }
+ * ```
+ */
+export class StreamNotFoundError extends ConduitError {
+  /** The stream ID that could not be resolved. */
+  readonly streamId: bigint;
+
+  constructor(streamId: bigint | string) {
+    const id = BigInt(streamId);
+    super('stream', StreamErrorCode.StreamNotFound, `Stream ${id} not found`);
+    this.name = 'StreamNotFoundError';
+    this.streamId = id;
+    // Maintain correct prototype chain for `instanceof` checks in transpiled JS.
+    Object.setPrototypeOf(this, new.target.prototype);
+  }
+}
+
 // ── DripStream typed lifecycle errors ───────────────────────────────────────────
 
 /**
@@ -715,6 +748,7 @@ export class ConfirmationTimeoutError extends Error {
  * - {@link RpcServiceUnavailableError}
  * - {@link IndexerTimeoutError}
  * - {@link OperationAbortedError}
+ * - {@link StreamNotFoundError}
  * - {@link AmountExceedsWithdrawableError}
  * - {@link UnauthorizedStreamActionError}
  * - {@link InvalidStreamStateError}
@@ -732,6 +766,7 @@ export function isConduitError(value: unknown): value is Error {
     'RpcServiceUnavailableError',
     'IndexerTimeoutError',
     'OperationAbortedError',
+    'StreamNotFoundError',
     'AmountExceedsWithdrawableError',
     'UnauthorizedStreamActionError',
     'InvalidStreamStateError',

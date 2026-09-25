@@ -46,6 +46,7 @@ export {
   RpcServiceUnavailableError,
   IndexerTimeoutError,
   OperationAbortedError,
+  StreamNotFoundError,
   AmountExceedsWithdrawableError,
   UnauthorizedStreamActionError,
   InvalidStreamStateError,

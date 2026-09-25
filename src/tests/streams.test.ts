@@ -1,6 +1,6 @@
 import { describe, it, expect, vi, beforeEach } from 'vitest';
 import { Keypair, xdr } from '@stellar/stellar-sdk';
-import { ConduitError, StreamErrorCode } from '../errors.js';
+import { ConduitError, StreamErrorCode, StreamNotFoundError } from '../errors.js';
 import {
   STREAM_FLAG_PAUSED,
   STREAM_FLAG_CANCELLED,
@@ -219,15 +219,40 @@ describe('StreamsModule — _resolveAddr via get()', () => {
     mockStreamAddress.mockReset();
   });
 
-  it('throws ConduitError(StreamNotFound) when stream address is null', async () => {
+  it('throws StreamNotFoundError when stream address is null', async () => {
     mockStreamAddress.mockResolvedValue(null);
     const { StreamsModule } = await import('../streams.js');
     const sdk = new StreamsModule(makeConfig(false));
 
     const err = await sdk.get(99n).catch(e => e);
-    expect(err).toBeInstanceOf(ConduitError);
+    expect(err).toBeInstanceOf(StreamNotFoundError);
+    expect((err as StreamNotFoundError).streamId).toBe(99n);
     expect((err as ConduitError).contract).toBe('stream');
     expect((err as ConduitError).code).toBe(StreamErrorCode.StreamNotFound);
+  });
+});
+
+describe('StreamsModule — not-found read errors', () => {
+  beforeEach(() => {
+    mockStreamAddress.mockReset().mockResolvedValue(null);
+  });
+
+  it('withdrawable() throws StreamNotFoundError for an unknown stream', async () => {
+    const { StreamsModule } = await import('../streams.js');
+    const sdk = new StreamsModule(makeConfig(false));
+
+    const err = await sdk.withdrawable(404n).catch(e => e);
+    expect(err).toBeInstanceOf(StreamNotFoundError);
+    expect((err as StreamNotFoundError).streamId).toBe(404n);
+  });
+
+  it('streamedTotal() throws StreamNotFoundError for an unknown stream', async () => {
+    const { StreamsModule } = await import('../streams.js');
+    const sdk = new StreamsModule(makeConfig(false));
+
+    const err = await sdk.streamedTotal(405n).catch(e => e);
+    expect(err).toBeInstanceOf(StreamNotFoundError);
+    expect((err as StreamNotFoundError).streamId).toBe(405n);
   });
 });
 
