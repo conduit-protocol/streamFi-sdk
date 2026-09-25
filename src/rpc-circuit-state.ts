@@ -31,6 +31,32 @@ interface CircuitEntry extends CircuitStatus {
 
 const circuits = new Map<string, CircuitEntry>();
 
+// #769 — Subscription mechanism so React hooks can react to state changes
+// instead of polling getCircuitState on an interval.
+type CircuitListener = (scope: string, state: CircuitStatus) => void;
+const listeners = new Set<CircuitListener>();
+
+function notifyListeners(scope: string, state: CircuitStatus): void {
+  for (const listener of listeners) {
+    try {
+      listener(scope, state);
+    } catch {
+      // Listener errors must not break circuit state management.
+    }
+  }
+}
+
+/**
+ * Subscribe to circuit state changes. Returns an unsubscribe function.
+ * Called on every `recordSuccess`, `recordFailure`, and `resetCircuit`.
+ */
+export function onCircuitChange(listener: CircuitListener): () => void {
+  listeners.add(listener);
+  return () => {
+    listeners.delete(listener);
+  };
+}
+
 const DEFAULT_THRESHOLD = 5;
 const DEFAULT_COOLDOWN_MS = 30_000;
 
@@ -80,6 +106,7 @@ export function recordSuccess(scope: string): void {
   entry.lastSuccessAt = Date.now();
   entry.state = 'closed';
   entry.cooldownUntil = null;
+  notifyListeners(scope, getCircuitState(scope));
 }
 
 /**
@@ -123,6 +150,7 @@ export function recordFailure(
     entry.state = 'open';
     entry.cooldownUntil = now + cooldownMs;
   }
+  notifyListeners(scope, getCircuitState(scope));
 }
 
 /**
@@ -130,6 +158,7 @@ export function recordFailure(
  */
 export function resetCircuit(scope: string): void {
   circuits.delete(scope);
+  notifyListeners(scope, getCircuitState(scope));
 }
 
 /**
