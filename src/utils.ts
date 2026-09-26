@@ -174,6 +174,112 @@ export function withdrawableLocal(stream: StreamInfo, nowSec = Math.floor(Date.n
 }
 
 /**
+ * Classifies a stream's current lifecycle state.
+ *
+ * Precedence mirrors the on-chain clamp order used by {@link withdrawableLocal}:
+ * `cancelled` wins outright, then a stream past its `endTime` is `completed`
+ * regardless of pause state (a stream that has ended has fully streamed), then
+ * `paused`, otherwise `active`. A stream that hasn't reached `startTime` yet is
+ * reported as `active` since none of the other three states apply.
+ *
+ * @example
+ * streamStatus(stream)          // 'active'
+ * streamStatus(cancelledStream) // 'cancelled'
+ */
+export function streamStatus(
+  stream: StreamInfo,
+  nowSec = Math.floor(Date.now() / 1000),
+): 'active' | 'paused' | 'completed' | 'cancelled' {
+  if (stream.cancelled) return 'cancelled';
+  if (stream.endTime !== 0 && nowSec >= stream.endTime) return 'completed';
+  if (stream.paused) return 'paused';
+  return 'active';
+}
+
+const DURATION_UNIT_SECONDS: Record<string, number> = {
+  d: 86400,
+  h: 3600,
+  m: 60,
+  s: 1,
+};
+
+/**
+ * Formats a duration in seconds as a short human-readable string.
+ *
+ * @example
+ * formatDuration(45)      // '45s'
+ * formatDuration(90)      // '1m 30s'
+ * formatDuration(5400)    // '1h 30m'
+ * formatDuration(90000)   // '1d 1h'
+ * formatDuration(172800)  // '2d'
+ */
+export function formatDuration(seconds: number): string {
+  if (!Number.isFinite(seconds) || seconds < 0) {
+    throw new Error(`seconds must be a non-negative finite number, got ${seconds}`);
+  }
+  const total = Math.floor(seconds);
+  if (total < 60) return `${total}s`;
+  if (total < 3600) {
+    const minutes = Math.floor(total / 60);
+    const secs = total % 60;
+    return secs > 0 ? `${minutes}m ${secs}s` : `${minutes}m`;
+  }
+  if (total < 86400) {
+    const hours = Math.floor(total / 3600);
+    const minutes = Math.floor((total % 3600) / 60);
+    return minutes > 0 ? `${hours}h ${minutes}m` : `${hours}h`;
+  }
+  const days = Math.floor(total / 86400);
+  const hours = Math.floor((total % 86400) / 3600);
+  return hours > 0 ? `${days}d ${hours}h` : `${days}d`;
+}
+
+/**
+ * Parses a human-readable duration string (as produced by {@link formatDuration})
+ * back into seconds, e.g. for a "create stream" form field.
+ *
+ * Accepts one or more `<number><unit>` tokens (`d`, `h`, `m`, `s`), optionally
+ * space-separated, in any order — `'1h30m'` and `'30m 1h'` both work. Throws on
+ * unparseable input instead of silently returning `NaN` or `0`.
+ *
+ * @example
+ * parseDuration('1h30m') // 5400
+ * parseDuration('2d')    // 172800
+ * parseDuration('45s')   // 45
+ *
+ * @throws {Error} If `input` contains no valid duration tokens, or contains
+ * any characters that aren't part of one.
+ */
+export function parseDuration(input: string): number {
+  if (typeof input !== 'string' || input.trim() === '') {
+    throw new Error(`Invalid duration string: "${input}"`);
+  }
+  const trimmed = input.trim();
+  const re = /(\d+)\s*(d|h|m|s)/gi;
+  let match: RegExpExecArray | null;
+  let totalSeconds = 0;
+  let matchedLength = 0;
+  let foundAny = false;
+
+  while ((match = re.exec(trimmed)) !== null) {
+    foundAny = true;
+    matchedLength += match[0].length;
+    const value = Number(match[1]);
+    const unit = match[2]!.toLowerCase();
+    totalSeconds += value * DURATION_UNIT_SECONDS[unit]!;
+  }
+
+  // The matched tokens (whitespace-stripped) must account for the entire
+  // input; otherwise junk like '1x' or trailing garbage silently drops.
+  const strippedLength = trimmed.replace(/\s+/g, '').length;
+  if (!foundAny || matchedLength !== strippedLength) {
+    throw new Error(`Unparseable duration string: "${input}"`);
+  }
+
+  return totalSeconds;
+}
+
+/**
  * Recursively convert all bigint values in a value to their string
  * representation.  Safe for objects, arrays, and primitives.
  *

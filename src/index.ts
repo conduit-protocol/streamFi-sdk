@@ -86,6 +86,9 @@ export {
   sumWithdrawable,
   bigintSafeStringify,
   timeoutSignal,
+  streamStatus,
+  formatDuration,
+  parseDuration,
 } from './utils.js';
 
 // Constants
