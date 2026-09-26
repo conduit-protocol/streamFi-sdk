@@ -4,4 +4,5 @@ export {
   WalletConnectAdapter,
   type WalletConnectAdapterOptions,
   type WalletConnectAppMetadata,
+  type WalletConnectSessionChange,
 } from './walletconnect.js';

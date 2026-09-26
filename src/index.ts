@@ -53,6 +53,7 @@ export {
   ClawbackNotEnabledError,
   RateExceedsMaxError,
   DurationTooShortError,
+  GovernorInvalidParamError,
   BackdatedStreamError,
   ConfirmationTimeoutError,
   isConduitError,

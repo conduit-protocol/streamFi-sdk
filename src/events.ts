@@ -154,7 +154,7 @@ export function subscribeToStream(
         .sort((a, b) => (a.seq < b.seq ? -1 : a.seq > b.seq ? 1 : 0));
 
       for (const item of missed) {
-        dispatchEvent(item.event, handlers);
+        dispatchIsolated(item.event, handlers);
       }
     } catch (err) {
       console.warn('[conduit-sdk] event replay failed:', err);
@@ -193,7 +193,7 @@ export function subscribeToStream(
 
       if (response.events.length > 0) {
         for (const event of response.events) {
-          const sequence = dispatchEvent(event, handlers);
+          const sequence = dispatchIsolated(event, handlers);
           if (sequence !== undefined) {
             if (lastSequence !== undefined && sequence !== lastSequence + 1n) {
               try {
@@ -286,6 +286,30 @@ export function subscribeToStream(
 // tuple-decoding logic directly without standing up a fake RPC server.
 // Returns the event's sequence number (topics[2]) so callers can track gaps
 // across polls/reconnects, or undefined if the event had no topics at all.
+/**
+ * Dispatches one event with the consumer's handler isolated (#809).
+ *
+ * A handler that throws is a bug in the consumer's own code; it must not
+ * abort the rest of a poll batch or a gap replay, nor be mistaken for an RPC
+ * failure. The error is logged (as `onGap` handler errors are) and the
+ * event's sequence is still returned so gap tracking continues normally.
+ */
+function dispatchIsolated(
+  event:    SorobanRpc.Api.EventResponse,
+  handlers: StreamEventHandlers,
+): bigint | undefined {
+  try {
+    return dispatchEvent(event, handlers);
+  } catch (handlerError) {
+    console.warn('[conduit-sdk] event handler error:', handlerError);
+    try {
+      return sequenceOf(event);
+    } catch {
+      return undefined;
+    }
+  }
+}
+
 export function dispatchEvent(
   event:    SorobanRpc.Api.EventResponse,
   handlers: StreamEventHandlers,

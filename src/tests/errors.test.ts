@@ -4,6 +4,7 @@ import {
   StreamErrorCode,
   FactoryErrorCode,
   GovernorErrorCode,
+  GovernorInvalidParamError,
   StreamFiNetworkError,
   InsufficientBalanceError,
   RateLimitError,
@@ -186,5 +187,36 @@ describe('CAIP2_TO_NETWORK', () => {
     const { WalletConnectAdapter } = await import('../adapters/walletconnect.js');
     expect(() => new WalletConnectAdapter({ chainId: 'eip155:1' })).toThrow(/unsupported chainId/);
     expect(() => new WalletConnectAdapter({ chainId: 'stellar:testnet' })).not.toThrow();
+  });
+});
+
+describe('GovernorInvalidParamError (#772)', () => {
+  it('is a ConduitError for the governor InvalidParam code', () => {
+    const err = new GovernorInvalidParamError();
+    expect(err).toBeInstanceOf(ConduitError);
+    expect(err).toBeInstanceOf(GovernorInvalidParamError);
+    expect(err.name).toBe('GovernorInvalidParamError');
+    expect(err.contract).toBe('governor');
+    expect(err.code).toBe(GovernorErrorCode.InvalidParam);
+    expect(err.isKnown).toBe(true);
+  });
+
+  it('is what fromSorobanMessage returns for governor error #2', () => {
+    const err = ConduitError.fromSorobanMessage('governor', 'HostError: Error(Contract, #2)');
+    expect(err).toBeInstanceOf(GovernorInvalidParamError);
+    expect(err.message).toContain('Parameter failed validation');
+    expect(err.message).toContain('Error(Contract, #2)');
+  });
+
+  it('is what fromContractError returns for a governor InvalidParam code', () => {
+    expect(ConduitError.fromContractError('governor', { code: 2 })).toBeInstanceOf(
+      GovernorInvalidParamError,
+    );
+  });
+
+  it('leaves the other governor errors as plain ConduitErrors', () => {
+    const err = ConduitError.fromSorobanMessage('governor', 'HostError: Error(Contract, #1)');
+    expect(err).toBeInstanceOf(ConduitError);
+    expect(err).not.toBeInstanceOf(GovernorInvalidParamError);
   });
 });

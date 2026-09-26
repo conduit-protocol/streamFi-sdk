@@ -29,6 +29,13 @@ export { useClawbackStream } from './hooks/useClawbackStream.js';
 export type { UseClawbackStreamResult, ClawbackStreamFn } from './hooks/useClawbackStream.js';
 export { useBatchWithdraw } from './hooks/useBatchWithdraw.js';
 export type { UseBatchWithdrawState, UseBatchWithdrawResult, BatchWithdrawFn } from './hooks/useBatchWithdraw.js';
+export { useConduitBatcher } from './hooks/useConduitBatcher.js';
+export type {
+  UseConduitBatcherState,
+  UseConduitBatcherResult,
+  BatcherExecuteFn,
+  BatcherExecuteAsyncFn,
+} from './hooks/useConduitBatcher.js';
 export { useCreateBatchStreams } from './hooks/useCreateBatchStreams.js';
 export type { UseCreateBatchStreamsState, UseCreateBatchStreamsResult, CreateBatchStreamsFn } from './hooks/useCreateBatchStreams.js';
 export { useEstimateStreamFee } from './hooks/useEstimateStreamFee.js';

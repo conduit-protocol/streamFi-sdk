@@ -196,6 +196,9 @@ export class ConduitError extends Error {
     if (raw && typeof raw === 'object' && 'code' in raw) {
       const code = Number((raw as { code: unknown }).code);
       if (code in MESSAGES_BY_CONTRACT[contract]) {
+        if (contract === 'governor' && code === GovernorErrorCode.InvalidParam) {
+          return new GovernorInvalidParamError();
+        }
         return new ConduitError(contract, code);
       }
     }
@@ -233,7 +236,39 @@ export class ConduitError extends Error {
       }
     }
 
+    if (contract === 'governor' && code === GovernorErrorCode.InvalidParam) {
+      return new GovernorInvalidParamError(`${MESSAGES_BY_CONTRACT[contract][code]} (${message})`);
+    }
+
     return new ConduitError(contract, code, `${MESSAGES_BY_CONTRACT[contract][code]} (${message})`);
+  }
+}
+
+// ── DripGovernor typed errors ─────────────────────────────────────────────────
+
+/**
+ * Thrown when the governor rejects a parameter as invalid
+ * ({@link GovernorErrorCode.InvalidParam}), for example `fee_bps > 10_000` or a
+ * zero duration or rate. It is a {@link ConduitError} with
+ * `contract === 'governor'` and `code === GovernorErrorCode.InvalidParam`, so
+ * callers can handle it with `instanceof` instead of checking `.code` by hand.
+ *
+ * @example
+ * ```ts
+ * try {
+ *   await client.governor.setConfig({ ... });
+ * } catch (err) {
+ *   if (err instanceof GovernorInvalidParamError) {
+ *     console.error('The governor config contains an invalid parameter.');
+ *   }
+ * }
+ * ```
+ */
+export class GovernorInvalidParamError extends ConduitError {
+  constructor(detail?: string) {
+    super('governor', GovernorErrorCode.InvalidParam, detail);
+    this.name = 'GovernorInvalidParamError';
+    Object.setPrototypeOf(this, new.target.prototype);
   }
 }
 

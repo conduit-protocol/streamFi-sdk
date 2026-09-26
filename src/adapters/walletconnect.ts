@@ -13,7 +13,17 @@ export interface WalletConnectSignClient {
   connect?: (opts: unknown) => Promise<{ session?: WalletConnectSession; approval?: () => Promise<WalletConnectSession> }>;
   disconnect?: (opts: unknown) => Promise<void>;
   request?: (opts: unknown) => Promise<unknown>;
+  /** Event emitter surface of a WalletConnect v2 SignClient. */
+  on?: (event: string, listener: (...args: any[]) => void) => unknown;
+  off?: (event: string, listener: (...args: any[]) => void) => unknown;
   [key: string]: unknown;
+}
+
+/** Notification passed to `onSessionChange` when the wallet changes the session (#810). */
+export interface WalletConnectSessionChange {
+  type: 'accountsChanged' | 'chainChanged' | 'disconnected';
+  /** The active public key afterwards, or null when the session is no longer usable. */
+  publicKey: string | null;
 }
 
 export interface WalletConnectSession {
@@ -41,6 +51,12 @@ export interface WalletConnectAdapterOptions {
   session?: WalletConnectSession | unknown;
   /** Milliseconds to wait for the connect handshake before rejecting. Defaults to 30000. */
   connectTimeoutMs?: number;
+  /**
+   * Called when the wallet switches account or chain, or ends the session, so
+   * an app can refresh its UI. The adapter has already updated (or dropped)
+   * its session by the time this runs.
+   */
+  onSessionChange?: (change: WalletConnectSessionChange) => void;
 }
 
 /**
@@ -54,6 +70,10 @@ export class WalletConnectAdapter implements WalletAdapter {
   private client: WalletConnectSignClient | null;
   private session: WalletConnectSession | null;
   private readonly connectTimeoutMs: number;
+  private readonly onSessionChange: ((change: WalletConnectSessionChange) => void) | undefined;
+  /** Removes the listeners attached by attachSessionListeners(), if any. */
+  private detachListeners: (() => void) | null = null;
+  private listenedClient: WalletConnectSignClient | null = null;
 
   constructor(options: WalletConnectAdapterOptions = {}) {
     this.projectId = options.projectId;
@@ -75,6 +95,8 @@ export class WalletConnectAdapter implements WalletAdapter {
     this.client    = (options.client as WalletConnectSignClient) ?? null;
     this.session   = (options.session as WalletConnectSession) ?? null;
     this.connectTimeoutMs = options.connectTimeoutMs ?? 30000;
+    this.onSessionChange = options.onSessionChange;
+    if (this.session) this.attachSessionListeners();
   }
 
   /**
@@ -82,6 +104,105 @@ export class WalletConnectAdapter implements WalletAdapter {
    */
   setSession(session: WalletConnectSession | unknown): void {
     this.session = (session as WalletConnectSession) ?? null;
+    if (this.session) this.attachSessionListeners();
+  }
+
+  /**
+   * Subscribes to the client's `session_event` (accountsChanged / chainChanged)
+   * and `session_delete` events (#810). The connect request asks the wallet
+   * for those events, so without listening the adapter would keep returning
+   * the original account after the user switched account or network.
+   * Idempotent per client.
+   */
+  private attachSessionListeners(): void {
+    const client = this.client;
+    if (!client || typeof client.on !== 'function') return;
+    if (this.listenedClient === client && this.detachListeners) return;
+    this.detachSessionListeners();
+
+    const onSessionEvent = (args: unknown) => this.handleSessionEvent(args);
+    const onSessionDelete = (args: unknown) => this.handleSessionDelete(args);
+    client.on('session_event', onSessionEvent);
+    client.on('session_delete', onSessionDelete);
+
+    this.listenedClient = client;
+    this.detachListeners = () => {
+      if (typeof client.off === 'function') {
+        client.off('session_event', onSessionEvent);
+        client.off('session_delete', onSessionDelete);
+      }
+    };
+  }
+
+  private detachSessionListeners(): void {
+    this.detachListeners?.();
+    this.detachListeners = null;
+    this.listenedClient = null;
+  }
+
+  private notifySessionChange(change: WalletConnectSessionChange): void {
+    try {
+      this.onSessionChange?.(change);
+    } catch (handlerError) {
+      console.warn('[conduit-sdk] WalletConnect onSessionChange handler error:', handlerError);
+    }
+  }
+
+  private handleSessionEvent(payload: unknown): void {
+    const { topic, params } = (payload ?? {}) as {
+      topic?: string;
+      params?: { event?: { name?: string; data?: unknown } };
+    };
+    if (!this.session) return;
+    // Ignore events for a different session.
+    if (topic && this.session.topic && topic !== this.session.topic) return;
+
+    const name = params?.event?.name;
+    const data = params?.event?.data;
+
+    if (name === 'accountsChanged') {
+      const accounts = Array.isArray(data)
+        ? data.filter((account): account is string => typeof account === 'string')
+        : [];
+      if (accounts.length === 0) {
+        // The wallet revoked every account: the session is no longer usable.
+        this.session = null;
+        this.notifySessionChange({ type: 'accountsChanged', publicKey: null });
+        return;
+      }
+      const stellar = this.session.namespaces?.['stellar'];
+      this.session = {
+        ...this.session,
+        account: accounts[0] as string,
+        accounts,
+        namespaces: {
+          ...this.session.namespaces,
+          stellar: { ...stellar, accounts },
+        },
+      };
+      this.notifySessionChange({
+        type: 'accountsChanged',
+        publicKey: this.getPublicKeyFromSession(),
+      });
+      return;
+    }
+
+    if (name === 'chainChanged') {
+      // The adapter was validated for one chain; a session now on another chain
+      // must not keep signing for it, so the session is dropped.
+      if (typeof data === 'string' && data !== this.chainId) {
+        this.session = null;
+        this.notifySessionChange({ type: 'chainChanged', publicKey: null });
+      }
+    }
+  }
+
+  private handleSessionDelete(payload: unknown): void {
+    const { topic } = (payload ?? {}) as { topic?: string };
+    if (!this.session) return;
+    if (topic && this.session.topic && topic !== this.session.topic) return;
+    this.session = null;
+    this.notifySessionChange({ type: 'disconnected', publicKey: null });
   }
 
   /**
@@ -139,6 +260,8 @@ export class WalletConnectAdapter implements WalletAdapter {
       throw new Error('Failed to establish WalletConnect session or obtain public key.');
     }
 
+    this.attachSessionListeners();
+
     return pubKey;
   }
 
@@ -175,6 +298,7 @@ export class WalletConnectAdapter implements WalletAdapter {
       }
     } finally {
       this.session = null;
+      this.detachSessionListeners();
     }
   }
 

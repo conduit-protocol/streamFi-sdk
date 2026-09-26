@@ -199,6 +199,44 @@ describe('subscribeToStream', () => {
     sub.unsubscribe();
   });
 
+  it('isolates a throwing handler so later events in the batch are still delivered (#809)', async () => {
+    const warn = vi.spyOn(console, 'warn').mockImplementation(() => {});
+    const { Address, Keypair, nativeToScVal } = await import('@stellar/stellar-sdk');
+    const sender = Keypair.random().publicKey();
+    const clawbackAt = (seq: number) => ({
+      ledger: 1,
+      topic: [
+        xdr.ScVal.scvSymbol('clawback'),
+        new Address(sender).toScVal(),
+        nativeToScVal(BigInt(seq), { type: 'u64' }),
+      ],
+      value: xdr.ScVal.scvI128(
+        new xdr.Int128Parts({ hi: xdr.Int64.fromString('0'), lo: xdr.Uint64.fromString('1') }),
+      ),
+    });
+    mockGetEvents.mockResolvedValueOnce({ events: [clawbackAt(1), clawbackAt(2), clawbackAt(3)] });
+    const { subscribeToStream } = await import('../events.js');
+
+    const seen: bigint[] = [];
+    const gaps: unknown[] = [];
+    const sub = subscribeToStream('http://localhost:8000', 'CSTREAM', {
+      onClawback: (e) => {
+        seen.push(e.sequence as bigint);
+        if (e.sequence === 2n) throw new Error('consumer bug');
+      },
+      onGap: (gap) => { gaps.push(gap); },
+    });
+
+    await vi.waitFor(() => expect(seen).toEqual([1n, 2n, 3n]));
+    expect(warn).toHaveBeenCalledWith(
+      '[conduit-sdk] event handler error:',
+      expect.objectContaining({ message: 'consumer bug' }),
+    );
+    // The throwing handler's event still counts for sequence tracking.
+    expect(gaps).toHaveLength(0);
+    sub.unsubscribe();
+  });
+
   it('swallows polling errors and keeps the subscription alive', async () => {
     const warn = vi.spyOn(console, 'warn').mockImplementation(() => {});
     mockGetEvents.mockRejectedValueOnce(new Error('rpc unavailable')).mockResolvedValue({ events: [] });
