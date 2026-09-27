@@ -310,6 +310,8 @@ export async function simulateReadOnly(
 // token also dedupe onto a single simulation.
 
 const _tokenDecimalsCache = new Map<string, Promise<number>>();
+let _tokenDecimalsHits = 0;
+let _tokenDecimalsMisses = 0;
 
 /**
  * Query a token contract's `decimals()` — part of the standard Stellar
@@ -331,8 +333,10 @@ export async function getTokenDecimals(
   const cacheKey = `${rpcUrl}:${tokenId}`;
   const cached = _tokenDecimalsCache.get(cacheKey);
   if (cached) {
+    _tokenDecimalsHits++;
     return cached;
   }
+  _tokenDecimalsMisses++;
 
   const promise = (async () => {
     const tx  = await buildContractCallTx(rpcUrl, passphrase, callerAddr, tokenId, 'decimals', []);
@@ -353,8 +357,31 @@ export async function getTokenDecimals(
  * Clear the token decimals cache. Useful in tests or when switching network
  * configurations that should invalidate cached values.
  */
-export function clearTokenDecimalsCache(): void {
+export function clearTokenDecimalsCache(resetMetrics = false): void {
   _tokenDecimalsCache.clear();
+  if (resetMetrics) {
+    resetTokenDecimalsCacheMetrics();
+  }
+}
+
+/**
+ * Cache performance metrics for the module-level token decimals cache.
+ * Follows the same shape as FactoryModule.getCacheMetrics().
+ */
+export function getTokenDecimalsCacheMetrics(): { hits: number; misses: number; size: number } {
+  return {
+    hits: _tokenDecimalsHits,
+    misses: _tokenDecimalsMisses,
+    size: _tokenDecimalsCache.size,
+  };
+}
+
+/**
+ * Reset hit and miss counters for the token decimals cache.
+ */
+export function resetTokenDecimalsCacheMetrics(): void {
+  _tokenDecimalsHits = 0;
+  _tokenDecimalsMisses = 0;
 }
 
 /** Convert an ScVal i128 to bigint */

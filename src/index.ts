@@ -97,13 +97,21 @@ export { MIN_STREAM_DURATION_SECONDS } from './constants.js';
 
 // RPC server lifecycle
 export { getServer, clearServerCache, resolveFee } from './soroban.js';
-export { getTokenDecimals, clearTokenDecimalsCache } from './soroban.js';
+export {
+  getTokenDecimals,
+  clearTokenDecimalsCache,
+  getTokenDecimalsCacheMetrics,
+  resetTokenDecimalsCacheMetrics,
+} from './soroban.js';
 export { getCircuitState, recordSuccess, recordFailure, resetCircuit, getAllCircuitStates, type CircuitState, type CircuitStatus } from "./rpc-circuit-state.js";
 
 export {
   formatAddress,
   formatAmount,
   formatTimestamp,
+  exportTransactionsToCsv,
+  exportTransactionsToJson,
+  type ExportTransactionsOptions,
 } from './dashboard/transaction-history.js';
 
 export { Module36 } from './module36.js';

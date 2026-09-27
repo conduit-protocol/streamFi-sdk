@@ -776,3 +776,155 @@ export function formatTimestamp(timestamp: unknown): string {
   if (Number.isNaN(date.getTime())) return '—';
   return date.toISOString().replace('T', ' ').slice(0, 19);
 }
+
+// ---------------------------------------------------------------------------
+// Export helpers
+// ---------------------------------------------------------------------------
+
+export interface ExportTransactionsOptions {
+  /**
+   * Whether to format stroop amounts using `formatAmount` (default: true).
+   * When false, the raw stroop amount string is exported.
+   */
+  formatAmounts?: boolean;
+  /**
+   * Decimal places to pass to `formatAmount` when `formatAmounts` is true (default: 7).
+   */
+  decimals?: number;
+  /**
+   * Whether to format addresses using `formatAddress` (default: true).
+   * Set to false to export full addresses.
+   */
+  formatAddresses?: boolean;
+  /**
+   * Number of visible head characters for `formatAddress` (default: 6).
+   */
+  visibleAddressChars?: number;
+  /**
+   * Whether to format timestamps using `formatTimestamp` (default: false).
+   * When false, exports the numeric timestamp.
+   */
+  formatTimestamps?: boolean;
+  /**
+   * Whether to include the CSV header row (default: true).
+   */
+  includeHeader?: boolean;
+  /**
+   * Pretty-print JSON output (default: true).
+   */
+  pretty?: boolean;
+}
+
+function escapeCsvCell(value: unknown): string {
+  if (value === null || value === undefined) return '';
+  const str = String(value);
+  if (str.includes(',') || str.includes('"') || str.includes('\n') || str.includes('\r')) {
+    return `"${str.replace(/"/g, '""')}"`;
+  }
+  return str;
+}
+
+/**
+ * Exports a list of transaction records to a CSV string.
+ *
+ * Uses `formatAmount` and `formatAddress` for consistent formatting matching
+ * the transaction history UI.
+ */
+export function exportTransactionsToCsv(
+  transactions: TransactionRecord[],
+  options?: ExportTransactionsOptions,
+): string {
+  const list = Array.isArray(transactions) ? transactions : [];
+  const formatAmounts = options?.formatAmounts !== false;
+  const decimals = options?.decimals ?? 7;
+  const formatAddresses = options?.formatAddresses !== false;
+  const visibleChars = options?.visibleAddressChars ?? 6;
+  const formatTimestamps = options?.formatTimestamps === true;
+  const includeHeader = options?.includeHeader !== false;
+
+  const headers = [
+    'id',
+    'hash',
+    'streamId',
+    'kind',
+    'direction',
+    'status',
+    'amount',
+    'asset',
+    'counterparty',
+    'timestamp',
+  ];
+
+  const rows: string[] = [];
+  if (includeHeader) {
+    rows.push(headers.map(escapeCsvCell).join(','));
+  }
+
+  for (const tx of list) {
+    if (!tx || typeof tx !== 'object') continue;
+    const amountVal = formatAmounts ? formatAmount(tx.amount, decimals) : asString(tx.amount);
+    const counterpartyVal = formatAddresses
+      ? formatAddress(tx.counterparty, visibleChars)
+      : asString(tx.counterparty);
+    const timestampVal = formatTimestamps
+      ? formatTimestamp(tx.timestamp)
+      : asTimestamp(tx.timestamp);
+
+    const row = [
+      escapeCsvCell(tx.id),
+      escapeCsvCell(tx.hash),
+      escapeCsvCell(tx.streamId),
+      escapeCsvCell(tx.kind),
+      escapeCsvCell(tx.direction),
+      escapeCsvCell(tx.status),
+      escapeCsvCell(amountVal),
+      escapeCsvCell(tx.asset),
+      escapeCsvCell(counterpartyVal),
+      escapeCsvCell(timestampVal),
+    ];
+    rows.push(row.join(','));
+  }
+
+  return rows.join('\n');
+}
+
+/**
+ * Exports a list of transaction records to a JSON string.
+ *
+ * Formats fields consistently with the transaction history UI.
+ */
+export function exportTransactionsToJson(
+  transactions: TransactionRecord[],
+  options?: ExportTransactionsOptions | boolean,
+): string {
+  const opts = typeof options === 'boolean' ? { pretty: options } : (options ?? {});
+  const list = Array.isArray(transactions) ? transactions : [];
+  const formatAmounts = opts.formatAmounts !== false;
+  const decimals = opts.decimals ?? 7;
+  const formatAddresses = opts.formatAddresses !== false;
+  const visibleChars = opts.visibleAddressChars ?? 6;
+  const formatTimestamps = opts.formatTimestamps === true;
+  const pretty = opts.pretty !== false;
+
+  const exported = list
+    .filter((tx) => tx && typeof tx === 'object')
+    .map((tx) => ({
+      id: asString(tx.id),
+      hash: asString(tx.hash),
+      streamId: asString(tx.streamId),
+      kind: tx.kind,
+      direction: tx.direction,
+      status: tx.status,
+      amount: formatAmounts ? formatAmount(tx.amount, decimals) : asString(tx.amount),
+      asset: asString(tx.asset),
+      counterparty: formatAddresses
+        ? formatAddress(tx.counterparty, visibleChars)
+        : asString(tx.counterparty),
+      timestamp: formatTimestamps
+        ? formatTimestamp(tx.timestamp)
+        : asTimestamp(tx.timestamp),
+    }));
+
+  return pretty ? JSON.stringify(exported, null, 2) : JSON.stringify(exported);
+}
+

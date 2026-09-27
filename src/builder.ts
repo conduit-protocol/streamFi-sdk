@@ -9,6 +9,7 @@ import {
 } from './batch-tx.js';
 import { OperationAbortedError, ValidationError } from './errors.js';
 import type { BatchTransactionContext, BuiltBatchTransaction, ScValType } from './batch-tx.js';
+import type { CreateStreamParams } from './types/index.js';
 
 export interface SubmitOptions {
   maxRetries?: number;
@@ -104,45 +105,71 @@ export class StreamBuilder {
 
   /**
    * Sets the amount of tokens to stream.
-   * Accepts a number or bigint; bigint values are serialised to
-   * strings before network submission to avoid Safari/WebKit
-   * JSON.stringify quirks.
+   * Accepts a number, bigint, or numeric string; bigint and numeric string
+   * values are serialised to strings before network submission to avoid
+   * Safari/WebKit JSON.stringify quirks.
    * @param val - The amount in the token's smallest unit.
    * @returns The builder instance for chaining.
    */
-  amount(val: number | bigint): this {
-    if (typeof val === 'bigint') {
-      if (val <= 0n) {
+  amount(val: number | bigint | string): this {
+    let normalized: number | bigint = val;
+    if (typeof val === 'string') {
+      const trimmed = val.trim();
+      if (/^-?\d+$/.test(trimmed)) {
+        try {
+          normalized = BigInt(trimmed);
+        } catch {
+          normalized = Number(trimmed);
+        }
+      } else {
+        normalized = Number(trimmed);
+      }
+    }
+    if (typeof normalized === 'bigint') {
+      if (normalized <= 0n) {
         throw new Error('Invalid StreamBuilder parameter: amount must be a positive value');
       }
     } else {
-      if (!Number.isFinite(val) || val <= 0) {
+      if (!Number.isFinite(normalized) || normalized <= 0) {
         throw new Error('Invalid StreamBuilder parameter: amount must be a positive finite number');
       }
     }
-    this._amount = val;
+    this._amount = normalized;
     return this;
   }
 
   /**
    * Sets the rate of tokens per second (in stroops).
-   * Accepts a number or bigint; bigint values are serialised to
-   * strings before network submission to avoid Safari/WebKit
-   * JSON.stringify quirks.
+   * Accepts a number, bigint, or numeric string; bigint and numeric string
+   * values are serialised to strings before network submission to avoid
+   * Safari/WebKit JSON.stringify quirks.
    * @param val - The rate per second in stroops.
    * @returns The builder instance for chaining.
    */
-  ratePerSecond(val: number | bigint): this {
-    if (typeof val === 'bigint') {
-      if (val <= 0n) {
+  ratePerSecond(val: number | bigint | string): this {
+    let normalized: number | bigint = val;
+    if (typeof val === 'string') {
+      const trimmed = val.trim();
+      if (/^-?\d+$/.test(trimmed)) {
+        try {
+          normalized = BigInt(trimmed);
+        } catch {
+          normalized = Number(trimmed);
+        }
+      } else {
+        normalized = Number(trimmed);
+      }
+    }
+    if (typeof normalized === 'bigint') {
+      if (normalized <= 0n) {
         throw new Error('Invalid StreamBuilder parameter: ratePerSecond must be a positive value');
       }
     } else {
-      if (!Number.isFinite(val) || val <= 0) {
+      if (!Number.isFinite(normalized) || normalized <= 0) {
         throw new Error('Invalid StreamBuilder parameter: ratePerSecond must be a positive finite number');
       }
     }
-    this._ratePerSecond = val;
+    this._ratePerSecond = normalized;
     return this;
   }
 
@@ -433,6 +460,117 @@ export class StreamBuilder {
     }
     this.activeTimers.clear();
     this.pendingQueue = [];
+  }
+
+  /**
+   * Permanently destroy the builder. Subsequent calls to build/submit will throw.
+   */
+  destroy(): void {
+    this.cleanup();
+  }
+
+  /**
+   * Resets the builder by clearing all configured fields, pending operations,
+   * active timers, and destroyed state, allowing the instance to be reused.
+   * @returns The builder instance for chaining.
+   */
+  reset(): this {
+    this._token = undefined;
+    this._sender = undefined;
+    this._recipient = undefined;
+    this._amount = undefined;
+    this._ratePerSecond = undefined;
+    this._startTime = undefined;
+    this._endTime = undefined;
+    this._clawbackEnabled = undefined;
+    for (const timer of this.activeTimers) {
+      clearTimeout(timer);
+    }
+    this.activeTimers.clear();
+    this.pendingQueue = [];
+    this.isDestroyed = false;
+    return this;
+  }
+
+  /**
+   * Creates a copy of the current builder's configuration.
+   * Useful for duplicating stream configurations with different parameters.
+   * @returns A new StreamBuilder instance with matching settings.
+   */
+  clone(): StreamBuilder {
+    const copy = new StreamBuilder({
+      maxQueueSize: this._maxQueueSize,
+    });
+    copy._token = this._token;
+    copy._sender = this._sender;
+    copy._recipient = this._recipient;
+    copy._amount = this._amount;
+    copy._ratePerSecond = this._ratePerSecond;
+    copy._startTime = this._startTime;
+    copy._endTime = this._endTime;
+    copy._clawbackEnabled = this._clawbackEnabled;
+    return copy;
+  }
+
+  /**
+   * Constructs and pre-populates a new StreamBuilder from an existing
+   * CreateStreamParams or stream configuration object.
+   *
+   * @param config - The stream parameters to initialize the builder with.
+   * @returns A new StreamBuilder instance pre-populated via validated setters.
+   */
+  static fromConfig(
+    config: CreateStreamParams & {
+      sender?: string;
+      amount?: number | bigint | string;
+      endTime?: number;
+    },
+  ): StreamBuilder {
+    const builder = new StreamBuilder();
+
+    if (config.token) {
+      builder.token(config.token);
+    }
+    if (config.sender) {
+      builder.sender(config.sender);
+    }
+    if (config.recipient) {
+      builder.recipient(config.recipient);
+    }
+
+    const amt = config.amount ?? config.depositAmount;
+    if (amt !== undefined && amt !== null) {
+      builder.amount(amt);
+    }
+
+    if (config.ratePerSecond !== undefined && config.ratePerSecond !== null) {
+      builder.ratePerSecond(config.ratePerSecond);
+    }
+
+    if (config.startTime !== undefined && config.startTime !== null) {
+      const now = Math.floor(Date.now() / 1000);
+      if (config.startTime >= now) {
+        builder.startTime(config.startTime);
+      } else {
+        (builder as any)._startTime = config.startTime;
+      }
+    }
+
+    if (config.endTime !== undefined && config.endTime !== null) {
+      builder.endTime(config.endTime);
+    } else if (
+      config.durationSeconds !== undefined &&
+      config.durationSeconds !== null &&
+      config.startTime !== undefined
+    ) {
+      builder.endTime(config.startTime + config.durationSeconds);
+    }
+
+    if (config.clawbackEnabled !== undefined && config.clawbackEnabled !== null) {
+      builder.clawbackEnabled(config.clawbackEnabled);
+    }
+
+    return builder;
   }
 
   private static _validateAddress(address: string, field: string): string {
