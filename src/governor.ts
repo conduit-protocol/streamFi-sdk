@@ -56,6 +56,33 @@ export class GovernorModule {
     const val = await simulateReadOnly(this.rpcUrl, this.passphrase, tx);
     return parseGovernorConfig(val);
   }
+
+  /** Fetch active governance proposals from the DripGovernor contract. */
+  async getProposals(): Promise<GovernorProposal[]> {
+    if (!this.governorId) {
+      throw new Error(
+        `ConduitConfig.governorAddress is required (no default DripGovernor is known for network "${this.network}").`,
+      );
+    }
+    const tx  = await buildContractCallTx(
+      this.rpcUrl, this.passphrase, this.callerAddr,
+      this.governorId, 'getProposals', [],
+    );
+    const val = await simulateReadOnly(this.rpcUrl, this.passphrase, tx);
+    return parseGovernorProposals(val);
+  }
+}
+
+export interface GovernorProposal {
+  id: string;
+  description: string;
+  targetConfig: Record<string, unknown>;
+  status: 'active' | 'passed' | 'failed' | 'pending';
+  proposer: string;
+  startTime: number;
+  endTime: number;
+  votesFor: bigint;
+  votesAgainst: bigint;
 }
 
 function parseGovernorConfig(val: xdr.ScVal): GovernorConfig {
@@ -70,10 +97,43 @@ function parseGovernorConfig(val: xdr.ScVal): GovernorConfig {
     minDurationSeconds: m['min_duration_seconds'] ? Number(scValToU64(m['min_duration_seconds'])) : 0,
     maxDurationSeconds: m['max_duration_seconds'] ? Number(scValToU64(m['max_duration_seconds'])) : 0,
     maxRatePerSecond:   m['max_rate_per_second'] ? scValToI128(m['max_rate_per_second']) : 0n,
-    // exactOptionalPropertyTypes forbids assigning `undefined` to an optional
-    // key directly — the key must be entirely absent instead, hence the
-    // conditional spreads rather than `feeRecipient: ... ? ... : undefined`.
     ...(m['fee_recipient'] ? { feeRecipient: Address.fromScVal(m['fee_recipient']).toString() } : {}),
     ...(m['factory_address'] ? { factoryAddress: Address.fromScVal(m['factory_address']).toString() } : {}),
   };
+}
+
+function parseGovernorProposals(val: xdr.ScVal): GovernorProposal[] {
+  const arr = val.vec() ?? [];
+  return arr.map((entry) => {
+    const m: Record<string, xdr.ScVal> = {};
+    const entries = entry.map() ?? [];
+    for (const e of entries) {
+      const k = e.key().sym()?.toString('utf8') ?? e.key().str()?.toString('utf8') ?? '';
+      m[k] = e.val();
+    }
+    const statusVal = m['status'];
+    const statusValNum = statusVal?.switch().name === 'scvU32' ? statusVal.u32() : undefined;
+    const status: GovernorProposal['status'] = (() => {
+      switch (statusValNum) {
+        case 0: return 'pending';
+        case 1: return 'active';
+        case 2: return 'passed';
+        case 3: return 'failed';
+        default: return 'pending';
+      }
+    })();
+    const descriptionVal = m['description'];
+    const description = descriptionVal?.switch().name === 'scvString' ? descriptionVal.str()?.toString('utf8') ?? '' : '';
+    return {
+      id: m['id'] ? scValToU64(m['id']).toString() : '0',
+      description,
+      targetConfig: m['target_config'] ? parseGovernorConfig(m['target_config']) : {},
+      status,
+      proposer: m['proposer'] ? Address.fromScVal(m['proposer']).toString() : '',
+      startTime: m['start_time'] ? Number(scValToU64(m['start_time'])) : 0,
+      endTime: m['end_time'] ? Number(scValToU64(m['end_time'])) : 0,
+      votesFor: m['votes_for'] ? scValToI128(m['votes_for']) : 0n,
+      votesAgainst: m['votes_against'] ? scValToI128(m['votes_against']) : 0n,
+    };
+  });
 }

@@ -888,6 +888,32 @@ export function exportTransactionsToCsv(
   return rows.join('\n');
 }
 
+/** Filters transactions to those within the given date range (inclusive, epoch ms). */
+export function filterByDateRange(
+  history: TransactionRecord[],
+  range: { from: number; to: number },
+): TransactionRecord[] {
+  const { from, to } = range;
+  if (!Number.isFinite(from) || !Number.isFinite(to) || from > to) return [];
+  return history.filter((tx) => tx.timestamp >= from && tx.timestamp <= to);
+}
+
+/**
+ * Splits a list of transactions into a page.
+ * Returns an empty array when the page is out of bounds.
+ */
+export function paginateHistory(
+  history: TransactionRecord[],
+  options: { page: number; pageSize: number },
+): TransactionRecord[] {
+  const { page, pageSize } = options;
+  const safePageSize = Math.max(1, Math.trunc(pageSize));
+  const safePage = Math.max(0, Math.trunc(page));
+  const start = safePage * safePageSize;
+  if (start >= history.length) return [];
+  return history.slice(start, start + safePageSize);
+}
+
 /**
  * Exports a list of transaction records to a JSON string.
  *

@@ -32,7 +32,7 @@ export type {
   GraphQLSubscriptionOptions,
   IndexerSubscription,
 } from './indexer.js';
-export { KeypairSigner } from './signer.js';
+export { KeypairSigner, LedgerSigner, LedgerErrorType, LedgerHardwareError, normalizeLedgerError, classifyLedgerError } from './signer.js';
 export type { Signer } from './signer.js';
 export {
   ConduitError,
@@ -157,3 +157,5 @@ export type {
 
 export { FactoryModule } from './factory.js';
 export type { FactoryStreamListResult } from './factory.js';
+export { GovernorModule } from './governor.js';
+export type { GovernorProposal } from './governor.js';

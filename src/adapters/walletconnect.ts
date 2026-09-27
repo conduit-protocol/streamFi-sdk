@@ -21,7 +21,7 @@ export interface WalletConnectSignClient {
 
 /** Notification passed to `onSessionChange` when the wallet changes the session (#810). */
 export interface WalletConnectSessionChange {
-  type: 'accountsChanged' | 'chainChanged' | 'disconnected';
+  type: 'accountsChanged' | 'chainChanged' | 'disconnected' | 'session_expired';
   /** The active public key afterwards, or null when the session is no longer usable. */
   publicKey: string | null;
 }
@@ -122,14 +122,17 @@ export class WalletConnectAdapter implements WalletAdapter {
 
     const onSessionEvent = (args: unknown) => this.handleSessionEvent(args);
     const onSessionDelete = (args: unknown) => this.handleSessionDelete(args);
+    const onSessionExpire = (args: unknown) => this.handleSessionExpire(args);
     client.on('session_event', onSessionEvent);
     client.on('session_delete', onSessionDelete);
+    client.on('session_expire', onSessionExpire);
 
     this.listenedClient = client;
     this.detachListeners = () => {
       if (typeof client.off === 'function') {
         client.off('session_event', onSessionEvent);
         client.off('session_delete', onSessionDelete);
+        client.off('session_expire', onSessionExpire);
       }
     };
   }
@@ -203,6 +206,14 @@ export class WalletConnectAdapter implements WalletAdapter {
     if (topic && this.session.topic && topic !== this.session.topic) return;
     this.session = null;
     this.notifySessionChange({ type: 'disconnected', publicKey: null });
+  }
+
+  private handleSessionExpire(payload: unknown): void {
+    const { topic } = (payload ?? {}) as { topic?: string };
+    if (!this.session) return;
+    if (topic && this.session.topic && topic !== this.session.topic) return;
+    this.session = null;
+    this.notifySessionChange({ type: 'session_expired', publicKey: null });
   }
 
   /**

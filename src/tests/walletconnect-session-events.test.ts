@@ -138,15 +138,44 @@ describe('WalletConnectAdapter session events (#810)', () => {
     expect(client.listenerCount('session_delete')).toBe(0);
   });
 
-  it('subscribes after a successful connect()', async () => {
-    const client = {
-      ...makeClient(),
-      connect: vi.fn().mockResolvedValue({ session: makeSession() }),
-    };
-    const adapter = new WalletConnectAdapter({ chainId: 'stellar:testnet', client });
+   it('subscribes after a successful connect()', async () => {
+     const client = {
+       ...makeClient(),
+       connect: vi.fn().mockResolvedValue({ session: makeSession() }),
+     };
+     const adapter = new WalletConnectAdapter({ chainId: 'stellar:testnet', client });
 
-    await adapter.connect();
+     await adapter.connect();
 
-    expect(client.listenerCount('session_event')).toBe(1);
-  });
-});
+     expect(client.listenerCount('session_event')).toBe(1);
+     expect(client.listenerCount('session_delete')).toBe(1);
+     expect(client.listenerCount('session_expire')).toBe(1);
+   });
+
+   it('clears the session on session_expire', () => {
+     const client = makeClient();
+     const onSessionChange = vi.fn();
+     const adapter = new WalletConnectAdapter({
+       chainId: 'stellar:testnet',
+       client,
+       session: makeSession(),
+       onSessionChange,
+     });
+
+     client.emit('session_expire', { topic: 'topic-1' });
+
+     expect(adapter.isConnected()).toBe(false);
+     expect(onSessionChange).toHaveBeenCalledWith({ type: 'session_expired', publicKey: null });
+   });
+
+   it('removes its listeners on disconnect', async () => {
+     const client = makeClient();
+     const adapter = new WalletConnectAdapter({ chainId: 'stellar:testnet', client, session: makeSession() });
+
+     await adapter.disconnect();
+
+     expect(client.listenerCount('session_event')).toBe(0);
+     expect(client.listenerCount('session_delete')).toBe(0);
+     expect(client.listenerCount('session_expire')).toBe(0);
+   });
+ });

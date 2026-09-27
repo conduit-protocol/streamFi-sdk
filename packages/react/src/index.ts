@@ -54,6 +54,8 @@ export { useStreamsByRecipient } from './hooks/useStreamsByRecipient.js';
 export type { UseStreamsByRecipientResult } from './hooks/useStreamsByRecipient.js';
 export { useGovernorConfig } from './hooks/useGovernorConfig.js';
 export type { UseGovernorConfigResult, GovernorConfig } from './hooks/useGovernorConfig.js';
+export { useGovernorProposals } from './hooks/useGovernorProposals.js';
+export type { UseGovernorProposalsResult, GovernorProposal } from './hooks/useGovernorProposals.js';
 export { useTransactionHistory } from './hooks/useTransactionHistory.js';
 export type { UseTransactionHistoryResult, UseTransactionHistoryOptions } from './hooks/useTransactionHistory.js';
 export { useCircuitState } from './hooks/useCircuitState.js';
