@@ -26,6 +26,11 @@ import { SUPPORTED_NETWORKS, UnsupportedChainError } from './errors.js';
  */
 const NEGATIVE_ADDRESS_CACHE_TTL_MS = 30_000;
 
+export interface FactoryStreamListResult {
+  ids: bigint[];
+  hasMore: boolean;
+}
+
 export class FactoryModule {
   private readonly rpcUrl:      string;
   private readonly passphrase:  string;
@@ -161,6 +166,34 @@ export class FactoryModule {
     return scValToU64(val);
   }
 
+  /** Total number of streams created with `address` as the sender. */
+  async streamCountBySender(address: string, signal?: AbortSignal): Promise<bigint> {
+    if (signal?.aborted) throw new DOMException("Aborted", "AbortError");
+    this._cacheMisses++;
+    const caller = await this._resolveCallerAddress();
+    const tx  = await buildContractCallTx(
+      this.rpcUrl, this.passphrase, caller,
+      this.factoryId, 'stream_count_by_sender',
+      [new Address(address).toScVal()],
+    );
+    const val = await simulateReadOnly(this.rpcUrl, this.passphrase, tx);
+    return scValToU64(val);
+  }
+
+  /** Total number of streams created with `address` as the recipient. */
+  async streamCountByRecipient(address: string, signal?: AbortSignal): Promise<bigint> {
+    if (signal?.aborted) throw new DOMException("Aborted", "AbortError");
+    this._cacheMisses++;
+    const caller = await this._resolveCallerAddress();
+    const tx  = await buildContractCallTx(
+      this.rpcUrl, this.passphrase, caller,
+      this.factoryId, 'stream_count_by_recipient',
+      [new Address(address).toScVal()],
+    );
+    const val = await simulateReadOnly(this.rpcUrl, this.passphrase, tx);
+    return scValToU64(val);
+  }
+
   /** Resolve a stream ID to its deployed contract address. Returns null if not found. */
   async streamAddress(streamId: bigint | string, signal?: AbortSignal): Promise<string | null> {
     const id  = BigInt(streamId);
@@ -212,10 +245,19 @@ export class FactoryModule {
    * `limit` is clamped to `[0, 100]` (see README) — the contract does not
    * enforce this itself, so an out-of-range value is silently clamped rather
    * than sent through as-is (see #489).
+   *
+   * Returns `{ ids, hasMore }` where `hasMore` indicates whether the returned
+   * count equals the clamped limit (truncation metadata, see #780).
    */
-  async streamsBySender(address: string, offset = 0, limit = DEFAULT_LIST_LIMIT, signal?: AbortSignal): Promise<bigint[]> {
+  async streamsBySender(
+    address: string,
+    offset = 0,
+    limit = DEFAULT_LIST_LIMIT,
+    signal?: AbortSignal,
+  ): Promise<FactoryStreamListResult> {
     if (signal?.aborted) throw new DOMException("Aborted", "AbortError");
     this._cacheMisses++;
+    const clampedLimit = clampListLimit(limit);
     const caller = await this._resolveCallerAddress();
     const tx  = await buildContractCallTx(
       this.rpcUrl, this.passphrase, caller,
@@ -223,11 +265,13 @@ export class FactoryModule {
       [
         new Address(address).toScVal(),
         nativeToScVal(clampOffset(offset), { type: 'u32' }),
-        nativeToScVal(clampListLimit(limit), { type: 'u32' }),
+        nativeToScVal(clampedLimit, { type: 'u32' }),
       ],
     );
     const val = await simulateReadOnly(this.rpcUrl, this.passphrase, tx);
-    return this.parseU64Vec(val);
+    const ids = this.parseU64Vec(val);
+    const hasMore = ids.length === clampedLimit;
+    return { ids, hasMore };
   }
 
   /**
@@ -235,10 +279,19 @@ export class FactoryModule {
    * `limit` is clamped to `[0, 100]` (see README) — the contract does not
    * enforce this itself, so an out-of-range value is silently clamped rather
    * than sent through as-is (see #489).
+   *
+   * Returns `{ ids, hasMore }` where `hasMore` indicates whether the returned
+   * count equals the clamped limit (truncation metadata, see #780).
    */
-  async streamsByRecipient(address: string, offset = 0, limit = DEFAULT_LIST_LIMIT, signal?: AbortSignal): Promise<bigint[]> {
+  async streamsByRecipient(
+    address: string,
+    offset = 0,
+    limit = DEFAULT_LIST_LIMIT,
+    signal?: AbortSignal,
+  ): Promise<FactoryStreamListResult> {
     if (signal?.aborted) throw new DOMException("Aborted", "AbortError");
     this._cacheMisses++;
+    const clampedLimit = clampListLimit(limit);
     const caller = await this._resolveCallerAddress();
     const tx  = await buildContractCallTx(
       this.rpcUrl, this.passphrase, caller,
@@ -246,11 +299,13 @@ export class FactoryModule {
       [
         new Address(address).toScVal(),
         nativeToScVal(clampOffset(offset), { type: 'u32' }),
-        nativeToScVal(clampListLimit(limit), { type: 'u32' }),
+        nativeToScVal(clampedLimit, { type: 'u32' }),
       ],
     );
     const val = await simulateReadOnly(this.rpcUrl, this.passphrase, tx);
-    return this.parseU64Vec(val);
+    const ids = this.parseU64Vec(val);
+    const hasMore = ids.length === clampedLimit;
+    return { ids, hasMore };
   }
 
   /** Current protocol fee in basis points (e.g. 30 = 0.3%). */

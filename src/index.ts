@@ -146,3 +146,6 @@ export type {
   StreamRiskAssessment,
   Module44Metrics,
 } from './module44.js';
+
+export { FactoryModule } from './factory.js';
+export type { FactoryStreamListResult } from './factory.js';

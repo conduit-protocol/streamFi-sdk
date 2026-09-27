@@ -18,6 +18,8 @@ import { GovernorModule } from "./governor.js";
 import { Module26 } from "./module26.js";
 import { Module36 } from "./module36.js";
 import { Module44 } from "./module44.js";
+import { Module48 } from "./module48.js";
+import { Module49 } from "./module49.js";
 import {
   SUPPORTED_NETWORKS,
   UnsupportedChainError,
@@ -143,6 +145,42 @@ export class ConduitClient {
     return this._risk;
   }
   private _risk: Module44 | undefined;
+
+  /**
+   * Access the Module48 batch analytics evaluation module.
+   *
+   * Provides memoized batch evaluation and yield calculations.
+   */
+  get batchAnalytics(): Module48 {
+    if (!this._batchAnalytics) {
+      this._batchAnalytics = new Module48();
+    }
+    return this._batchAnalytics;
+  }
+  private _batchAnalytics: Module48 | undefined;
+
+  /** Aliased access to Module48. */
+  get module48(): Module48 {
+    return this.batchAnalytics;
+  }
+
+  /**
+   * Access the Module49 high-performance streaming analytics engine.
+   *
+   * Provides full-parameter memoized evaluation and batch yield calculations.
+   */
+  get batchEngine(): Module49 {
+    if (!this._batchEngine) {
+      this._batchEngine = new Module49();
+    }
+    return this._batchEngine;
+  }
+  private _batchEngine: Module49 | undefined;
+
+  /** Aliased access to Module49. */
+  get module49(): Module49 {
+    return this.batchEngine;
+  }
 
   private readonly config: Required<Pick<ConduitConfig, "network" | "rpcUrl">> &
     ConduitConfig;

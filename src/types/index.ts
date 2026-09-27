@@ -285,6 +285,13 @@ export interface BatchWithdrawResult {
 
 // -- Stream Operations & Fee Estimation ---------------------------------------
 
+export interface FeeEstimate {
+  totalFee: bigint;
+  resourceFee: bigint;
+  baseFee: bigint;
+  instructions: bigint;
+}
+
 export type StreamOperationType =
   | 'create'
   | 'withdraw'

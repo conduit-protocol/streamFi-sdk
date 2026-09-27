@@ -63,7 +63,7 @@ export interface UseFeeEstimateOptions extends HookOptions {
 }
 
 export interface UseFeeEstimateResult {
-  estimate: number | null;
+  estimate: FeeEstimate | number | null;
   isLoading: boolean;
   error: Error | null;
 }
@@ -74,7 +74,7 @@ export function useFeeEstimate(
 ): UseFeeEstimateResult {
   const client = useConduitClient(options?.client);
   const enabled = options?.enabled ?? true;
-  const [estimate, setEstimate] = useState<number | null>(null);
+  const [estimate, setEstimate] = useState<FeeEstimate | number | null>(null);
   const [isLoading, setIsLoading] = useState(false);
   const [error, setError] = useState<Error | null>(null);
 

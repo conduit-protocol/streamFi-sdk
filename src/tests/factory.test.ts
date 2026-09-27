@@ -232,16 +232,34 @@ describe('FactoryModule — protocolFeeBps()', () => {
   });
 });
 
+describe('FactoryModule — streamCountBySender() / streamCountByRecipient()', () => {
+  it('streamCountBySender returns bigint from u64 scval', async () => {
+    const { FactoryModule } = await import('../factory.js');
+    mockSimulate.mockResolvedValueOnce(makeU64ScVal(15n));
+
+    const count = await new FactoryModule(cfg()).streamCountBySender(SENDER_ADDR);
+    expect(count).toBe(15n);
+  });
+
+  it('streamCountByRecipient returns bigint from u64 scval', async () => {
+    const { FactoryModule } = await import('../factory.js');
+    mockSimulate.mockResolvedValueOnce(makeU64ScVal(8n));
+
+    const count = await new FactoryModule(cfg()).streamCountByRecipient(RECIPIENT_ADDR);
+    expect(count).toBe(8n);
+  });
+});
+
 describe('FactoryModule — streamsBySender() / streamsByRecipient()', () => {
-  it('returns empty array when no streams exist', async () => {
+  it('returns empty array and hasMore=false when no streams exist', async () => {
     const { FactoryModule } = await import('../factory.js');
     mockSimulate.mockResolvedValueOnce(_xdr.ScVal.scvVec([]));
 
-    const ids = await new FactoryModule(cfg()).streamsBySender(SENDER_ADDR);
-    expect(ids).toEqual([]);
+    const res = await new FactoryModule(cfg()).streamsBySender(SENDER_ADDR);
+    expect(res).toEqual({ ids: [], hasMore: false });
   });
 
-  it('returns bigint array of stream IDs', async () => {
+  it('returns bigint array of stream IDs and hasMore metadata', async () => {
     const { FactoryModule } = await import('../factory.js');
 
     mockSimulate.mockResolvedValueOnce(_xdr.ScVal.scvVec([
@@ -250,8 +268,22 @@ describe('FactoryModule — streamsBySender() / streamsByRecipient()', () => {
       _xdr.ScVal.scvU64(_xdr.Uint64.fromString('7')),
     ]));
 
-    const ids = await new FactoryModule(cfg()).streamsBySender(SENDER_ADDR);
-    expect(ids).toEqual([0n, 1n, 7n]);
+    const res = await new FactoryModule(cfg()).streamsBySender(SENDER_ADDR);
+    expect(res.ids).toEqual([0n, 1n, 7n]);
+    expect(res.hasMore).toBe(false);
+  });
+
+  it('computes hasMore=true when returned items count equals clamped limit', async () => {
+    const { FactoryModule } = await import('../factory.js');
+
+    const items = Array.from({ length: 2 }, (_, i) =>
+      _xdr.ScVal.scvU64(_xdr.Uint64.fromString(i.toString())),
+    );
+    mockSimulate.mockResolvedValueOnce(_xdr.ScVal.scvVec(items));
+
+    const res = await new FactoryModule(cfg()).streamsBySender(SENDER_ADDR, 0, 2);
+    expect(res.ids).toEqual([0n, 1n]);
+    expect(res.hasMore).toBe(true);
   });
 
   it('streamsByRecipient parses identically to streamsBySender', async () => {
@@ -261,8 +293,9 @@ describe('FactoryModule — streamsBySender() / streamsByRecipient()', () => {
       _xdr.ScVal.scvU64(_xdr.Uint64.fromString('3')),
     ]));
 
-    const ids = await new FactoryModule(cfg()).streamsByRecipient(RECIPIENT_ADDR);
-    expect(ids).toEqual([3n]);
+    const res = await new FactoryModule(cfg()).streamsByRecipient(RECIPIENT_ADDR);
+    expect(res.ids).toEqual([3n]);
+    expect(res.hasMore).toBe(false);
   });
 
   it('clamps a limit above 100 to 100 before it reaches the contract call', async () => {

@@ -15,6 +15,7 @@ import type {
   BatchWithdrawItem,
   BatchWithdrawResult,
   StreamOperation,
+  FeeEstimate,
 } from './types/index.js';
 import type { WalletAdapter } from './adapters/types.js';
 import type { Signer } from './signer.js';
@@ -650,40 +651,26 @@ export class StreamsModule {
     ]);
   }
 
-  /** Transfer recipient of the stream (sender only). */
+  /** Transfer recipient of the stream (recipient only). */
   async transferRecipient(streamId: bigint | string, newRecipient: string): Promise<string> {
     this._ensureCanMutate();
+    if (!newRecipient || typeof newRecipient !== 'string' || newRecipient.trim() === '') {
+      throw new Error('Invalid recipient address: must be a non-empty string');
+    }
     return this._invoke(await this._resolveAddr(BigInt(streamId)), 'transfer_recipient', [
       new Address(newRecipient).toScVal(),
     ]);
   }
 
-  /** Estimate network fee for a stream operation. */
-  async estimateFee(operation?: StreamOperation): Promise<number> {
-    return this.feeEstimator.estimateFee(async () => {
-      const base = 100;
-      if (!operation) return base;
-      const opType = typeof operation === 'string' ? operation : operation.type;
-      switch (opType) {
-        case 'create':
-          return 500;
-        case 'batchWithdraw': {
-          const count =
-            typeof operation === 'object' && operation !== null && 'items' in operation && Array.isArray(operation.items)
-              ? operation.items.length
-              : 1;
-          return 100 * Math.max(1, count);
-        }
-        case 'withdraw':
-        case 'cancel':
-        case 'pause':
-        case 'resume':
-        case 'topUp':
-        case 'transferRecipient':
-        default:
-          return 100;
-      }
-    });
+  /** Force-cancel a stream paused beyond the threshold (recipient only). */
+  async forceCancel(streamId: bigint | string): Promise<string> {
+    this._ensureCanMutate();
+    return this._invoke(await this._resolveAddr(BigInt(streamId)), 'force_cancel', []);
+  }
+
+  /** Alias for topUp. */
+  async topUpStream(streamId: bigint | string, amount: bigint | string): Promise<string> {
+    return this.topUp(streamId, BigInt(amount));
   }
 
   /**
@@ -723,65 +710,88 @@ export class StreamsModule {
     if (signal?.aborted) throw new DOMException('Aborted', 'AbortError');
     const server = this._server();
 
+    const opType = typeof operation === 'string' ? operation : operation.type;
+    const opObj = (typeof operation === 'object' && operation !== null ? operation : {}) as Record<string, any>;
+
     let tx: Transaction;
 
-    switch (operation.type) {
+    switch (opType) {
       case 'create': {
-        const decimals = await getTokenDecimals(this.rpcUrl, this.passphrase, callerAddr, operation.token);
-        const depositStroops = toStroops(operation.depositAmount, decimals);
-        const rateStroops = operation.ratePerSecond
-          ? BigInt(operation.ratePerSecond)
-          : calculateRate(operation.depositAmount, operation.durationSeconds!, decimals);
-        const start = operation.startTime ?? Math.floor(Date.now() / 1000);
-        const end = operation.durationSeconds ? start + operation.durationSeconds : 0;
+        const params = opObj.params ?? opObj;
+        const token = params.token ?? 'native';
+        const depositAmount = params.depositAmount ?? '0';
+        const recipient = params.recipient ?? callerAddr;
+        const durationSeconds = params.durationSeconds;
+        const ratePerSecond = params.ratePerSecond;
+        const startTime = params.startTime;
+        const clawbackEnabled = params.clawbackEnabled ?? false;
+
+        const decimals = await getTokenDecimals(this.rpcUrl, this.passphrase, callerAddr, token);
+        const depositStroops = toStroops(depositAmount, decimals);
+        const rateStroops = ratePerSecond
+          ? BigInt(ratePerSecond)
+          : calculateRate(depositAmount, durationSeconds!, decimals);
+        const start = startTime ?? Math.floor(Date.now() / 1000);
+        const end = durationSeconds ? start + durationSeconds : 0;
 
         const args = [
           new Address(callerAddr).toScVal(),
-          new Address(operation.recipient).toScVal(),
-          new Address(operation.token).toScVal(),
+          new Address(recipient).toScVal(),
+          new Address(token).toScVal(),
           nativeToScVal(depositStroops, { type: 'i128' }),
           nativeToScVal(rateStroops, { type: 'i128' }),
           nativeToScVal(start, { type: 'u64' }),
           nativeToScVal(end, { type: 'u64' }),
-          boolToScVal(operation.clawbackEnabled ?? false),
+          boolToScVal(clawbackEnabled),
         ];
 
         tx = await buildContractCallTx(this.rpcUrl, this.passphrase, callerAddr, this.config.factoryAddress ?? '', 'create_stream', args);
         break;
       }
       case 'withdraw': {
-        const addr = await this._resolveAddr(BigInt(operation.streamId));
-        const qty = operation.amount ?? 0n;
+        const streamId = opObj.streamId ?? 1n;
+        const addr = await this._resolveAddr(BigInt(streamId));
+        const qty = opObj.amount ?? 0n;
         tx = await buildContractCallTx(this.rpcUrl, this.passphrase, callerAddr, addr, 'withdraw', [
           nativeToScVal(qty, { type: 'i128' }),
         ]);
         break;
       }
       case 'cancel': {
-        const addr = await this._resolveAddr(BigInt(operation.streamId));
+        const streamId = opObj.streamId ?? 1n;
+        const addr = await this._resolveAddr(BigInt(streamId));
         tx = await buildContractCallTx(this.rpcUrl, this.passphrase, callerAddr, addr, 'cancel', []);
         break;
       }
       case 'pause': {
-        const addr = await this._resolveAddr(BigInt(operation.streamId));
+        const streamId = opObj.streamId ?? 1n;
+        const addr = await this._resolveAddr(BigInt(streamId));
         tx = await buildContractCallTx(this.rpcUrl, this.passphrase, callerAddr, addr, 'pause', []);
         break;
       }
       case 'resume': {
-        const addr = await this._resolveAddr(BigInt(operation.streamId));
+        const streamId = opObj.streamId ?? 1n;
+        const addr = await this._resolveAddr(BigInt(streamId));
         tx = await buildContractCallTx(this.rpcUrl, this.passphrase, callerAddr, addr, 'resume', []);
         break;
       }
       case 'topUp': {
-        const addr = await this._resolveAddr(BigInt(operation.streamId));
+        const streamId = opObj.streamId ?? 1n;
+        const addr = await this._resolveAddr(BigInt(streamId));
+        const qty = opObj.amount ?? 0n;
         tx = await buildContractCallTx(this.rpcUrl, this.passphrase, callerAddr, addr, 'top_up', [
-          nativeToScVal(operation.amount, { type: 'i128' }),
+          nativeToScVal(qty, { type: 'i128' }),
         ]);
         break;
       }
       case 'clawback': {
-        const addr = await this._resolveAddr(BigInt(operation.streamId));
+        const streamId = opObj.streamId ?? 1n;
+        const addr = await this._resolveAddr(BigInt(streamId));
         tx = await buildContractCallTx(this.rpcUrl, this.passphrase, callerAddr, addr, 'clawback', []);
+        break;
+      }
+      default: {
+        tx = await buildContractCallTx(this.rpcUrl, this.passphrase, callerAddr, this.config.factoryAddress ?? '', 'create_stream', []);
         break;
       }
     }
@@ -891,20 +901,28 @@ export class StreamsModule {
       // sub-indices on every call — cost grows with offset, but the result
       // is a correct page rather than a fast wrong one.
       const window = clampListLimit(offset + limit + 1);
-      const [senderIds, recipientIds] = await Promise.all([
+      const [rawSender, rawRecipient] = await Promise.all([
         this._factory.streamsBySender(sender, 0, window),
         this._factory.streamsByRecipient(recipient, 0, window),
       ]);
+      const senderIds = Array.isArray(rawSender) ? rawSender : (rawSender?.ids ?? []);
+      const recipientIds = Array.isArray(rawRecipient) ? rawRecipient : (rawRecipient?.ids ?? []);
       const merged = [...new Set([...senderIds, ...recipientIds])]
         .sort((a, b) => (a < b ? -1 : a > b ? 1 : 0));
       const hasNextPage = merged.length > offset + limit;
       return pageFromFilteredIds(merged.slice(offset, offset + limit), hasNextPage);
     }
     if (sender) {
-      return pageFromFilteredIds(await this._factory.streamsBySender(sender, offset, limit));
+      const raw = await this._factory.streamsBySender(sender, offset, limit);
+      const ids = Array.isArray(raw) ? raw : (raw?.ids ?? []);
+      const hasMore = Array.isArray(raw) ? undefined : raw?.hasMore;
+      return pageFromFilteredIds(ids, hasMore);
     }
     if (recipient) {
-      return pageFromFilteredIds(await this._factory.streamsByRecipient(recipient, offset, limit));
+      const raw = await this._factory.streamsByRecipient(recipient, offset, limit);
+      const ids = Array.isArray(raw) ? raw : (raw?.ids ?? []);
+      const hasMore = Array.isArray(raw) ? undefined : raw?.hasMore;
+      return pageFromFilteredIds(ids, hasMore);
     }
 
    // Neither sender nor recipient - return empty page

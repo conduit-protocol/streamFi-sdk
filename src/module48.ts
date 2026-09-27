@@ -48,9 +48,24 @@ interface CachedResult {
  * Module 48: stream analytics batch-evaluation helper.
  *
  * Implements Feature #48 with memoized withdrawable/progress calculation.
- * Speedup from caching is workload-dependent (proportional to cache hit
- * rate); call `getPerformanceMetrics()` for this instance's own measured
- * hit/miss timing rather than assuming a fixed percentage.
+ *
+ * ## Comparison & Consolidation Note (Issue #778)
+ * `Module48` and `Module49` serve related streaming analytics batch-evaluation tasks,
+ * but differ in key structural and operational choices:
+ *
+ * 1. **Cache Key Scope**:
+ *    - `Module48` key format: `${id}_${withdrawn}_${paused}_${nowSec}`.
+ *      Focuses on basic stream identity and paused state.
+ *    - `Module49` key format: `${id}_${withdrawn}_${paused}_${cancelled}_${pausedAt}_${ratePerSecond}_${startTime}_${endTime}_${nowSec}`.
+ *      Includes full lifecycle and rate parameters for strict cache invalidation across rate changes or cancellations.
+ *
+ * 2. **Performance Metrics & Measurement**:
+ *    - `Module48`: Measures exact cache hit vs miss execution duration per item and calculates `measuredSpeedupPercent` via `LruMemoCache.metrics()`.
+ *    - `Module49`: Tracks overall batch processing time in `processStreamBatch()` and computes a straight `hitRate` ratio (`cacheHits / totalRequests`).
+ *
+ * 3. **Batch Allocation Strategy**:
+ *    - `Module48`: Pre-allocates result array (`new Array(items.length)`) for deterministic index mapping during chunked processing.
+ *    - `Module49`: Appends results dynamically per chunk while measuring total batch wall-clock execution time.
  */
 export class Module48 {
   private readonly enableOptimization: boolean;

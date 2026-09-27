@@ -37,6 +37,23 @@ export interface Module49Metrics {
  * Module 49: High-Performance SDK Streaming Analytics Engine
  *
  * Implements Feature #49 with memoized calculation algorithms for batch stream evaluation.
+ *
+ * ## Comparison & Consolidation Note (Issue #778)
+ * `Module49` and `Module48` serve related streaming analytics batch-evaluation tasks,
+ * but differ in key structural and operational choices:
+ *
+ * 1. **Cache Key Scope**:
+ *    - `Module49` key format: `${id}_${withdrawn}_${paused}_${cancelled}_${pausedAt}_${ratePerSecond}_${startTime}_${endTime}_${nowSec}`.
+ *      Includes full stream parameters (`cancelled`, `pausedAt`, `ratePerSecond`, `startTime`, `endTime`) to guarantee strict cache isolation when stream parameters mutate.
+ *    - `Module48` key format: `${id}_${withdrawn}_${paused}_${nowSec}` (basic identity & pause state).
+ *
+ * 2. **Performance Metrics & Measurement**:
+ *    - `Module49`: Tracks total batch wall-clock time in `processStreamBatch()` and reports simple `hitRate` (`cacheHits / totalRequests`).
+ *    - `Module48`: Measures item-level hit vs miss timings to compute `measuredSpeedupPercent`.
+ *
+ * 3. **Batch Allocation Strategy**:
+ *    - `Module49`: Accumulates chunked results while capturing batch execution time.
+ *    - `Module48`: Pre-allocates result arrays by item length.
  */
 export class Module49 {
   private readonly enableOptimization: boolean;
