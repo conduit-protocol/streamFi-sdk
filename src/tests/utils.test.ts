@@ -12,6 +12,7 @@ import {
   sumWithdrawable,
   bigintSafeStringify,
   isValidAddress,
+  formatTokenAmount,
 } from '../utils.js';
 import { ZERO_ADDR } from '../constants.js';
 import { Keypair } from '@stellar/stellar-sdk';
@@ -677,5 +678,94 @@ describe('bigintSafeStringify edge cases', () => {
     const input = { a: { b: { c: { d: 9007199254740993n } } } };
     const result = bigintSafeStringify(input);
     expect(result.a.b.c.d).toBe('9007199254740993');
+  });
+});
+
+describe('formatTokenAmount', () => {
+  // XLM: 7 decimals
+  it('formats XLM (7 decimals) with default displayDecimals', () => {
+    expect(formatTokenAmount(10_000_000n, 7)).toBe('1.0000000');
+    expect(formatTokenAmount(100_000_000n, 7)).toBe('10.0000000');
+    expect(formatTokenAmount(1n, 7)).toBe('0.0000001');
+  });
+
+  it('formats XLM with custom displayDecimals (fewer)', () => {
+    expect(formatTokenAmount(10_000_000n, 7, 2)).toBe('1.00');
+    expect(formatTokenAmount(15_000_000n, 7, 2)).toBe('1.50');
+    expect(formatTokenAmount(12_345_678n, 7, 2)).toBe('1.23');
+  });
+
+  it('formats XLM with custom displayDecimals (more)', () => {
+    expect(formatTokenAmount(10_000_000n, 7, 10)).toBe('1.0000000000');
+    expect(formatTokenAmount(1n, 7, 10)).toBe('0.0000001000');
+  });
+
+  // USDC: 6 decimals
+  it('formats USDC (6 decimals) with default displayDecimals', () => {
+    expect(formatTokenAmount('1000000', 6)).toBe('1.000000');
+    expect(formatTokenAmount('1500000', 6)).toBe('1.500000');
+    expect(formatTokenAmount('123456', 6)).toBe('0.123456');
+  });
+
+  it('formats USDC with fewer display decimals', () => {
+    expect(formatTokenAmount('1500000', 6, 2)).toBe('1.50');
+    expect(formatTokenAmount('123456', 6, 2)).toBe('0.12');
+  });
+
+  // Rounding behavior
+  it('rounds correctly at display precision boundary', () => {
+    // 0.12345678 with 7 decimals, display 2 -> 0.12 (0.1234 rounds down)
+    expect(formatTokenAmount(1234567n, 7, 2)).toBe('0.12');
+    // 0.125 with 3 decimals, display 2 -> 0.13 (0.125 rounds up)
+    expect(formatTokenAmount(125n, 3, 2)).toBe('0.13');
+    // 0.999 with 3 decimals, display 0 -> 1
+    expect(formatTokenAmount(999n, 3, 0)).toBe('1');
+  });
+
+  // Edge cases
+  it('handles zero amount', () => {
+    expect(formatTokenAmount(0n, 7)).toBe('0.0000000');
+    expect(formatTokenAmount(0n, 7, 2)).toBe('0.00');
+    expect(formatTokenAmount('0', 6)).toBe('0.000000');
+  });
+
+  it('handles negative amounts', () => {
+    expect(formatTokenAmount(-10_000_000n, 7)).toBe('-1.0000000');
+    expect(formatTokenAmount(-15_000_000n, 7, 2)).toBe('-1.50');
+    expect(formatTokenAmount('-1000000', 6)).toBe('-1.000000');
+  });
+
+  it('handles large amounts', () => {
+    const large = 1_000_000_000_000_000_000n; // 1e18 = 100,000,000,000 XLM (1e11)
+    expect(formatTokenAmount(large, 7)).toContain('100000000000.0000000');
+  });
+
+  it('handles displayDecimals = 0', () => {
+    expect(formatTokenAmount(10_000_000n, 7, 0)).toBe('1');
+    expect(formatTokenAmount(15_000_000n, 7, 0)).toBe('2'); // rounds up
+    expect(formatTokenAmount(14_999_999n, 7, 0)).toBe('1'); // rounds down
+    expect(formatTokenAmount(0n, 7, 0)).toBe('0');
+  });
+
+  it('handles displayDecimals > decimals (padding with zeros)', () => {
+    expect(formatTokenAmount(10_000_000n, 7, 10)).toBe('1.0000000000');
+    expect(formatTokenAmount(1n, 7, 10)).toBe('0.0000001000');
+  });
+
+  it('works with string input', () => {
+    expect(formatTokenAmount('10000000', 7)).toBe('1.0000000');
+    expect(formatTokenAmount('15000000', 7, 2)).toBe('1.50');
+  });
+
+  it('handles carry from rounding correctly', () => {
+    // 0.9999999 with 7 decimals, display 0 -> should round to 1
+    expect(formatTokenAmount(9_999_999n, 7, 0)).toBe('1');
+    // 0.99999999 with 8 decimals, display 2 -> 1.00
+    expect(formatTokenAmount(99_999_999n, 8, 2)).toBe('1.00');
+  });
+
+  it('handles decimals=0 (integer tokens)', () => {
+    expect(formatTokenAmount(100n, 0)).toBe('100');
+    expect(formatTokenAmount(100n, 0, 2)).toBe('100.00');
   });
 });

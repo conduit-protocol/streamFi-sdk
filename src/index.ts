@@ -92,6 +92,7 @@ export {
    parseDuration,
    validateAndNormalizeAddress,
    isValidAddress,
+   formatTokenAmount,
  } from './utils.js';
 
 // Constants
@@ -159,5 +160,6 @@ export type {
 
 export { FactoryModule } from './factory.js';
 export type { FactoryStreamListResult } from './factory.js';
+export { predictStreamAddress, streamIdToSalt, type PredictStreamAddressParams } from './factory.js';
 export { GovernorModule } from './governor.js';
 export type { GovernorProposal } from './governor.js';

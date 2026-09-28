@@ -27,7 +27,7 @@ describe('withRetry', () => {
       .mockRejectedValueOnce(new RateLimitError('slow down', 2_000))
       .mockResolvedValueOnce('ok');
 
-    const promise = withRetry(operation);
+    const promise = withRetry(operation, { jitter: 'none' });
     promise.catch(() => {});
 
     await vi.advanceTimersByTimeAsync(1_999);
@@ -45,7 +45,7 @@ describe('withRetry', () => {
       .mockRejectedValueOnce(new RateLimitError('still slow'))
       .mockResolvedValueOnce('ok');
 
-    const promise = withRetry(operation, { baseDelayMs: 100, backoffFactor: 2 });
+    const promise = withRetry(operation, { baseDelayMs: 100, backoffFactor: 2, jitter: 'none' });
     promise.catch(() => {});
 
     await vi.advanceTimersByTimeAsync(99);
@@ -111,6 +111,7 @@ describe('withRetry', () => {
       baseDelayMs: 100,
       backoffFactor: 10,
       maxDelayMs: 500,
+      jitter: 'none',
     });
     promise.catch(() => {});
 
@@ -140,6 +141,7 @@ describe('withRetry', () => {
 
     const promise = withRetry(operation, {
       baseDelayMs: 100,
+      jitter: 'none',
       onRetry,
     });
     promise.catch(() => {});
@@ -231,6 +233,68 @@ describe('withRetry', () => {
     // equal jitter: Math.floor(50 + 0.5 * 50) = 75
     expect(onRetry).toHaveBeenCalledWith(
       expect.objectContaining({ delayMs: 75 }),
+    );
+
+    vi.restoreAllMocks();
+  });
+
+  it('applies decorrelated jitter using previous delay', async () => {
+    vi.spyOn(Math, 'random').mockReturnValue(0.5);
+
+    const operation = vi
+      .fn()
+      .mockRejectedValueOnce(new RateLimitError('slow'))
+      .mockRejectedValueOnce(new RateLimitError('slow'))
+      .mockResolvedValueOnce('ok');
+
+    const onRetry = vi.fn();
+    const promise = withRetry(operation, {
+      baseDelayMs: 100,
+      backoffFactor: 2,
+      jitter: 'decorrelated',
+      onRetry,
+    });
+    promise.catch(() => {});
+
+    // First retry: prevDelay = 100, delay = 100, max = max(100, 100*2) = 200
+    // decorrelated: Math.floor(0.5 * (200 + 1)) = 100
+    await vi.advanceTimersByTimeAsync(100);
+    expect(onRetry).toHaveBeenCalledTimes(2);
+    expect(onRetry).toHaveBeenCalledWith(
+      expect.objectContaining({ attempt: 1, delayMs: 100 }),
+    );
+    expect(onRetry).toHaveBeenLastCalledWith(
+      expect.objectContaining({ attempt: 2, delayMs: 100 }),
+    );
+
+    // Second sleep of 100ms
+    await vi.advanceTimersByTimeAsync(100);
+    await expect(promise).resolves.toBe('ok');
+
+    vi.restoreAllMocks();
+  });
+
+  it('defaults to full jitter when no jitter option specified', async () => {
+    vi.spyOn(Math, 'random').mockReturnValue(0.5);
+
+    const operation = vi
+      .fn()
+      .mockRejectedValueOnce(new RateLimitError('slow'))
+      .mockResolvedValueOnce('ok');
+
+    const onRetry = vi.fn();
+    const promise = withRetry(operation, {
+      baseDelayMs: 100,
+      onRetry,
+    });
+    promise.catch(() => {});
+
+    await vi.advanceTimersByTimeAsync(50);
+    await expect(promise).resolves.toBe('ok');
+
+    // full jitter: Math.floor(0.5 * (100 + 1)) = 50
+    expect(onRetry).toHaveBeenCalledWith(
+      expect.objectContaining({ delayMs: 50 }),
     );
 
     vi.restoreAllMocks();

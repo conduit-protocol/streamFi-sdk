@@ -9,8 +9,8 @@ export interface WithRetryOptions {
   backoffFactor?: number;
   /** Maximum delay in milliseconds; exponential growth is clamped here. Default: 30_000 */
   maxDelayMs?: number;
-  /** Jitter strategy applied to each delay. Default: 'none' */
-  jitter?: 'none' | 'full' | 'equal';
+  /** Jitter strategy applied to each delay. Default: 'full' */
+  jitter?: 'none' | 'full' | 'equal' | 'decorrelated';
   /** Predicate that decides whether a thrown error is worth retrying. */
   shouldRetry?: (error: unknown) => boolean;
   /** Optional AbortSignal for cancelling pending retries. */
@@ -28,6 +28,12 @@ export interface WithRetryOptions {
  * is provided, it falls back to exponential backoff starting at
  * `baseDelayMs`.
  *
+ * The default jitter strategy is 'full' (random value in [0, delay]) which
+ * prevents thundering herd problems when multiple clients hit rate limits
+ * simultaneously. Other strategies include 'equal' (jitter in [delay/2, delay]),
+ * 'decorrelated' (random in [baseDelay, previousDelay * 2]), and 'none'
+ * (deterministic delay).
+ *
  * The predicate, jitter strategy, delay cap, and `AbortSignal` make the
  * helper usable beyond the SDK's RPC proxy — for example, for transient
  * network errors or any caller-defined retryable condition.
@@ -40,7 +46,7 @@ export async function withRetry<T>(
   const baseDelayMs = options.baseDelayMs ?? 500;
   const backoffFactor = options.backoffFactor ?? 2;
   const maxDelayMs = options.maxDelayMs ?? 30_000;
-  const jitter = options.jitter ?? 'none';
+  const jitter = options.jitter ?? 'full';
   const shouldRetry = options.shouldRetry ?? isRateLimitError;
   const signal = options.signal;
   const onRetry = options.onRetry;
@@ -50,6 +56,7 @@ export async function withRetry<T>(
   }
 
   let delay = baseDelayMs;
+  let prevDelay = baseDelayMs; // For decorrelated jitter
 
   for (let attempt = 0; attempt <= maxRetries; attempt += 1) {
     if (signal?.aborted) {
@@ -70,11 +77,12 @@ export async function withRetry<T>(
       const retryAfterMs = classified instanceof RateLimitError ? classified.retryAfterMs : undefined;
       const baseWait = retryAfterMs ?? delay;
       const clampedWait = Math.min(baseWait, maxDelayMs);
-      const waitTime = applyJitter(clampedWait, jitter);
+      const waitTime = applyJitter(clampedWait, jitter, prevDelay);
 
       onRetry?.({ attempt: attempt + 1, delayMs: waitTime, error: classified });
       await sleep(waitTime, signal);
 
+      prevDelay = waitTime;
       delay = Math.min(delay * backoffFactor, maxDelayMs);
     }
   }
@@ -87,13 +95,23 @@ function isRateLimitError(err: unknown): boolean {
   return err instanceof RateLimitError;
 }
 
-function applyJitter(delayMs: number, strategy: NonNullable<WithRetryOptions['jitter']>): number {
+function applyJitter(
+  delayMs: number,
+  strategy: NonNullable<WithRetryOptions['jitter']>,
+  prevDelayMs: number,
+): number {
   switch (strategy) {
     case 'full':
       return Math.floor(Math.random() * (delayMs + 1));
     case 'equal': {
       const half = delayMs / 2;
       return Math.floor(half + Math.random() * half);
+    }
+    case 'decorrelated': {
+      // Decorrelated jitter: random value between baseDelay and previousDelay * backoffFactor
+      // This prevents synchronization while still maintaining exponential growth on average
+      const max = Math.max(delayMs, prevDelayMs * 2);
+      return Math.floor(Math.random() * (max + 1));
     }
     case 'none':
     default:

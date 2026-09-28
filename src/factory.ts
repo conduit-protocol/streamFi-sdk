@@ -2,7 +2,7 @@
  * FactoryModule — DripFactory read queries.
  */
 
-import { nativeToScVal, xdr, Address } from '@stellar/stellar-sdk';
+import { nativeToScVal, xdr, Address, hash, StrKey } from '@stellar/stellar-sdk';
 import type { ConduitConfig } from './types/index.js';
 import type { WalletAdapter } from './adapters/types.js';
 import { KeypairWalletAdapter } from './adapters/keypair.js';
@@ -321,9 +321,136 @@ export class FactoryModule {
     return scValToU32(val);
   }
 
+  /**
+   * Check if the factory is paused by governance.
+   * When paused, stream creation will fail.
+   *
+   * Reads the `paused` storage key from the factory contract.
+   */
+  async factoryPaused(signal?: AbortSignal): Promise<boolean> {
+    if (signal?.aborted) throw new DOMException("Aborted", "AbortError");
+    this._cacheMisses++;
+    const caller = await this._resolveCallerAddress();
+    const tx  = await buildContractCallTx(
+      this.rpcUrl, this.passphrase, caller,
+      this.factoryId, 'paused', [],
+    );
+    const val = await simulateReadOnly(this.rpcUrl, this.passphrase, tx);
+    // Contract returns a boolean (scvBool)
+    if (val.switch().name !== 'scvBool') {
+      throw new Error(`Expected a bool ScVal, got "${val.switch().name}" instead.`);
+    }
+    // TypeScript doesn't narrow the return type of .value() after switch check,
+    // so we assert it as boolean since we've verified the variant.
+    return val.value() as boolean;
+  }
+
   private parseU64Vec(val: xdr.ScVal): bigint[] {
     const items = val.vec();
     if (!items) return [];
     return items.map(v => scValToU64(v));
   }
+}
+
+/**
+ * Parameters for predicting a stream contract address.
+ */
+export interface PredictStreamAddressParams {
+  /** The factory contract address (deployer). */
+  factoryAddress: string;
+  /** The salt used for deployment (32 bytes). Typically derived from stream ID/sequence. */
+  salt: Uint8Array | Buffer | string;
+  /** Network passphrase (e.g., Networks.TESTNET, Networks.PUBLIC). */
+  networkPassphrase: string;
+}
+
+/**
+ * Predicts the Soroban contract address that will be deployed by the factory
+ * using the given salt. This allows integrators to display the future contract
+ * address to users before the transaction is mined.
+ *
+ * The address is computed as:
+ *   contractId = sha256(networkPassphrase + ContractIdPreimageFromAddress(factoryAddress, salt))
+ *
+ * @example
+ * ```ts
+ * import { predictStreamAddress } from '@conduit-protocol/sdk';
+ * import { Networks } from '@stellar/stellar-sdk';
+ *
+ * const streamId = 42n;
+ * const salt = Buffer.alloc(32);
+ * salt.writeBigUInt64BE(streamId); // or use the factory's salt derivation scheme
+ *
+ * const predictedAddress = predictStreamAddress({
+ *   factoryAddress: 'CABC...',
+ *   salt,
+ *   networkPassphrase: Networks.TESTNET,
+ * });
+ * // predictedAddress: 'CDEF...'
+ * ```
+ */
+export function predictStreamAddress(params: PredictStreamAddressParams): string {
+  const { factoryAddress, salt, networkPassphrase } = params;
+
+  // Normalize salt to 32-byte Buffer
+  let saltBytes: Buffer;
+  if (typeof salt === 'string') {
+    // Assume hex string
+    saltBytes = Buffer.from(salt, 'hex');
+  } else if (salt instanceof Uint8Array) {
+    saltBytes = Buffer.from(salt);
+  } else {
+    saltBytes = salt;
+  }
+
+  if (saltBytes.length !== 32) {
+    throw new Error(`Salt must be 32 bytes, got ${saltBytes.length} bytes`);
+  }
+
+  // Decode factory address to get the ScAddress
+  const factoryScAddress = Address.fromString(factoryAddress).toScAddress();
+
+  // Build ContractIdPreimageFromAddress
+  const contractIdPreimage = xdr.ContractIdPreimage.contractIdPreimageFromAddress(
+    new xdr.ContractIdPreimageFromAddress({
+      address: factoryScAddress,
+      salt: xdr.Uint256.fromXDR(saltBytes),
+    }),
+  );
+
+  // Compute network ID (sha256 of network passphrase)
+  const networkId = hash(Buffer.from(networkPassphrase));
+
+  // Build HashIdPreimageContractId
+  const hashIdPreimage = xdr.HashIdPreimage.envelopeTypeContractId(
+    new xdr.HashIdPreimageContractId({
+      networkId: networkId,
+      contractIdPreimage: contractIdPreimage,
+    }),
+  );
+
+  // Hash the preimage to get the contract ID
+  const contractIdBytes = hash(hashIdPreimage.toXDR());
+
+  // Encode as StrKey contract address (C...)
+  return StrKey.encodeContract(contractIdBytes);
+}
+
+/**
+ * Convenience function to derive a salt from a stream ID (u64).
+ * Pads the 8-byte stream ID to 32 bytes (big-endian).
+ *
+ * @example
+ * ```ts
+ * const salt = streamIdToSalt(42n); // 32-byte Buffer with 42 in the last 8 bytes
+ * ```
+ */
+export function streamIdToSalt(streamId: bigint | number): Buffer {
+  const salt = Buffer.alloc(32);
+  const id = BigInt(streamId);
+  // Write as big-endian u64 in the last 8 bytes
+  for (let i = 0; i < 8; i++) {
+    salt[31 - i] = Number((id >> (8n * BigInt(i))) & 0xffn);
+  }
+  return salt;
 }

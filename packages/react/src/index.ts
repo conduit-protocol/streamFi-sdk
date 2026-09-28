@@ -48,6 +48,8 @@ export { useStreamedTotal } from './hooks/useStreamedTotal.js';
 export type { UseStreamedTotalResult } from './hooks/useStreamedTotal.js';
 export { useFactoryStreamCount } from './hooks/useFactoryStreamCount.js';
 export type { UseFactoryStreamCountResult } from './hooks/useFactoryStreamCount.js';
+export { useFactoryPauseStatus } from './hooks/useFactoryPauseStatus.js';
+export type { UseFactoryPauseStatusResult } from './hooks/useFactoryPauseStatus.js';
 export { useProtocolFeeBps } from './hooks/useProtocolFeeBps.js';
 export type { UseProtocolFeeBpsResult } from './hooks/useProtocolFeeBps.js';
 export { useStreamsBySender } from './hooks/useStreamsBySender.js';
