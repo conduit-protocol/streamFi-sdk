@@ -9,11 +9,19 @@ export interface ErrorMapperOptions {
 }
 
 /** WebSocket message types that carry a raw on-chain error payload, and which contract each belongs to. */
-const ERROR_MESSAGE_TYPES: Record<string, ConduitContract> = {
+const DEFAULT_ERROR_MESSAGE_TYPE_MAP: ErrorMessageTypeMap = {
   stream_error: 'stream',
   factory_error: 'factory',
   governor_error: 'governor',
 };
+
+/**
+ * The SDK's own default map of WebSocket error-message types to the contract
+ * each should be parsed against (#773). Covers the SDK's known
+ * `*_error` message types so consumers can spread it and only add their own
+ * custom types instead of hand-writing the boilerplate from scratch.
+ */
+export { DEFAULT_ERROR_MESSAGE_TYPE_MAP };
 
 /**
  * Subscribes to error-shaped messages on a `WebSocketRelayer` and forwards
@@ -34,7 +42,7 @@ export class ErrorMapper {
     this.relayer = relayer;
     this.onError = onError;
     this.errorMessageTypes = {
-      ...ERROR_MESSAGE_TYPES,
+      ...DEFAULT_ERROR_MESSAGE_TYPE_MAP,
       ...(options.errorMessageTypes ?? {}),
     };
   }
