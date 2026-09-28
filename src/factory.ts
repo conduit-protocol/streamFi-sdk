@@ -241,6 +241,17 @@ export class FactoryModule {
   }
 
   /**
+   * Whether `streamId` resolves to a deployed stream contract (#794).
+   *
+   * Thin wrapper over `streamAddress()` so callers can ask "does stream #42
+   * exist" directly instead of repeating the `!== null` idiom everywhere.
+   * Shares `streamAddress()`'s cache, TTL and abort semantics.
+   */
+  async hasStream(streamId: bigint | string, signal?: AbortSignal): Promise<boolean> {
+    return (await this.streamAddress(streamId, signal)) !== null;
+  }
+
+  /**
    * List stream IDs where `address` is the sender, paginated.
    * `limit` is clamped to `[0, 100]` (see README) — the contract does not
    * enforce this itself, so an out-of-range value is silently clamped rather

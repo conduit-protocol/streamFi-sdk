@@ -193,6 +193,54 @@ describe('FactoryModule — streamAddress()', () => {
   });
 });
 
+describe('FactoryModule — hasStream() (#794)', () => {
+  it('returns true when the stream address resolves', async () => {
+    const { FactoryModule } = await import('../factory.js');
+    mockSimulate.mockResolvedValueOnce(makeU32ScVal(1)); // any non-void scval
+
+    const exists = await new FactoryModule(cfg()).hasStream(42n);
+    expect(exists).toBe(true);
+  });
+
+  it('returns false when the contract returns void (stream not found)', async () => {
+    const { FactoryModule } = await import('../factory.js');
+    mockSimulate.mockResolvedValueOnce(makeVoidScVal());
+
+    const exists = await new FactoryModule(cfg()).hasStream(999n);
+    expect(exists).toBe(false);
+  });
+
+  it('shares the streamAddress cache instead of re-hitting the network', async () => {
+    const { FactoryModule } = await import('../factory.js');
+    mockSimulate.mockResolvedValueOnce(makeU32ScVal(1));
+    const factory = new FactoryModule(cfg());
+
+    const address = await factory.streamAddress(5n);
+    const exists = await factory.hasStream('5');
+    const missing = await factory.hasStream(999n);
+    mockSimulate.mockResolvedValueOnce(makeVoidScVal());
+    const missingResolved = await factory.hasStream(999n);
+
+    expect(address).not.toBeNull();
+    expect(exists).toBe(true);
+    expect(missing).toBe(false);
+    expect(missingResolved).toBe(false);
+    // Only three network hits total: id 5 resolved once, id 999 resolved
+    // twice (first miss cached negatively with a TTL, second miss explicit).
+    expect(mockSimulate).toHaveBeenCalledTimes(3);
+  });
+
+  it('propagates an already-aborted signal as AbortError without hitting the network', async () => {
+    const { FactoryModule } = await import('../factory.js');
+    const factory = new FactoryModule(cfg());
+    const controller = new AbortController();
+    controller.abort();
+
+    await expect(factory.hasStream(1n, controller.signal)).rejects.toThrow('AbortError');
+    expect(mockSimulate).not.toHaveBeenCalled();
+  });
+});
+
 describe('FactoryModule — cache consolidation with StreamsModule', () => {
   it('StreamsModule exposes clearAddressCache that delegates to factory', async () => {
     const { StreamsModule } = await import('../streams.js');
