@@ -43,7 +43,8 @@ export class GovernorModule {
   }
 
   /** Fetch the current protocol config from the DripGovernor contract. */
-  async getConfig(): Promise<GovernorConfig> {
+  async getConfig(signal?: AbortSignal): Promise<GovernorConfig> {
+    if (signal?.aborted) throw new DOMException("Aborted", "AbortError");
     if (!this.governorId) {
       throw new Error(
         `ConduitConfig.governorAddress is required (no default DripGovernor is known for network "${this.network}").`,

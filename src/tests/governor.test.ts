@@ -141,4 +141,26 @@ describe('GovernorModule — getConfig()', () => {
     expect(config.feeRecipient).toBeUndefined();
     expect(config.factoryAddress).toBeUndefined();
   });
+
+  it('rejects with AbortError before touching the network when the signal is already aborted (#795)', async () => {
+    const { GovernorModule } = await import('../governor.js');
+    const controller = new AbortController();
+    controller.abort();
+
+    await expect(new GovernorModule(cfg()).getConfig(controller.signal)).rejects.toThrow('AbortError');
+    expect(mockBuildTx).not.toHaveBeenCalled();
+    expect(mockSimulate).not.toHaveBeenCalled();
+  });
+
+  it('resolves normally when a non-aborted signal is passed (#795)', async () => {
+    const { GovernorModule } = await import('../governor.js');
+    mockSimulate.mockResolvedValueOnce(scvMap({
+      fee_bps: u32(30),
+      min_duration_seconds: u64(3_600n),
+      max_rate_per_second: i128(1_000_000_000_000_000n),
+    }));
+
+    const config = await new GovernorModule(cfg()).getConfig(new AbortController().signal);
+    expect(config.feeBps).toBe(30);
+  });
 });
