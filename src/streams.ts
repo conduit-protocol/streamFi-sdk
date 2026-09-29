@@ -133,15 +133,6 @@ export class StreamsModule {
   private readonly _fee: string;
 
   /**
-   * Session-scoped cache of stream ID → contract address resolutions.
-   * Avoids a redundant factory RPC on every get/withdraw/cancel/pause/resume/topUp/clawback call
-   * for the same stream within a single StreamsModule lifetime. The cache is
-   * intentionally not invalidated on writes — a stream's contract address is
-   * immutable once assigned by the factory.
-   */
-  private readonly _addrCache = new Map<bigint, string>();
-
-  /**
    * Cached rate-limit-retry proxy for this module's RPC URL.
    * createRpcServer() wraps the underlying cached Server in a new Proxy on
    * every call, so we hold one proxy per StreamsModule instance to avoid the
@@ -955,6 +946,22 @@ export class StreamsModule {
   /** Clear the address cache. Useful for testing or manual memory management. */
   clearAddressCache(): void {
     this._factory.clearAddressCache();
+  }
+
+  /**
+   * Address-resolution cache performance metrics.
+   *
+   * StreamsModule resolves stream IDs through FactoryModule's bounded LRU
+   * cache, so these metrics report the same cache that _resolveAddr() and
+   * subscribeAsync() actually use.
+   */
+  getCacheMetrics(): { hits: number; misses: number; size: number } {
+    return this._factory.getCacheMetrics();
+  }
+
+  /** Reset address-cache hit/miss counters without clearing cached addresses. */
+  resetCacheStats(): void {
+    this._factory.resetCacheStats();
   }
 
   /** Synchronous subscribe - resolves address lazily on first poll tick. */

@@ -250,6 +250,45 @@ describe('FactoryModule — cache consolidation with StreamsModule', () => {
     // Verify the method exists and can be called
     expect(() => streams.clearAddressCache()).not.toThrow();
   });
+
+  it('StreamsModule exposes metrics for the address cache it actually uses', async () => {
+    const { StreamsModule } = await import('../streams.js');
+    const streams = new StreamsModule(cfg());
+    const factory = (streams as unknown as {
+      _factory: { streamAddress(id: bigint): Promise<string | null> };
+    })._factory;
+
+    mockSimulate.mockResolvedValueOnce(makeU32ScVal(1));
+    await factory.streamAddress(42n);
+    await factory.streamAddress(42n);
+
+    expect(streams.getCacheMetrics()).toEqual({
+      hits: 1,
+      misses: 1,
+      size: 1,
+    });
+  });
+
+  it('resetCacheStats resets counters without evicting cached addresses', async () => {
+    const { StreamsModule } = await import('../streams.js');
+    const streams = new StreamsModule(cfg());
+    const factory = (streams as unknown as {
+      _factory: { streamAddress(id: bigint): Promise<string | null> };
+    })._factory;
+
+    mockSimulate.mockResolvedValueOnce(makeU32ScVal(1));
+    await factory.streamAddress(7n);
+    await factory.streamAddress(7n);
+    expect(streams.getCacheMetrics()).toMatchObject({ hits: 1, misses: 1, size: 1 });
+
+    streams.resetCacheStats();
+    expect(streams.getCacheMetrics()).toEqual({ hits: 0, misses: 0, size: 1 });
+
+    // Resetting stats must not evict the positive address entry.
+    await factory.streamAddress(7n);
+    expect(mockSimulate).toHaveBeenCalledTimes(1);
+    expect(streams.getCacheMetrics()).toEqual({ hits: 1, misses: 0, size: 1 });
+  });
 });
 
 describe('FactoryModule — protocolFeeBps()', () => {
