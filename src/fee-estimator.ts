@@ -13,6 +13,12 @@ export interface FeeEstimatorOptions {
 
 export interface FeeEstimateOptions {
   onError?: (error: Error) => void;
+  /** Stable operation key. Entries with the same key share a short-lived estimate. */
+  cacheKey?: string;
+  /** Contract method used to derive a cache key when `cacheKey` is omitted. */
+  method?: string;
+  /** Contract arguments used to derive a cache key when `cacheKey` is omitted. */
+  args?: unknown[];
 }
 
 /**
@@ -23,10 +29,12 @@ export interface FeeEstimateOptions {
 export class FeeEstimator {
   private baseFee: bigint;
   private isEstimating: boolean = false;
-  private currentPromise: Promise<bigint> | null = null;
+  private currentPromises = new Map<string, Promise<bigint>>();
   private readonly minRefetchIntervalMs: number;
   private lastSuccessfulFetchAtValue: number | null = null;
   private lastErrorValue: Error | null = null;
+  private readonly cache = new Map<string, { fee: bigint; fetchedAt: number }>();
+  private readonly cacheTtlMs = 3_000;
 
   /**
    * Creates a new FeeEstimator instance.
@@ -53,8 +61,20 @@ export class FeeEstimator {
     networkFetcher: () => Promise<bigint>,
     options: FeeEstimateOptions = {}
   ): Promise<bigint> {
-    if (this.currentPromise) {
-      return this.currentPromise;
+    const cacheKey = options.cacheKey ?? (options.method
+      ? `${options.method}:${JSON.stringify(options.args ?? [], (_key, value) =>
+        typeof value === 'bigint' ? `${value}n` : value,
+      )}`
+      : undefined);
+    const cached = cacheKey ? this.cache.get(cacheKey) : undefined;
+    if (cached && Date.now() - cached.fetchedAt < this.cacheTtlMs) {
+      return cached.fee;
+    }
+
+    const promiseKey = cacheKey ?? '__uncached__';
+    const currentPromise = this.currentPromises.get(promiseKey);
+    if (currentPromise) {
+      return currentPromise;
     }
 
     // Return cached fee if within the minimum re-fetch interval
@@ -70,7 +90,7 @@ export class FeeEstimator {
       }
     }
 
-    this.currentPromise = (async () => {
+    const promise = (async () => {
       try {
         this.isEstimating = true;
         const rawFee = await networkFetcher();
@@ -83,6 +103,7 @@ export class FeeEstimator {
         this.baseFee = rawFee;
         this.lastSuccessfulFetchAtValue = Date.now();
         this.lastErrorValue = null;
+        if (cacheKey) this.cache.set(cacheKey, { fee: rawFee, fetchedAt: this.lastSuccessfulFetchAtValue });
         return this.baseFee;
       } catch (error) {
         const normalizedError = error instanceof Error ? error : new Error(String(error));
@@ -93,11 +114,12 @@ export class FeeEstimator {
         return this.baseFee;
       } finally {
         this.isEstimating = false;
-        this.currentPromise = null;
+        this.currentPromises.delete(promiseKey);
       }
     })();
+    this.currentPromises.set(promiseKey, promise);
 
-    return this.currentPromise;
+    return promise;
   }
 
   get _isEstimating(): boolean {

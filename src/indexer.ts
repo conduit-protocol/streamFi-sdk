@@ -31,6 +31,18 @@ export interface GraphQLQueryOptions {
   persist?: boolean;
 }
 
+export interface IndexerQueryMetric {
+  queryName: string;
+  durationMs: number;
+  success: boolean;
+  error?: Error;
+}
+
+export interface IndexerConfig {
+  endpoint: string;
+  onQueryMetric?: (metric: IndexerQueryMetric) => void;
+}
+
 export interface GraphQLSubscriptionOptions {
   query: string;
   variables?: Record<string, unknown>;
@@ -141,15 +153,18 @@ function findPaginatedCollection(value: unknown): PaginatedCollection | undefine
 
 export class GraphQLIndexer {
   private endpoint: string;
+  private readonly onQueryMetric: ((metric: IndexerQueryMetric) => void) | undefined;
   private activeSubscriptions: Set<IndexerSubscription> = new Set();
   private isDestroyed = false;
   private subCounter = 0;
 
-  constructor(endpoint: string) {
+  constructor(endpointOrConfig: string | IndexerConfig) {
+    const endpoint = typeof endpointOrConfig === 'string' ? endpointOrConfig : endpointOrConfig?.endpoint;
     if (!endpoint || typeof endpoint !== 'string' || endpoint.trim().length === 0) {
       throw new Error('GraphQLIndexer endpoint must be a non-empty string');
     }
     this.endpoint = endpoint;
+    this.onQueryMetric = typeof endpointOrConfig === 'string' ? undefined : endpointOrConfig.onQueryMetric;
   }
 
   /**
@@ -175,6 +190,20 @@ export class GraphQLIndexer {
    * @returns The unwrapped `body.data` payload typed as `T`.
    */
   async query<T = unknown>(options: GraphQLQueryOptions): Promise<T> {
+    const startedAt = Date.now();
+    const queryName = this.getQueryName(options?.query);
+    try {
+      const result = await this.queryInternal<T>(options);
+      this.emitQueryMetric({ queryName, durationMs: Date.now() - startedAt, success: true });
+      return result;
+    } catch (error) {
+      const normalizedError = error instanceof Error ? error : new Error(String(error));
+      this.emitQueryMetric({ queryName, durationMs: Date.now() - startedAt, success: false, error: normalizedError });
+      throw error;
+    }
+  }
+
+  private async queryInternal<T = unknown>(options: GraphQLQueryOptions): Promise<T> {
     if (this.isDestroyed) {
       throw new Error('GraphQLIndexer has been destroyed');
     }
@@ -241,6 +270,20 @@ export class GraphQLIndexer {
     }
 
     return (body?.data) as T;
+  }
+
+  private getQueryName(query: unknown): string {
+    if (typeof query !== 'string') return 'unknown';
+    const match = query.match(/\b(?:query|mutation|subscription)\s+([A-Za-z_][A-Za-z0-9_]*)/);
+    return match?.[1] ?? 'anonymous';
+  }
+
+  private emitQueryMetric(metric: IndexerQueryMetric): void {
+    try {
+      this.onQueryMetric?.(metric);
+    } catch {
+      // Telemetry must never change query behavior.
+    }
   }
 
   /**

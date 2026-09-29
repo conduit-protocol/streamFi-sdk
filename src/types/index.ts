@@ -283,6 +283,15 @@ export interface BatchWithdrawResult {
   error?: string;
 }
 
+export interface BatchCreateStreamResult {
+  index: number;
+  success: boolean;
+  streamId?: bigint;
+  streamAddress?: string;
+  txHash?: string;
+  error?: string;
+}
+
 // -- Stream Operations & Fee Estimation ---------------------------------------
 
 export interface FeeEstimate {

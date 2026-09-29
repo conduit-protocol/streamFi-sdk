@@ -45,7 +45,7 @@ export interface FreighterWalletAdapterOptions {
 export class FreighterWalletAdapter implements WalletAdapter {
   private freighterClient: FreighterApi | null;
   private pubKey: string | null;
-  public networkPassphrase?: string;
+  public networkPassphrase: string | undefined;
 
   constructor(options: FreighterWalletAdapterOptions = {}) {
     this.freighterClient = (options.freighter as FreighterApi) ?? null;
@@ -58,8 +58,8 @@ export class FreighterWalletAdapter implements WalletAdapter {
       return this.freighterClient;
     }
 
-    if (typeof window !== 'undefined') {
-      const win = window as unknown as { freighter?: FreighterApi; stellar?: FreighterApi };
+    if (typeof globalThis !== 'undefined') {
+      const win = globalThis as unknown as { freighter?: FreighterApi; stellar?: FreighterApi };
       if (win.freighter) {
         return win.freighter;
       }
@@ -70,9 +70,7 @@ export class FreighterWalletAdapter implements WalletAdapter {
 
     if (typeof globalThis !== 'undefined') {
       const glob = globalThis as unknown as { freighter?: FreighterApi };
-      if (glob.freighter) {
-        return glob.freighter;
-      }
+      if (glob.freighter) return glob.freighter;
     }
 
     throw new Error('Freighter wallet API not detected. Please install Freighter browser extension.');
@@ -195,9 +193,10 @@ export class FreighterWalletAdapter implements WalletAdapter {
       throw new Error('Freighter client does not support signTransaction.');
     }
 
+    const accountToSign = opts?.accountToSign ?? this.pubKey;
     const signResult = await client.signTransaction(xdrString, {
       networkPassphrase: passphrase,
-      accountToSign: opts?.accountToSign ?? this.pubKey ?? undefined,
+      ...(accountToSign ? { accountToSign } : {}),
     });
 
     let signedXdr: string | undefined;

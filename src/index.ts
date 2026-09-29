@@ -31,6 +31,8 @@ export type {
   GraphQLQueryOptions,
   GraphQLSubscriptionOptions,
   IndexerSubscription,
+  IndexerConfig,
+  IndexerQueryMetric,
 } from './indexer.js';
 export { KeypairSigner, LedgerSigner, LedgerErrorType, LedgerHardwareError, normalizeLedgerError, classifyLedgerError } from './signer.js';
 export type { Signer } from './signer.js';
@@ -68,7 +70,7 @@ export type { GetStreamInfosOptions, GetStreamInfosResult, GetStreamInfosFailure
 export * from './adapters/index.js';
 export * from './react/index.js';
 export { FeeEstimator } from './fee-estimator.js';
-export type { FeeEstimateOptions } from './fee-estimator.js';
+export type { FeeEstimatorOptions, FeeEstimateOptions } from './fee-estimator.js';
 export { coalesceAsync } from './coalesce-async.js';
 export { WebSocketRelayer } from './relayer/WebSocketRelayer.js';
 export { ErrorMapper, DEFAULT_ERROR_MESSAGE_TYPE_MAP } from './relayer/ErrorMapper.js';

@@ -14,6 +14,8 @@ import type {
   Subscription,
   BatchWithdrawItem,
   BatchWithdrawResult,
+  BatchCreateStreamResult,
+  StreamConfig,
   StreamOperation,
   FeeEstimate,
 } from './types/index.js';
@@ -119,9 +121,9 @@ import { ZERO_ADDR, DEFAULT_LIST_LIMIT, clampListLimit, USDC_ISSUER } from './co
 export class StreamsModule {
   private readonly rpcUrl:       string;
   private readonly passphrase:   string;
-  private readonly callerAddr:   string;
   private readonly _factory:     FactoryModule;
   private readonly feeEstimator: FeeEstimator = new FeeEstimator();
+  private readonly feeEstimateCache = new Map<string, { estimate: FeeEstimate; fetchedAt: number }>();
   private activeWallet?:         WalletAdapter;
 
   /**
@@ -712,6 +714,13 @@ export class StreamsModule {
 
     const opType = typeof operation === 'string' ? operation : operation.type;
     const opObj = (typeof operation === 'object' && operation !== null ? operation : {}) as Record<string, any>;
+    const cacheKey = `${opType}:${JSON.stringify(operation, (_key, value) =>
+      typeof value === 'bigint' ? `${value}n` : value,
+    )}`;
+    const cachedEstimate = this.feeEstimateCache.get(cacheKey);
+    if (cachedEstimate && Date.now() - cachedEstimate.fetchedAt < 3_000) {
+      return cachedEstimate.estimate;
+    }
 
     let tx: Transaction;
 
@@ -796,30 +805,29 @@ export class StreamsModule {
       }
     }
 
-    let simResult;
-    try {
-      simResult = await server.simulateTransaction(tx);
-    } catch (err) {
-      throw RateLimitError.fromRpcError(err) ?? err;
-    }
+    let cpuInstructions = 0n;
+    const resourceFee = await this.feeEstimator.estimateFee(async () => {
+      let simResult;
+      try {
+        simResult = await server.simulateTransaction(tx);
+      } catch (err) {
+        throw RateLimitError.fromRpcError(err) ?? err;
+      }
+      if (SorobanRpc.Api.isSimulationError(simResult)) {
+        throw new Error(`Simulation failed: ${simResult.error}`);
+      }
+      cpuInstructions = BigInt(simResult.cost?.cpuInsns ?? 0);
+      return estimateRequiredFee(simResult);
+    }, { cacheKey });
 
-    if (SorobanRpc.Api.isSimulationError(simResult)) {
-      throw new Error(`Simulation failed: ${simResult.error}`);
-    }
-
-    // All fees are bigint stroops — consistent with FeeEstimator and the
-    // rest of the SDK — so large resource fees never lose precision to
-    // IEEE-754 rounding (see #447). `estimateRequiredFee` handles the
-    // minResourceFee/fee extraction with the same fallback used elsewhere.
-    const resourceFee = estimateRequiredFee(simResult);
-    const cpuInstructions = BigInt(simResult.cost?.cpuInsns ?? 0);
-
-    return {
+    const estimate = {
       totalFee: BigInt(BASE_FEE) + resourceFee,
       resourceFee,
       baseFee: BigInt(BASE_FEE),
       instructions: cpuInstructions,
     };
+    this.feeEstimateCache.set(cacheKey, { estimate, fetchedAt: Date.now() });
+    return estimate;
   }
 
   /**

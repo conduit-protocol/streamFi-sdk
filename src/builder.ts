@@ -61,6 +61,8 @@ export class StreamBuilder {
   private _startTime?: number | undefined;
   private _endTime?: number | undefined;
   private _clawbackEnabled?: boolean | undefined;
+  private _cancelable?: boolean | undefined;
+  private _clawbackable?: boolean | undefined;
 
   private pendingQueue: Array<Record<string, unknown>> = [];
   private activeTimers: Set<NodeJS.Timeout> = new Set();
@@ -112,7 +114,7 @@ export class StreamBuilder {
    * @returns The builder instance for chaining.
    */
   amount(val: number | bigint | string): this {
-    let normalized: number | bigint = val;
+    let normalized: number | bigint = typeof val === 'string' ? Number(val.trim()) : val;
     if (typeof val === 'string') {
       const trimmed = val.trim();
       if (/^-?\d+$/.test(trimmed)) {
@@ -147,7 +149,7 @@ export class StreamBuilder {
    * @returns The builder instance for chaining.
    */
   ratePerSecond(val: number | bigint | string): this {
-    let normalized: number | bigint = val;
+    let normalized: number | bigint = typeof val === 'string' ? Number(val.trim()) : val;
     if (typeof val === 'string') {
       const trimmed = val.trim();
       if (/^-?\d+$/.test(trimmed)) {
@@ -221,6 +223,25 @@ export class StreamBuilder {
     return this;
   }
 
+  /** Sets whether the stream may be cancelled after creation. */
+  setCancelable(cancelable: boolean): this {
+    if (typeof cancelable !== 'boolean') {
+      throw new Error('Invalid StreamBuilder parameter: cancelable must be a boolean');
+    }
+    this._cancelable = cancelable;
+    return this;
+  }
+
+  /** Sets whether the stream permits clawback of unstreamed tokens. */
+  setClawbackable(clawbackable: boolean): this {
+    if (typeof clawbackable !== 'boolean') {
+      throw new Error('Invalid StreamBuilder parameter: clawbackable must be a boolean');
+    }
+    this._clawbackable = clawbackable;
+    this._clawbackEnabled = clawbackable;
+    return this;
+  }
+
   /**
    * Validates and produces the final stream configuration.
    * Any bigint fields are converted to strings to guarantee safe
@@ -284,6 +305,8 @@ export class StreamBuilder {
     if (this._startTime !== undefined) config.startTime = this._startTime;
     if (this._endTime !== undefined) config.endTime = this._endTime;
     if (this._clawbackEnabled !== undefined) config.clawbackEnabled = this._clawbackEnabled;
+    if (this._cancelable !== undefined) config.cancelable = this._cancelable;
+    if (this._clawbackable !== undefined) config.clawbackable = this._clawbackable;
 
     return bigintSafeStringify(config) as {
       token: string;
@@ -294,6 +317,8 @@ export class StreamBuilder {
       startTime?: number;
       endTime?: number;
       clawbackEnabled?: boolean;
+      cancelable?: boolean;
+      clawbackable?: boolean;
     };
   }
 
