@@ -765,6 +765,36 @@ export class RpcServiceUnavailableError extends Error {
   }
 }
 
+// ── Circuit open ───────────────────────────────────────────────────────────────
+
+/**
+ * Thrown by {@link withRetry} when a `circuitScope` is provided and
+ * `rpc-circuit-state.ts` already reports that scope's circuit as `'open'`
+ * (repeated recent failures). Rather than dutifully retrying with
+ * exponential backoff against an endpoint the SDK itself has already
+ * determined is down, `withRetry` fails fast with this error instead of
+ * entering the retry loop. See #787.
+ */
+export class CircuitOpenError extends Error {
+  /** The circuit scope (typically an RPC URL) that is currently open. */
+  readonly scope: string;
+  /** Epoch ms when the circuit will move to 'half-open' and allow a probe request. */
+  readonly cooldownUntil: number | null;
+
+  constructor(scope: string, cooldownUntil: number | null) {
+    const waitMs = cooldownUntil !== null ? Math.max(0, cooldownUntil - Date.now()) : undefined;
+    super(
+      `Circuit for '${scope}' is open` +
+        (waitMs !== undefined ? ` — retrying in ${waitMs}ms` : '') +
+        '. Failing fast instead of retrying.',
+    );
+    this.name = 'CircuitOpenError';
+    this.scope = scope;
+    this.cooldownUntil = cooldownUntil;
+    Object.setPrototypeOf(this, new.target.prototype);
+  }
+}
+
 // ── Indexer timeout ────────────────────────────────────────────────────────────
 
 /**

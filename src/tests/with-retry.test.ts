@@ -4,7 +4,9 @@ import {
   RateLimitError,
   StreamFiNetworkError,
   RpcServiceUnavailableError,
+  CircuitOpenError,
 } from '../errors.js';
+import { recordFailure, resetCircuit } from '../rpc-circuit-state.js';
 
 describe('withRetry', () => {
   beforeEach(() => {
@@ -234,6 +236,68 @@ describe('withRetry', () => {
     );
 
     vi.restoreAllMocks();
+  });
+});
+
+describe('withRetry — circuitScope', () => {
+  const scope = 'https://rpc.example.test';
+
+  beforeEach(() => {
+    vi.useFakeTimers();
+    resetCircuit(scope);
+  });
+
+  afterEach(() => {
+    resetCircuit(scope);
+    vi.useRealTimers();
+  });
+
+  it('fails fast with CircuitOpenError when the scope circuit is open, without calling the operation', async () => {
+    for (let i = 0; i < 5; i += 1) {
+      recordFailure(scope, { threshold: 5, cooldownMs: 30_000 });
+    }
+
+    const operation = vi.fn().mockResolvedValue('ok');
+
+    await expect(
+      withRetry(operation, { circuitScope: scope }),
+    ).rejects.toBeInstanceOf(CircuitOpenError);
+    expect(operation).not.toHaveBeenCalled();
+  });
+
+  it('proceeds normally when the scope circuit is closed', async () => {
+    const operation = vi.fn().mockResolvedValue('ok');
+
+    await expect(
+      withRetry(operation, { circuitScope: scope }),
+    ).resolves.toBe('ok');
+    expect(operation).toHaveBeenCalledTimes(1);
+  });
+
+  it('ignores circuit state when circuitScope is not provided', async () => {
+    for (let i = 0; i < 5; i += 1) {
+      recordFailure(scope, { threshold: 5, cooldownMs: 30_000 });
+    }
+
+    const operation = vi.fn().mockResolvedValue('ok');
+
+    await expect(withRetry(operation)).resolves.toBe('ok');
+    expect(operation).toHaveBeenCalledTimes(1);
+  });
+
+  it('proceeds normally once the circuit has moved to half-open after cooldown', async () => {
+    for (let i = 0; i < 5; i += 1) {
+      recordFailure(scope, { threshold: 5, cooldownMs: 30_000 });
+    }
+
+    await vi.advanceTimersByTimeAsync(30_000);
+
+    const operation = vi.fn().mockResolvedValue('ok');
+
+    await expect(
+      withRetry(operation, { circuitScope: scope }),
+    ).resolves.toBe('ok');
+    expect(operation).toHaveBeenCalledTimes(1);
   });
 });
 
