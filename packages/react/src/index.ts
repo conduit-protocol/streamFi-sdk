@@ -62,3 +62,5 @@ export { useTransactionHistory } from './hooks/useTransactionHistory.js';
 export type { UseTransactionHistoryResult, UseTransactionHistoryOptions } from './hooks/useTransactionHistory.js';
 export { useCircuitState } from './hooks/useCircuitState.js';
 export type { UseCircuitStateResult } from './hooks/useCircuitState.js';
+export { useNetworkSwitcher } from './hooks/useNetworkSwitcher.js';
+export type { UseNetworkSwitcherResult } from './hooks/useNetworkSwitcher.js';

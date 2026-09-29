@@ -5,6 +5,8 @@ All notable changes are documented here. Format based on [Keep a Changelog](http
 ## [Unreleased]
 
 ### Added
+- `@streamfi/react`: `useNetworkSwitcher()` hook and reactive network switching in `StreamFiProvider` (`network`, `setNetwork`, `isSupportedNetwork`, `availableNetworks`), allowing dApps to switch between Stellar networks seamlessly without remounting or managing out-of-band state (#833).
+- `ConduitClient.network` getter returning the active configured network (`Network`).
 - `timeoutSignal(ms)` utility (exported from the package root and `/utils`) — a portable `AbortSignal` that aborts after `ms`, using the native `AbortSignal.timeout()` when available and falling back to `AbortController` + `setTimeout` (with `unref()` on Node) otherwise. Pass it as `signal` to any method that accepts one (#634).
 - `examples/quickstart.ts` — a runnable, end-to-end create -> accrue -> withdraw script on testnet, and the README Quickstart now mirrors it (#633).
 - `GraphQLIndexer.query()` now accepts optional `timeoutMs` (default 15s) and `signal` on `GraphQLQueryOptions` and wires a per-request `AbortController` into the underlying `fetch`, so a hung/slow indexer no longer leaves the caller's `await` pending forever. On timeout it rejects with a `IndexerTimeoutError` (endpoint + `timeoutMs` exposed); a caller-supplied `signal` surfaces the underlying `AbortError`. `IndexerTimeoutError` and `DEFAULT_INDEXER_TIMEOUT_MS` are exported from the package entry point (#569).

@@ -743,10 +743,10 @@ Event subscriptions poll the Soroban event ledger every 5 seconds by default. Pa
 ## Browser / React Usage
 
 The SDK works in the browser. For React apps, use the companion [`@streamfi/react`](./packages/react) package
-for a `StreamFiProvider` plus hooks (`useStream`, `useCreateStream`, `useStreamFiClient`):
+for a `StreamFiProvider` plus hooks (`useStream`, `useCreateStream`, `useNetworkSwitcher`, `useStreamFiClient`):
 
 ```typescript
-import { StreamFiProvider, useStream, useCreateStream } from '@streamfi/react';
+import { StreamFiProvider, useStream, useCreateStream, useNetworkSwitcher } from '@streamfi/react';
 
 function App() {
   return (
@@ -757,6 +757,7 @@ function App() {
 }
 
 function StreamPage({ streamId }: { streamId: bigint }) {
+  const { network, setNetwork, availableNetworks } = useNetworkSwitcher();
   const { stream, loading, error } = useStream(streamId);
   const { createStream, loading: creating } = useCreateStream();
   // ...

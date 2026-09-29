@@ -9,6 +9,7 @@ import type {
   Subscription,
   FeeEstimate,
   StreamOperation,
+  Network,
 } from "./types/index.js";
 import type { WalletAdapter } from "./adapters/types.js";
 import { DEFAULT_RPC, getServer } from "./soroban.js";
@@ -181,6 +182,13 @@ export class ConduitClient {
   /** Aliased access to Module49. */
   get module49(): Module49 {
     return this.batchEngine;
+  }
+
+  /**
+   * The Stellar network this client is connected to.
+   */
+  get network(): Network {
+    return this.config.network;
   }
 
   /**
