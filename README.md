@@ -763,6 +763,16 @@ function StreamPage({ streamId }: { streamId: bigint }) {
 }
 ```
 
+### SDK features without a hook yet
+
+`@streamfi/react` covers most of the SDK's stream mutations and queries, but a few surfaces are still only reachable through the raw `ConduitClient` (e.g. via `useStreamFiClient()`). This list is kept up to date as hooks are added — if something you need is listed here, drop to the SDK directly rather than looking for a hook that doesn't exist yet:
+
+- **Analytics modules** — `client.portfolio`, `client.snapshots`, `client.risk`, `client.batchAnalytics` (`client.module48`), and `client.batchEngine` (`client.module49`). These provide portfolio aggregation, snapshot diffing, liquidity-risk/runway assessment, and memoized batch yield calculations over `StreamInfo[]` you already have — call them directly, no RPC round-trip involved.
+- **Some factory queries** — `client.factory.streamAddress()`, `hasStream()`, `streamCountBySender()`, and `streamCountByRecipient()` have no hook. (`streamCount`, `streamsBySender`, `streamsByRecipient`, and `protocolFeeBps` do — see `useFactoryStreamCount`, `useStreamsBySender`, `useStreamsByRecipient`, `useProtocolFeeBps`.)
+- **Live event subscriptions** — `client.streams.subscribe()` / `subscribeAsync()`. No hook wraps the polling subscription yet; call it directly and tear it down (`unsubscribe()`) in a `useEffect` cleanup.
+- **Low-level batch transaction building** — `buildBatchTransactions` / `submitBatch` (exported from the SDK root). Only reachable indirectly today via `useConduitBatcher`'s `ConduitBatcher`, which uses them internally — no hook calls them directly.
+- **GraphQL indexer queries** — `GraphQLIndexer`. `useTransactionHistory` only manages the dashboard's local filter/pagination/reducer state; running the actual indexer query is still up to the caller.
+
 ### Next.js Example
 
 A working Next.js (App Router) example is available at [`examples/nextjs-app/`](./examples/nextjs-app/). It demonstrates:
