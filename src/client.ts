@@ -21,6 +21,7 @@ import { Module36 } from "./module36.js";
 import { Module44 } from "./module44.js";
 import { Module48 } from "./module48.js";
 import { Module49 } from "./module49.js";
+import { TokenModule } from "./token.js";
 import {
   SUPPORTED_NETWORKS,
   UnsupportedChainError,
@@ -86,6 +87,8 @@ function assertWalletNetworkMatch(
 export class ConduitClient {
   readonly streams: StreamsModule;
   readonly governor: GovernorModule;
+  /** SEP-41 token allowance reads and approvals. */
+  readonly tokens: TokenModule;
 
   /**
    * Access the DripFactory read-query module.
@@ -225,6 +228,7 @@ export class ConduitClient {
 
     this.streams = new StreamsModule(this.config);
     this.governor = new GovernorModule(this.config);
+    this.tokens = new TokenModule(this.config);
   }
 
   /**
@@ -342,6 +346,8 @@ export class ConduitClient {
    * **Wallet propagation contract:**
    * - {@link StreamsModule}: Updated immediately — all subsequent stream
    *   operations (create, withdraw, cancel, etc.) use the new wallet.
+   * - {@link TokenModule}: Updated immediately — subsequent token approvals
+   *   use the new wallet.
    * - {@link FactoryModule}: NOT updated — this module is read-only and
    *   uses `config.keypair` for simulation fee sourcing. It does not hold
    *   a wallet reference and is unaffected by `setWallet()`.
@@ -357,6 +363,7 @@ export class ConduitClient {
     assertWalletNetworkMatch(wallet, this.config.network);
     this.config.wallet = wallet;
     this.streams.setWallet(wallet);
+    this.tokens.setWallet(wallet);
   }
 
   /**

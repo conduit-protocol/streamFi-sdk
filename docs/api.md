@@ -36,7 +36,38 @@ new ConduitClient(config: ConduitConfig)
 
 * `pauseStream(streamId: string) → Promise<string>` — equivalent to `client.streams.pause(streamId)`.
 * `unpauseStream(streamId: string) → Promise<string>` — equivalent to `client.streams.resume(streamId)`.
-* `setWallet(wallet: WalletAdapter): void` — dynamically attach or change the active wallet adapter. Throws `UnsupportedChainError` if the wallet's `chainId` is on a different network than the client was configured for. See [Wallet Adapters](#wallet-adapters) below. Only propagates to `client.streams` — `client.factory` and `client.governor` are read-only and use `config.keypair` for simulation fee sourcing, so they are unaffected.
+* `setWallet(wallet: WalletAdapter): void` — dynamically attach or change the active wallet adapter. Throws `UnsupportedChainError` if the wallet's `chainId` is on a different network than the client was configured for. See [Wallet Adapters](#wallet-adapters) below. Propagates to `client.streams` and `client.tokens`; `client.factory` and `client.governor` are read-only and unaffected.
+
+---
+
+## `client.tokens`
+
+SEP-41 token allowance reads and approvals. The owner must match the configured
+keypair, wallet, or signer when submitting an approval.
+
+### `allowance(tokenAddress, ownerAddress, spenderAddress, signal?) → Promise<bigint>`
+
+Returns the current allowance in the token contract's smallest unit.
+
+### `approve(tokenAddress, ownerAddress, spenderAddress, amount, expirationLedger) → Promise<string>`
+
+Sets the spender's allowance and returns the confirmed transaction hash.
+`amount` is a `bigint`; `expirationLedger` is a u32 ledger sequence. Use an
+amount and expiration ledger appropriate for the stream operation that will
+consume the allowance.
+
+---
+
+## Network explorer constants
+
+`NETWORK_NAMES` provides display labels for `mainnet`, `testnet`, and
+`futurenet`. `EXPLORER_URLS` provides transaction, contract, and account URL
+bases for the same `NetworkType` keys:
+
+```typescript
+const transactionUrl = `${EXPLORER_URLS.testnet.transaction}${txHash}`;
+const contractUrl = `${EXPLORER_URLS.mainnet.contract}${contractId}`;
+```
 
 ---
 
@@ -933,5 +964,3 @@ new Module44(config?: Module44Config)
 * `estimateTopUpNeeded(stream: StreamInfo, targetRunwaySecs: number, nowSec?: number): bigint` — Stroops needed via `top_up()` for the stream's runway to reach `targetRunwaySecs`. Returns `0n` if the stream is inactive/paused/cancelled, the target is non-positive, or the target is already met (including any open-ended stream, whose runway is treated as unbounded).
 * `clearCache(): void` — Clears the internal lookup cache and metrics.
 * `getPerformanceMetrics(): Module44Metrics` — Returns `totalAssessed`, `cacheHits`, `cacheMisses`, `averageExecutionTimeMs`, and `measuredSpeedupPercent` (a real measurement derived from this instance's own accumulated hit/miss timings, `null` until both have occurred at least once).
-
-

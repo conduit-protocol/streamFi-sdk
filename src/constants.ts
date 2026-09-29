@@ -1,5 +1,41 @@
 import { StrKey } from '@stellar/stellar-sdk';
 
+/** Stellar networks supported by public explorer links. */
+export type NetworkType = 'mainnet' | 'testnet' | 'futurenet';
+
+/** Human-readable labels for Stellar networks. */
+export const NETWORK_NAMES: Record<NetworkType, string> = {
+  mainnet: 'Mainnet',
+  testnet: 'Testnet',
+  futurenet: 'Futurenet',
+};
+
+/**
+ * Stellar Expert URL bases, keyed by network and resource type.
+ * Append the transaction hash, contract ID, or account ID to the relevant
+ * base URL instead of rebuilding explorer paths throughout an application.
+ */
+export const EXPLORER_URLS: Record<
+  NetworkType,
+  { transaction: string; contract: string; account: string }
+> = {
+  mainnet: {
+    transaction: 'https://stellar.expert/explorer/public/tx/',
+    contract: 'https://stellar.expert/explorer/public/contract/',
+    account: 'https://stellar.expert/explorer/public/account/',
+  },
+  testnet: {
+    transaction: 'https://stellar.expert/explorer/testnet/tx/',
+    contract: 'https://stellar.expert/explorer/testnet/contract/',
+    account: 'https://stellar.expert/explorer/testnet/account/',
+  },
+  futurenet: {
+    transaction: 'https://stellar.expert/explorer/futurenet/tx/',
+    contract: 'https://stellar.expert/explorer/futurenet/contract/',
+    account: 'https://stellar.expert/explorer/futurenet/account/',
+  },
+};
+
 /**
  * A syntactically valid Stellar G-address with no known keypair. Used only
  * as the transaction source for read-only simulation calls when no real

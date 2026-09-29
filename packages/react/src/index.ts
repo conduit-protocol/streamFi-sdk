@@ -62,3 +62,8 @@ export { useTransactionHistory } from './hooks/useTransactionHistory.js';
 export type { UseTransactionHistoryResult, UseTransactionHistoryOptions } from './hooks/useTransactionHistory.js';
 export { useCircuitState } from './hooks/useCircuitState.js';
 export type { UseCircuitStateResult } from './hooks/useCircuitState.js';
+export { useTokenAllowance } from './hooks/useTokenAllowance.js';
+export type {
+  ApproveTokenAllowanceFn,
+  UseTokenAllowanceResult,
+} from './hooks/useTokenAllowance.js';

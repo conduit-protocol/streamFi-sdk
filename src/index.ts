@@ -96,7 +96,14 @@ export {
  } from './utils.js';
 
 // Constants
-export { MIN_STREAM_DURATION_SECONDS } from './constants.js';
+export {
+  MIN_STREAM_DURATION_SECONDS,
+  NETWORK_NAMES,
+  EXPLORER_URLS,
+} from './constants.js';
+export type { NetworkType } from './constants.js';
+
+export { TokenModule } from './token.js';
 
 // RPC server lifecycle
 export { getServer, clearServerCache, resolveFee } from './soroban.js';
