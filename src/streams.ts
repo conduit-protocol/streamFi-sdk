@@ -51,6 +51,7 @@ import {
 import { buildBatchTransactions } from './batch-tx.js';
 import type { BatchTransactionContext } from './batch-tx.js';
 import { FactoryModule } from './factory.js';
+import { mapWithConcurrency, DEFAULT_LIST_CONCURRENCY } from './map-with-concurrency.js';
 import {
   ConduitError,
   RateLimitError,
@@ -67,32 +68,6 @@ import {
  * Tracks which v1-deprecated methods have already warned this session, so
  * repeated calls (e.g. in a hot loop) do not spam the console.
  */
-/** Default concurrency limit for bounded page-fetching (Issue #549). */
-const DEFAULT_LIST_CONCURRENCY = 8;
-
-/**
- * Runs `fn` over `items` with at most `concurrency` in-flight calls.
- * Preserves result ordering to match a naive `Promise.all` fan-out.
- */
-async function mapWithConcurrency<T, R>(
-  items: T[],
-  concurrency: number,
-  fn: (item: T) => Promise<R>,
-): Promise<R[]> {
-  const results = new Array<R>(items.length);
-  let index = 0;
-
-  async function worker() {
-    while (index < items.length) {
-      const i = index++;
-      results[i] = await fn(items[i]!);
-    }
-  }
-
-  const workers = Array.from({ length: Math.min(concurrency, items.length) }, () => worker());
-  await Promise.all(workers);
-  return results;
-}
 
 const _warnedDeprecations = new Set<string>();
 
