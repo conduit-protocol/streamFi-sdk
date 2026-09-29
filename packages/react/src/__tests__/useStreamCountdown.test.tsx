@@ -60,4 +60,118 @@ describe('useStreamCountdown', () => {
     expect(result.current.isPast).toBe(true);
     expect(result.current).toMatchObject({ days: 0, hours: 0, minutes: 0, seconds: 0 });
   });
+
+  it('derives progressFraction from the start/end window', () => {
+    const start = BASE_SEC;
+    const target = BASE_SEC + 100;
+    const { result } = renderHook(() => useStreamCountdown(target, start));
+
+    expect(result.current.progressFraction).toBe(0);
+
+    act(() => {
+      vi.advanceTimersByTime(50_000);
+    });
+    expect(result.current.progressFraction).toBe(0.5);
+
+    act(() => {
+      vi.advanceTimersByTime(50_000);
+    });
+    expect(result.current.progressFraction).toBe(1);
+  });
+
+  it('clamps progressFraction to 0 before the window starts', () => {
+    const { result } = renderHook(() =>
+      useStreamCountdown(BASE_SEC + 150, BASE_SEC + 50),
+    );
+
+    expect(result.current.progressFraction).toBe(0);
+    expect(result.current.isPast).toBe(false);
+  });
+
+  it('treats a zero-length window as complete only once past', () => {
+    const target = BASE_SEC + 10;
+    const { result } = renderHook(() => useStreamCountdown(target, target));
+
+    expect(result.current.progressFraction).toBe(0);
+    expect(result.current.isPast).toBe(false);
+
+    act(() => {
+      vi.advanceTimersByTime(10_000);
+    });
+
+    expect(result.current.progressFraction).toBe(1);
+    expect(result.current.isPast).toBe(true);
+  });
+
+  it('returns a zeroed, not-started result when the target is missing', () => {
+    const { result } = renderHook(() => useStreamCountdown(null, BASE_SEC));
+
+    expect(result.current).toEqual({
+      days: 0,
+      hours: 0,
+      minutes: 0,
+      seconds: 0,
+      isPast: false,
+      progressFraction: null,
+    });
+  });
+
+  it('treats non-finite targets as missing', () => {
+    const { result } = renderHook(() => useStreamCountdown(Number.NaN, BASE_SEC));
+
+    expect(result.current.isPast).toBe(false);
+    expect(result.current.progressFraction).toBeNull();
+  });
+
+  it('ignores a non-finite start timestamp for progressFraction', () => {
+    const { result } = renderHook(() =>
+      useStreamCountdown(BASE_SEC + 60, Number.POSITIVE_INFINITY),
+    );
+
+    expect(result.current.progressFraction).toBeNull();
+  });
+
+  it('re-syncs when the target changes', () => {
+    const { result, rerender } = renderHook(
+      ({ target }: { target: number }) => useStreamCountdown(target),
+      { initialProps: { target: BASE_SEC + 10 } },
+    );
+
+    expect(result.current.seconds).toBe(10);
+
+    rerender({ target: BASE_SEC + 3 });
+    expect(result.current.seconds).toBe(3);
+  });
+
+  it('clears its interval on unmount', () => {
+    const { unmount } = renderHook(() => useStreamCountdown(BASE_SEC + 60));
+    expect(vi.getTimerCount()).toBeGreaterThan(0);
+
+    unmount();
+    expect(vi.getTimerCount()).toBe(0);
+  });
+
+  it('decomposes long durations into whole units', () => {
+    const target = BASE_SEC + 2 * 86_400 + 5 * 3_600 + 59 * 60 + 59;
+    const { result } = renderHook(() => useStreamCountdown(target));
+
+    expect(result.current).toMatchObject({
+      days: 2,
+      hours: 5,
+      minutes: 59,
+      seconds: 59,
+    });
+  });
+
+  it('flags isPast exactly at the target', () => {
+    const target = BASE_SEC + 1;
+    const { result } = renderHook(() => useStreamCountdown(target));
+
+    act(() => {
+      vi.advanceTimersByTime(1_000);
+    });
+
+    expect(result.current.isPast).toBe(true);
+    expect(result.current.progressFraction).toBeNull();
+  });
 });
