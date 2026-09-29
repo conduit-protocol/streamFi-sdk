@@ -302,22 +302,23 @@ describe('FactoryModule — hasStream() (#794)', () => {
 
   it('shares the streamAddress cache instead of re-hitting the network', async () => {
     const { FactoryModule } = await import('../factory.js');
-    mockSimulate.mockResolvedValueOnce(makeU32ScVal(1));
+    mockSimulate
+      .mockResolvedValueOnce(makeU32ScVal(1))     // id 5 resolves
+      .mockResolvedValueOnce(makeVoidScVal());     // id 999 is not found
     const factory = new FactoryModule(cfg());
 
     const address = await factory.streamAddress(5n);
     const exists = await factory.hasStream('5');
     const missing = await factory.hasStream(999n);
-    mockSimulate.mockResolvedValueOnce(makeVoidScVal());
-    const missingResolved = await factory.hasStream(999n);
+    const missingAgain = await factory.hasStream(999n);
 
     expect(address).not.toBeNull();
     expect(exists).toBe(true);
     expect(missing).toBe(false);
-    expect(missingResolved).toBe(false);
-    // Only three network hits total: id 5 resolved once, id 999 resolved
-    // twice (first miss cached negatively with a TTL, second miss explicit).
-    expect(mockSimulate).toHaveBeenCalledTimes(3);
+    expect(missingAgain).toBe(false);
+    // Two network hits total: id 5 resolved once, id 999 resolved once and
+    // was then served from the negative cache for the rest of its TTL.
+    expect(mockSimulate).toHaveBeenCalledTimes(2);
   });
 
   it('propagates an already-aborted signal as AbortError without hitting the network', async () => {
@@ -326,7 +327,9 @@ describe('FactoryModule — hasStream() (#794)', () => {
     const controller = new AbortController();
     controller.abort();
 
-    await expect(factory.hasStream(1n, controller.signal)).rejects.toThrow('AbortError');
+    // 'AbortError' only appears in the exception's `name`; the message is
+    // 'Aborted', so matchObject on `name` rather than toThrow(string).
+    await expect(factory.hasStream(1n, controller.signal)).rejects.toMatchObject({ name: 'AbortError' });
     expect(mockSimulate).not.toHaveBeenCalled();
   });
 });
