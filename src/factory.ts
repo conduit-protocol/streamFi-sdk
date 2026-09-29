@@ -16,6 +16,7 @@ import {
   DEFAULT_RPC,
 } from './soroban.js';
 import { SUPPORTED_NETWORKS, UnsupportedChainError } from './errors.js';
+import { mapWithConcurrency, DEFAULT_LIST_CONCURRENCY } from './map-with-concurrency.js';
 
 /**
  * A `null` (not-found) `streamAddress` result is cached only briefly — a
@@ -29,6 +30,16 @@ const NEGATIVE_ADDRESS_CACHE_TTL_MS = 30_000;
 export interface FactoryStreamListResult {
   ids: bigint[];
   hasMore: boolean;
+}
+
+/** Options for {@link FactoryModule.streamAddresses}. */
+export interface StreamAddressesOptions {
+  /**
+   * Maximum number of `stream_address` simulations in flight at once.
+   * Defaults to 8 — the number of preflight workers a default `stellar-rpc`
+   * serves `simulateTransaction` from. Values below 1 are treated as 1.
+   */
+  maxConcurrency?: number;
 }
 
 export class FactoryModule {
@@ -238,6 +249,81 @@ export class FactoryModule {
   private _cacheNegative(key: string): void {
     this.addressCache.set(key, null);
     this.negativeCacheExpiry.set(key, Date.now() + this._negativeCacheTtlMs);
+  }
+
+  /**
+   * Resolve many stream IDs to their contract addresses in one call (#783).
+   *
+   * {@link streamAddress} costs one simulated RPC call per id, so rendering a
+   * page of `streamsBySender()` results costs one round trip per row on a
+   * cold cache. This resolves a whole page at once: the already-cached ids
+   * (positive hits, and negative hits still inside their
+   * `negativeCacheTtlMs` window) are served from memory and only the
+   * cache-miss subset is fetched, with at most `maxConcurrency` simulations
+   * in flight so the client does not outrun the RPC's preflight workers.
+   *
+   * Ids may be `bigint` or `string`, and duplicates (including the same id
+   * in both forms) are fetched once. The returned `Map` is keyed by the
+   * decimal id string and preserves first-seen input order; an id the
+   * contract reports as `None` maps to `null`, exactly as
+   * {@link streamAddress} returns.
+   *
+   * Because each id is resolved through {@link streamAddress}, the address
+   * cache, its hit/miss counters and the negative-cache TTL are shared with
+   * single-id lookups in both directions.
+   *
+   * @param ids - Stream IDs to resolve.
+   * @param signal - Abort signal; rejects with an `AbortError` if aborted
+   *   before or during resolution.
+   * @param options - See {@link StreamAddressesOptions}.
+   * @returns A `Map` of decimal stream-id string to contract address, or
+   *   `null` for ids that do not resolve to a deployed stream.
+   * @throws If any single resolution fails. Ids that did resolve stay
+   *   cached, so a retry only re-fetches the ones that failed. A failed
+   *   resolution is never recorded as a not-found result.
+   *
+   * @example
+   * ```typescript
+   * const { ids } = await client.factory.streamsBySender(sender, 0, 50);
+   * const addresses = await client.factory.streamAddresses(ids);
+   * for (const [id, address] of addresses) {
+   *   console.log(id, address ?? 'not found');
+   * }
+   * ```
+   */
+  async streamAddresses(
+    ids: (bigint | string)[],
+    signal?: AbortSignal,
+    options: StreamAddressesOptions = {},
+  ): Promise<Map<string, string | null>> {
+    if (signal?.aborted) throw new DOMException("Aborted", "AbortError");
+
+    // De-duplicate first so a page that repeats an id (or mixes the string
+    // and bigint forms of one) never schedules two simulations for it.
+    const keys: string[] = [];
+    const seen = new Set<string>();
+    for (const id of ids) {
+      const key = BigInt(id).toString();
+      if (!seen.has(key)) {
+        seen.add(key);
+        keys.push(key);
+      }
+    }
+
+    // Cached ids resolve without a network call, so they simply occupy a
+    // slot in the pool for no RPC cost; keeping one code path means the
+    // batch method can never drift from the single-id one.
+    const resolved = await mapWithConcurrency(
+      keys,
+      options.maxConcurrency ?? DEFAULT_LIST_CONCURRENCY,
+      (key) => this.streamAddress(key, signal),
+    );
+
+    const out = new Map<string, string | null>();
+    keys.forEach((key, i) => {
+      out.set(key, resolved[i] ?? null);
+    });
+    return out;
   }
 
   /**
