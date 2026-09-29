@@ -145,19 +145,20 @@ export function StreamFiProvider({
         // Safe fallback if caches cannot be cleared
       }
 
-      const baseConfig = currentConfig ?? { network: nextNetwork };
+      const baseConfig = { ...(currentConfig ?? { network: nextNetwork }) };
+      if (
+        baseConfig.network !== nextNetwork &&
+        baseConfig.rpcUrl &&
+        (baseConfig.rpcUrl.includes("testnet") ||
+          baseConfig.rpcUrl.includes("mainnet") ||
+          baseConfig.rpcUrl.includes("localhost") ||
+          baseConfig.rpcUrl.includes("127.0.0.1"))
+      ) {
+        delete baseConfig.rpcUrl;
+      }
       const nextConfig: ConduitConfig = {
         ...baseConfig,
         network: nextNetwork,
-        rpcUrl:
-          baseConfig.network !== nextNetwork &&
-          baseConfig.rpcUrl &&
-          (baseConfig.rpcUrl.includes("testnet") ||
-            baseConfig.rpcUrl.includes("mainnet") ||
-            baseConfig.rpcUrl.includes("localhost") ||
-            baseConfig.rpcUrl.includes("127.0.0.1"))
-            ? undefined
-            : baseConfig.rpcUrl,
       };
 
       setCurrentConfig(nextConfig);

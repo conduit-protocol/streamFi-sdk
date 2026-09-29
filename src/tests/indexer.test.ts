@@ -70,6 +70,43 @@ describe('GraphQLIndexer APQ', () => {
     expect(body.query).toBe('query { streamCount }');
     expect(body.extensions).toBeUndefined();
   });
+
+  it('emits one metric for a successful logical query', async () => {
+    const onQueryMetric = vi.fn();
+    const instrumented = new GraphQLIndexer({ endpoint, onQueryMetric });
+    const fetchFn = vi.fn().mockResolvedValue({
+      ok: true,
+      json: async () => ({ data: { streamCount: 1 } }),
+    });
+    globalThis.fetch = fetchFn as unknown as typeof fetch;
+
+    await instrumented.query({ query: 'query StreamCount { streamCount }' });
+
+    expect(onQueryMetric).toHaveBeenCalledWith(expect.objectContaining({
+      queryName: 'StreamCount',
+      success: true,
+      durationMs: expect.any(Number),
+    }));
+    expect(onQueryMetric).toHaveBeenCalledTimes(1);
+    instrumented.cleanup();
+  });
+
+  it('emits a failed metric when GraphQL returns errors', async () => {
+    const onQueryMetric = vi.fn();
+    const instrumented = new GraphQLIndexer({ endpoint, onQueryMetric });
+    globalThis.fetch = vi.fn().mockResolvedValue({
+      ok: true,
+      json: async () => ({ errors: [{ message: 'query failed' }] }),
+    }) as unknown as typeof fetch;
+
+    await expect(instrumented.query({ query: 'query Broken { streamCount }' })).rejects.toThrow('query failed');
+    expect(onQueryMetric).toHaveBeenCalledWith(expect.objectContaining({
+      queryName: 'Broken',
+      success: false,
+      error: expect.any(Error),
+    }));
+    instrumented.cleanup();
+  });
 });
 
 describe('GraphQLIndexer — streamsBySender/streamsByRecipient', () => {

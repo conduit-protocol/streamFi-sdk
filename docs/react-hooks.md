@@ -234,6 +234,39 @@ All hooks will now automatically use the provided client from context.
 
 ---
 
+## useTokenAllowance
+
+Reads a SEP-41 token allowance and exposes an approval mutation. The owner
+address must match the connected wallet or signer when calling `approve`.
+
+```tsx
+import { useTokenAllowance } from '@streamfi/react';
+
+function FundingApproval({ token, owner, streamContract }) {
+  const { allowance, loading, isPending, approve, txHash, error } =
+    useTokenAllowance(token, owner, streamContract);
+
+  const approveFunding = () => approve(1_000_000n, 2_000_000);
+
+  return (
+    <div>
+      <p>Allowance: {loading ? 'Loading...' : allowance?.toString() ?? 'Unavailable'}</p>
+      <button onClick={approveFunding} disabled={isPending}>
+        {isPending ? 'Approving...' : 'Approve funding'}
+      </button>
+      {txHash && <p>Approval transaction: {txHash}</p>}
+      {error && <p>{error.message}</p>}
+    </div>
+  );
+}
+```
+
+`approve(amount, expirationLedger)` accepts a bigint-compatible integer and a
+u32 ledger sequence, then returns the confirmed transaction hash. The hook
+also exposes `refetch()` and `reset()`.
+
+---
+
 ## Error Handling
 
 Each hook exposes an `error` field that captures:

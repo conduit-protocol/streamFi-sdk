@@ -56,6 +56,14 @@ export interface ConduitConfig {
    * retrying. Default 30_000 (30 seconds).
    */
   negativeCacheTtlMs?: number;
+  /**
+   * How long a `GovernorModule.getConfig()` read is reused, in milliseconds.
+   * Protocol parameters only change when a governance proposal passes, so a
+   * short window removes the need to re-simulate on every poll. Default
+   * 30_000 (30 seconds, ~6 ledgers). Set `0` to disable the cache and
+   * re-simulate on every call.
+   */
+  governorConfigCacheTtlMs?: number;
 }
 
 export interface StreamInfo {
@@ -279,6 +287,15 @@ export interface BatchWithdrawItem {
 export interface BatchWithdrawResult {
   streamId: bigint;
   success: boolean;
+  txHash?: string;
+  error?: string;
+}
+
+export interface BatchCreateStreamResult {
+  index: number;
+  success: boolean;
+  streamId?: bigint;
+  streamAddress?: string;
   txHash?: string;
   error?: string;
 }

@@ -22,6 +22,7 @@ import { Module36 } from "./module36.js";
 import { Module44 } from "./module44.js";
 import { Module48 } from "./module48.js";
 import { Module49 } from "./module49.js";
+import { TokenModule } from "./token.js";
 import {
   SUPPORTED_NETWORKS,
   UnsupportedChainError,
@@ -87,6 +88,8 @@ function assertWalletNetworkMatch(
 export class ConduitClient {
   readonly streams: StreamsModule;
   readonly governor: GovernorModule;
+  /** SEP-41 token allowance reads and approvals. */
+  readonly tokens: TokenModule;
 
   /**
    * Access the DripFactory read-query module.
@@ -233,6 +236,7 @@ export class ConduitClient {
 
     this.streams = new StreamsModule(this.config);
     this.governor = new GovernorModule(this.config);
+    this.tokens = new TokenModule(this.config);
   }
 
   /**
@@ -350,9 +354,13 @@ export class ConduitClient {
    * **Wallet propagation contract:**
    * - {@link StreamsModule}: Updated immediately — all subsequent stream
    *   operations (create, withdraw, cancel, etc.) use the new wallet.
-   * - {@link FactoryModule}: NOT updated — this module is read-only and
-   *   uses `config.keypair` for simulation fee sourcing. It does not hold
-   *   a wallet reference and is unaffected by `setWallet()`.
+   * - {@link TokenModule}: Updated immediately — subsequent token approvals
+   *   use the new wallet.
+   * - {@link FactoryModule}: Updated — its read simulations are sourced
+   *   from the active wallet's public key, so a wallet swap re-resolves the
+   *   simulation source instead of leaving it pinned to the previous
+   *   wallet. A `client.factory` that has not been constructed yet picks
+   *   the new wallet up from `config` when it is lazily built (#784).
    * - {@link GovernorModule}: NOT updated — this module is read-only and
    *   uses `config.keypair` for simulation fee sourcing. It does not hold
    *   a wallet reference and is unaffected by `setWallet()`.
@@ -365,6 +373,13 @@ export class ConduitClient {
     assertWalletNetworkMatch(wallet, this.config.network);
     this.config.wallet = wallet;
     this.streams.setWallet(wallet);
+    this.tokens.setWallet(wallet);
+    // #784 — `FactoryModule` resolves its read-simulation source from a
+    // wallet adapter captured at construction, so it needs the swap too.
+    // Only when already constructed: a factory built later from the updated
+    // `config.wallet` above has nothing to catch up on. GovernorModule
+    // deliberately stays out — it holds no wallet at all.
+    this._factory?.setWallet(wallet);
   }
 
   /**

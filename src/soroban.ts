@@ -17,7 +17,7 @@ import {
 } from '@stellar/stellar-sdk';
 import type { Network } from './types/index.js';
 import type { Signer } from './signer.js';
-import { RateLimitError, StreamFiNetworkError, InsufficientBalanceError, ConfirmationTimeoutError } from './errors.js';
+import { RateLimitError, StreamFiNetworkError, InsufficientBalanceError, ConfirmationTimeoutError, CircuitOpenError } from './errors.js';
 import { withRetry } from './with-retry.js';
 import { coalesceAsync } from './coalesce-async.js';
 import { recordSuccess, recordFailure } from './rpc-circuit-state.js';
@@ -120,14 +120,20 @@ export function createRpcServer(rpcUrl: string): SorobanRpc.Server {
         return async function (...args: unknown[]) {
           return withRetry(
             () => (origMethod as (...a: unknown[]) => Promise<unknown>).apply(target, args),
-            { maxRetries: 3, baseDelayMs: 500, backoffFactor: 2 },
+            { maxRetries: 3, baseDelayMs: 500, backoffFactor: 2, circuitScope: rpcUrl },
           )
             .then((result) => {
               recordSuccess(rpcUrl);
               return result;
             })
             .catch((err) => {
-              recordFailure(rpcUrl);
+              // A CircuitOpenError means withRetry failed fast without ever
+              // attempting the operation — it isn't a new failure, so don't
+              // record one (that would keep resetting the cooldown and the
+              // circuit would never move to 'half-open').
+              if (!(err instanceof CircuitOpenError)) {
+                recordFailure(rpcUrl);
+              }
               throw err;
             });
         };

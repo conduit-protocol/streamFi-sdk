@@ -31,6 +31,8 @@ export type {
   GraphQLQueryOptions,
   GraphQLSubscriptionOptions,
   IndexerSubscription,
+  IndexerConfig,
+  IndexerQueryMetric,
 } from './indexer.js';
 export { KeypairSigner, LedgerSigner, LedgerErrorType, LedgerHardwareError, normalizeLedgerError, classifyLedgerError } from './signer.js';
 export type { Signer } from './signer.js';
@@ -68,7 +70,7 @@ export type { GetStreamInfosOptions, GetStreamInfosResult, GetStreamInfosFailure
 export * from './adapters/index.js';
 export * from './react/index.js';
 export { FeeEstimator } from './fee-estimator.js';
-export type { FeeEstimateOptions } from './fee-estimator.js';
+export type { FeeEstimatorOptions, FeeEstimateOptions } from './fee-estimator.js';
 export { coalesceAsync } from './coalesce-async.js';
 export { WebSocketRelayer } from './relayer/WebSocketRelayer.js';
 export { ErrorMapper, DEFAULT_ERROR_MESSAGE_TYPE_MAP } from './relayer/ErrorMapper.js';
@@ -93,10 +95,18 @@ export {
    parseDuration,
    validateAndNormalizeAddress,
    isValidAddress,
+   formatTokenAmount,
  } from './utils.js';
 
 // Constants
-export { MIN_STREAM_DURATION_SECONDS } from './constants.js';
+export {
+  MIN_STREAM_DURATION_SECONDS,
+  NETWORK_NAMES,
+  EXPLORER_URLS,
+} from './constants.js';
+export type { NetworkType } from './constants.js';
+
+export { TokenModule } from './token.js';
 
 // RPC server lifecycle
 export { getServer, clearServerCache, resolveFee } from './soroban.js';
@@ -159,6 +169,6 @@ export type {
 } from './module44.js';
 
 export { FactoryModule } from './factory.js';
-export type { FactoryStreamListResult } from './factory.js';
+export type { FactoryStreamListResult, StreamAddressesOptions } from './factory.js';
 export { GovernorModule } from './governor.js';
 export type { GovernorProposal } from './governor.js';

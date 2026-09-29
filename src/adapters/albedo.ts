@@ -50,7 +50,7 @@ export interface AlbedoWalletAdapterOptions {
 export class AlbedoWalletAdapter implements WalletAdapter {
   private albedoClient: AlbedoApi | null;
   private pubKey: string | null;
-  public networkPassphrase?: string;
+  public networkPassphrase: string | undefined;
 
   constructor(options: AlbedoWalletAdapterOptions = {}) {
     this.albedoClient = (options.albedo as AlbedoApi) ?? null;
@@ -63,8 +63,8 @@ export class AlbedoWalletAdapter implements WalletAdapter {
       return this.albedoClient;
     }
 
-    if (typeof window !== 'undefined') {
-      const win = window as unknown as { albedo?: AlbedoApi };
+    if (typeof globalThis !== 'undefined') {
+      const win = globalThis as unknown as { albedo?: AlbedoApi };
       if (win.albedo) {
         return win.albedo;
       }
@@ -72,9 +72,7 @@ export class AlbedoWalletAdapter implements WalletAdapter {
 
     if (typeof globalThis !== 'undefined') {
       const glob = globalThis as unknown as { albedo?: AlbedoApi };
-      if (glob.albedo) {
-        return glob.albedo;
-      }
+      if (glob.albedo) return glob.albedo;
     }
 
     throw new Error('Albedo wallet API not detected. Please ensure Albedo is available.');
@@ -172,11 +170,12 @@ export class AlbedoWalletAdapter implements WalletAdapter {
       networkParam = 'testnet';
     }
 
+    const accountToSign = opts?.accountToSign ?? this.pubKey;
     const signResult = await client.tx({
       xdr: xdrString,
       network: networkParam,
       submit: false,
-      pubkey: opts?.accountToSign ?? this.pubKey ?? undefined,
+      ...(accountToSign ? { pubkey: accountToSign } : {}),
     });
 
     let signedXdr: string | undefined;
