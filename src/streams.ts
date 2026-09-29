@@ -975,6 +975,78 @@ export class StreamsModule {
     };
   }
 
+  /**
+   * Subscribe to on-chain events for multiple streams at once. Returns an
+   * async subscription handle whose `unsubscribe()` tears down every
+   * underlying per-stream subscription together (#797).
+   *
+   * A stream ID that fails to resolve to an address is reported
+   * individually via `handlers.onError` rather than rejecting the whole
+   * batch — one bad ID in a portfolio of 50 shouldn't prevent subscribing
+   * to the other 49.
+   */
+  async subscribeToStreamsAsync(
+    streamIds: Array<bigint | string>,
+    handlers:  StreamEventHandlers,
+  ): Promise<Subscription> {
+    const outcomes = await Promise.all(
+      streamIds.map(async (streamId) => {
+        try {
+          const address = await this._factory.streamAddress(BigInt(streamId));
+          if (!address) throw new Error(`Stream ${streamId} not found`);
+          return { ok: true as const, address };
+        } catch (err) {
+          const error = err instanceof Error ? err : new Error(String(err));
+          return { ok: false as const, error };
+        }
+      }),
+    );
+
+    for (const outcome of outcomes) {
+      if (!outcome.ok) {
+        try {
+          handlers.onError?.(outcome.error);
+        } catch (handlerError) {
+          console.warn('[conduit-sdk] subscribeToStreams onError handler error:', handlerError);
+        }
+      }
+    }
+
+    const addresses = outcomes
+      .filter((outcome): outcome is { ok: true; address: string } => outcome.ok)
+      .map((outcome) => outcome.address);
+
+    const { subscribeToStreams } = await import('./events.js');
+    // Use the resolved `this.rpcUrl` — see the identical note in `subscribeAsync`.
+    return subscribeToStreams(this.rpcUrl, addresses, handlers);
+  }
+
+  /** Synchronous subscribeToStreams - resolves addresses lazily on first poll tick. */
+  subscribeToStreams(streamIds: Array<bigint | string>, handlers: StreamEventHandlers): Subscription {
+    let inner: Subscription | null = null;
+    let stopped = false;
+
+    this.subscribeToStreamsAsync(streamIds, handlers)
+      .then(sub => { if (!stopped) inner = sub; else sub.unsubscribe(); })
+      .catch(err => {
+        const error = err instanceof Error ? err : new Error(String(err));
+        handlers.onError?.(error);
+        console.warn('[conduit-sdk] subscribeToStreams error:', error);
+      });
+
+    return {
+      unsubscribe: () => {
+        stopped = true;
+        if (inner) {
+          inner.unsubscribe();
+          inner = null;
+        }
+        // Release handler references to prevent memory leaks
+        handlers = {};
+      },
+    };
+  }
+
   // Private helpers
 
   private _ensureCanMutate(): void {
