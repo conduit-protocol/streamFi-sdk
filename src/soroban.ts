@@ -17,8 +17,9 @@ import {
 } from '@stellar/stellar-sdk';
 import type { Network } from './types/index.js';
 import type { Signer } from './signer.js';
-import { RateLimitError, StreamFiNetworkError, InsufficientBalanceError, ConfirmationTimeoutError } from './errors.js';
+import { RateLimitError, StreamFiNetworkError, InsufficientBalanceError, ConfirmationTimeoutError, CircuitOpenError } from './errors.js';
 import { withRetry } from './with-retry.js';
+import { coalesceAsync } from './coalesce-async.js';
 import { recordSuccess, recordFailure } from './rpc-circuit-state.js';
 
 // ── RPC Server cache ─────────────────────────────────────────────────────────
@@ -119,14 +120,20 @@ export function createRpcServer(rpcUrl: string): SorobanRpc.Server {
         return async function (...args: unknown[]) {
           return withRetry(
             () => (origMethod as (...a: unknown[]) => Promise<unknown>).apply(target, args),
-            { maxRetries: 3, baseDelayMs: 500, backoffFactor: 2 },
+            { maxRetries: 3, baseDelayMs: 500, backoffFactor: 2, circuitScope: rpcUrl },
           )
             .then((result) => {
               recordSuccess(rpcUrl);
               return result;
             })
             .catch((err) => {
-              recordFailure(rpcUrl);
+              // A CircuitOpenError means withRetry failed fast without ever
+              // attempting the operation — it isn't a new failure, so don't
+              // record one (that would keep resetting the cooldown and the
+              // circuit would never move to 'half-open').
+              if (!(err instanceof CircuitOpenError)) {
+                recordFailure(rpcUrl);
+              }
               throw err;
             });
         };
@@ -338,19 +345,14 @@ export async function getTokenDecimals(
   }
   _tokenDecimalsMisses++;
 
-  const promise = (async () => {
+  // Request coalescing extracted into coalesceAsync (#798): concurrent
+  // callers share one in-flight simulation, and failures are evicted so a
+  // later call can retry.
+  return coalesceAsync(_tokenDecimalsCache, cacheKey, async () => {
     const tx  = await buildContractCallTx(rpcUrl, passphrase, callerAddr, tokenId, 'decimals', []);
     const val = await simulateReadOnly(rpcUrl, passphrase, tx);
     return scValToU32(val);
-  })();
-
-  _tokenDecimalsCache.set(cacheKey, promise);
-  promise.catch(() => {
-    // Don't cache failed simulations — let a later call retry.
-    _tokenDecimalsCache.delete(cacheKey);
   });
-
-  return promise;
 }
 
 /**

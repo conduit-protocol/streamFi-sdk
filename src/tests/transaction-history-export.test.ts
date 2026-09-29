@@ -44,7 +44,7 @@ describe('Transaction History Export Helpers (#808)', () => {
       expect(lines[0]).toBe('id,hash,streamId,kind,direction,status,amount,asset,counterparty,timestamp');
 
       // Verify row 1 uses formatAmount and formatAddress
-      const row1 = lines[1].split(',');
+      const row1 = lines[1]!.split(',');
       expect(row1[0]).toBe('tx-1');
       expect(row1[1]).toBe('hash-abc-123');
       expect(row1[2]).toBe('stream-001');
@@ -53,7 +53,7 @@ describe('Transaction History Export Helpers (#808)', () => {
       expect(row1[5]).toBe('CONFIRMED');
       expect(row1[6]).toBe(formatAmount('100000000'));
       expect(row1[7]).toBe('XLM');
-      expect(row1[8]).toBe(formatAddress(mockTransactions[0].counterparty));
+      expect(row1[8]).toBe(formatAddress(mockTransactions[0]!.counterparty));
       expect(row1[9]).toBe('1700000000000');
     });
 
@@ -68,10 +68,10 @@ describe('Transaction History Export Helpers (#808)', () => {
       const lines = csv.split('\n');
       expect(lines).toHaveLength(2);
 
-      const row1 = lines[0].split(',');
+      const row1 = lines[0]!.split(',');
       expect(row1[0]).toBe('tx-1');
       expect(row1[6]).toBe('100000000'); // raw amount
-      expect(row1[8]).toBe(mockTransactions[0].counterparty); // full address
+      expect(row1[8]).toBe(mockTransactions[0]!.counterparty); // full address
       expect(row1[9]).toMatch(/^\d{4}-\d{2}-\d{2}/); // formatted ISO timestamp
     });
 
@@ -110,8 +110,8 @@ describe('Transaction History Export Helpers (#808)', () => {
 
       expect(Array.isArray(parsed)).toBe(true);
       expect(parsed).toHaveLength(2);
-      expect(parsed[0].amount).toBe(formatAmount(mockTransactions[0].amount));
-      expect(parsed[0].counterparty).toBe(formatAddress(mockTransactions[0].counterparty));
+      expect(parsed[0].amount).toBe(formatAmount(mockTransactions[0]!.amount));
+      expect(parsed[0].counterparty).toBe(formatAddress(mockTransactions[0]!.counterparty));
       expect(parsed[0].id).toBe('tx-1');
     });
 
@@ -125,7 +125,7 @@ describe('Transaction History Export Helpers (#808)', () => {
       expect(jsonStr).not.toContain('\n');
       const parsed = JSON.parse(jsonStr);
       expect(parsed[0].amount).toBe('100000000');
-      expect(parsed[0].counterparty).toBe(mockTransactions[0].counterparty);
+      expect(parsed[0].counterparty).toBe(mockTransactions[0]!.counterparty);
     });
 
     it('handles boolean shorthand for pretty', () => {

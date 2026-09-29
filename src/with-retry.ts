@@ -1,4 +1,5 @@
-import { RateLimitError, StreamFiNetworkError, RpcServiceUnavailableError } from './errors.js';
+import { RateLimitError, StreamFiNetworkError, RpcServiceUnavailableError, CircuitOpenError } from './errors.js';
+import { getCircuitState } from './rpc-circuit-state.js';
 
 export interface WithRetryOptions {
   /** Maximum number of retry attempts after the initial failure. Default: 3 */
@@ -17,6 +18,14 @@ export interface WithRetryOptions {
   signal?: AbortSignal;
   /** Optional callback invoked before each retry. */
   onRetry?: (info: { attempt: number; delayMs: number; error: unknown }) => void;
+  /**
+   * Optional `rpc-circuit-state.ts` scope (typically an RPC URL) to consult
+   * before attempting the operation. If that scope's circuit is already
+   * `'open'`, `withRetry` throws a {@link CircuitOpenError} immediately
+   * instead of entering the retry loop, avoiding wasted backoff time
+   * against an endpoint the SDK has already determined is down. See #787.
+   */
+  circuitScope?: string;
 }
 
 /**
@@ -50,9 +59,17 @@ export async function withRetry<T>(
   const shouldRetry = options.shouldRetry ?? isRateLimitError;
   const signal = options.signal;
   const onRetry = options.onRetry;
+  const circuitScope = options.circuitScope;
 
   if (signal?.aborted) {
     throw new Error('withRetry aborted before first attempt');
+  }
+
+  if (circuitScope !== undefined) {
+    const circuit = getCircuitState(circuitScope);
+    if (circuit.state === 'open') {
+      throw new CircuitOpenError(circuitScope, circuit.cooldownUntil);
+    }
   }
 
   let delay = baseDelayMs;

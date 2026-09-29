@@ -208,6 +208,147 @@ describe('FactoryModule — streamAddress()', () => {
   });
 });
 
+describe('FactoryModule — getCacheMetrics() (#793)', () => {
+  it('starts at zero for a freshly constructed module', async () => {
+    const { FactoryModule } = await import('../factory.js');
+    const factory = new FactoryModule(cfg());
+
+    expect(factory.getCacheMetrics()).toEqual({ hits: 0, misses: 0, size: 0 });
+  });
+
+  it('counts a cold streamAddress() lookup as a miss and adds one cache entry', async () => {
+    const { FactoryModule } = await import('../factory.js');
+    mockSimulate.mockResolvedValueOnce(makeU32ScVal(1));
+    const factory = new FactoryModule(cfg());
+
+    await factory.streamAddress(1n);
+
+    expect(factory.getCacheMetrics()).toEqual({ hits: 0, misses: 1, size: 1 });
+  });
+
+  it('counts a repeated streamAddress() lookup as a hit, without changing size or misses', async () => {
+    const { FactoryModule } = await import('../factory.js');
+    mockSimulate.mockResolvedValueOnce(makeU32ScVal(1));
+    const factory = new FactoryModule(cfg());
+
+    await factory.streamAddress(1n);
+    await factory.streamAddress(1n);
+
+    expect(factory.getCacheMetrics()).toEqual({ hits: 1, misses: 1, size: 1 });
+  });
+
+  it('tracks a known mixed sequence of hits and misses across different stream IDs', async () => {
+    const { FactoryModule } = await import('../factory.js');
+    mockSimulate
+      .mockResolvedValueOnce(makeU32ScVal(1)) // id 1 — miss
+      .mockResolvedValueOnce(makeU32ScVal(1)); // id 2 — miss
+    const factory = new FactoryModule(cfg());
+
+    await factory.streamAddress(1n); // miss
+    await factory.streamAddress(1n); // hit
+    await factory.streamAddress(2n); // miss
+    await factory.streamAddress(1n); // hit
+    await factory.streamAddress(2n); // hit
+
+    expect(factory.getCacheMetrics()).toEqual({ hits: 3, misses: 2, size: 2 });
+  });
+
+  it('counts a not-found (void) resolution as a miss and still adds a (negative) cache entry', async () => {
+    const { FactoryModule } = await import('../factory.js');
+    mockSimulate.mockResolvedValueOnce(makeVoidScVal());
+    const factory = new FactoryModule(cfg());
+
+    await factory.streamAddress(999n);
+
+    expect(factory.getCacheMetrics()).toEqual({ hits: 0, misses: 1, size: 1 });
+  });
+
+  it('resetCacheStats() zeroes hits/misses but leaves cache size untouched', async () => {
+    const { FactoryModule } = await import('../factory.js');
+    mockSimulate.mockResolvedValueOnce(makeU32ScVal(1));
+    const factory = new FactoryModule(cfg());
+
+    await factory.streamAddress(1n); // miss
+    await factory.streamAddress(1n); // hit
+    factory.resetCacheStats();
+
+    expect(factory.getCacheMetrics()).toEqual({ hits: 0, misses: 0, size: 1 });
+  });
+
+  it('clearAddressCache() drops size to zero but does not touch hit/miss counters', async () => {
+    const { FactoryModule } = await import('../factory.js');
+    mockSimulate.mockResolvedValueOnce(makeU32ScVal(1));
+    const factory = new FactoryModule(cfg());
+
+    await factory.streamAddress(1n); // miss
+    await factory.streamAddress(1n); // hit
+    factory.clearAddressCache();
+
+    expect(factory.getCacheMetrics()).toEqual({ hits: 1, misses: 1, size: 0 });
+  });
+
+  it('streamCount() increments misses without touching the address cache size', async () => {
+    const { FactoryModule } = await import('../factory.js');
+    mockSimulate.mockResolvedValueOnce(makeU64ScVal(5n));
+    const factory = new FactoryModule(cfg());
+
+    await factory.streamCount();
+
+    expect(factory.getCacheMetrics()).toEqual({ hits: 0, misses: 1, size: 0 });
+  });
+});
+
+describe('FactoryModule — hasStream() (#794)', () => {
+  it('returns true when the stream address resolves', async () => {
+    const { FactoryModule } = await import('../factory.js');
+    mockSimulate.mockResolvedValueOnce(makeU32ScVal(1)); // any non-void scval
+
+    const exists = await new FactoryModule(cfg()).hasStream(42n);
+    expect(exists).toBe(true);
+  });
+
+  it('returns false when the contract returns void (stream not found)', async () => {
+    const { FactoryModule } = await import('../factory.js');
+    mockSimulate.mockResolvedValueOnce(makeVoidScVal());
+
+    const exists = await new FactoryModule(cfg()).hasStream(999n);
+    expect(exists).toBe(false);
+  });
+
+  it('shares the streamAddress cache instead of re-hitting the network', async () => {
+    const { FactoryModule } = await import('../factory.js');
+    mockSimulate
+      .mockResolvedValueOnce(makeU32ScVal(1))     // id 5 resolves
+      .mockResolvedValueOnce(makeVoidScVal());     // id 999 is not found
+    const factory = new FactoryModule(cfg());
+
+    const address = await factory.streamAddress(5n);
+    const exists = await factory.hasStream('5');
+    const missing = await factory.hasStream(999n);
+    const missingAgain = await factory.hasStream(999n);
+
+    expect(address).not.toBeNull();
+    expect(exists).toBe(true);
+    expect(missing).toBe(false);
+    expect(missingAgain).toBe(false);
+    // Two network hits total: id 5 resolved once, id 999 resolved once and
+    // was then served from the negative cache for the rest of its TTL.
+    expect(mockSimulate).toHaveBeenCalledTimes(2);
+  });
+
+  it('propagates an already-aborted signal as AbortError without hitting the network', async () => {
+    const { FactoryModule } = await import('../factory.js');
+    const factory = new FactoryModule(cfg());
+    const controller = new AbortController();
+    controller.abort();
+
+    // 'AbortError' only appears in the exception's `name`; the message is
+    // 'Aborted', so matchObject on `name` rather than toThrow(string).
+    await expect(factory.hasStream(1n, controller.signal)).rejects.toMatchObject({ name: 'AbortError' });
+    expect(mockSimulate).not.toHaveBeenCalled();
+  });
+});
+
 describe('FactoryModule — cache consolidation with StreamsModule', () => {
   it('StreamsModule exposes clearAddressCache that delegates to factory', async () => {
     const { StreamsModule } = await import('../streams.js');

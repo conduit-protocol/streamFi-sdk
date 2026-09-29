@@ -205,10 +205,11 @@ await walletAdapter.connect();
 client.setWallet(walletAdapter);
 ```
 
-`setWallet()` only affects `client.streams` — `client.factory` and `client.governor` are
-read-only and keep using `config.keypair` (if any) for simulation fee sourcing. It throws
-`UnsupportedChainError` if the adapter's `chainId` doesn't match the network the client was
-configured for. See [`setWallet`](docs/api.md#clientstreams) in the API reference for details.
+`setWallet()` propagates to `client.streams` and to an already-constructed `client.factory` (whose
+read simulations are sourced from the active wallet). `client.governor` is read-only and keeps
+using `config.keypair` (if any) for simulation fee sourcing. It throws `UnsupportedChainError` if
+the adapter's `chainId` doesn't match the network the client was configured for. See
+[`setWallet`](docs/api.md#clientstreams) in the API reference for details.
 
 ---
 
@@ -502,6 +503,13 @@ const count = await client.factory.streamCount();
 // Stream address by ID
 const address = await client.factory.streamAddress(streamId);
 
+// Addresses for a whole page, in one call — renders a stream list without
+// one RPC round trip per row. Ids already resolved (or cached as
+// not-found) cost nothing; only the cache-miss subset is fetched.
+const { ids } = await client.factory.streamsBySender(sender, 0, 50);
+const addresses = await client.factory.streamAddresses(ids);
+// Map<string, string | null>, keyed by decimal stream-id string
+
 // Protocol fee in basis points (e.g. 30 = 0.3%)
 const feeBps = await client.factory.protocolFeeBps();
 ```
@@ -513,16 +521,22 @@ const feeBps = await client.factory.protocolFeeBps();
 Read protocol configuration:
 
 ```typescript
-const config = await client.governor.config();
+const config = await client.governor.getConfig();
 // Returns:
 // {
 //   feeBps:               number,
 //   feeRecipient?:        string,
 //   minDurationSeconds:   number,
+//   maxDurationSeconds:   number,
 //   maxRatePerSecond:     bigint,
 //   factoryAddress?:      string,
 // }
 ```
+
+The result is reused for `governorConfigCacheTtlMs` (default 30s) — protocol parameters only
+change when a governance proposal passes, so a polling dashboard no longer pays a simulation
+per tick. Set it to `0` to re-simulate on every call, or call
+`client.governor.clearConfigCache()` to force a refresh.
 
 ---
 
@@ -762,6 +776,16 @@ function StreamPage({ streamId }: { streamId: bigint }) {
   // ...
 }
 ```
+
+### SDK features without a hook yet
+
+`@streamfi/react` covers most of the SDK's stream mutations and queries, but a few surfaces are still only reachable through the raw `ConduitClient` (e.g. via `useStreamFiClient()`). This list is kept up to date as hooks are added — if something you need is listed here, drop to the SDK directly rather than looking for a hook that doesn't exist yet:
+
+- **Analytics modules** — `client.portfolio`, `client.snapshots`, `client.risk`, `client.batchAnalytics` (`client.module48`), and `client.batchEngine` (`client.module49`). These provide portfolio aggregation, snapshot diffing, liquidity-risk/runway assessment, and memoized batch yield calculations over `StreamInfo[]` you already have — call them directly, no RPC round-trip involved.
+- **Some factory queries** — `client.factory.streamAddress()`, `hasStream()`, `streamCountBySender()`, and `streamCountByRecipient()` have no hook. (`streamCount`, `streamsBySender`, `streamsByRecipient`, and `protocolFeeBps` do — see `useFactoryStreamCount`, `useStreamsBySender`, `useStreamsByRecipient`, `useProtocolFeeBps`.)
+- **Live event subscriptions** — `client.streams.subscribe()` / `subscribeAsync()`. No hook wraps the polling subscription yet; call it directly and tear it down (`unsubscribe()`) in a `useEffect` cleanup.
+- **Low-level batch transaction building** — `buildBatchTransactions` / `submitBatch` (exported from the SDK root). Only reachable indirectly today via `useConduitBatcher`'s `ConduitBatcher`, which uses them internally — no hook calls them directly.
+- **GraphQL indexer queries** — `GraphQLIndexer`. `useTransactionHistory` only manages the dashboard's local filter/pagination/reducer state; running the actual indexer query is still up to the caller.
 
 ### Next.js Example
 

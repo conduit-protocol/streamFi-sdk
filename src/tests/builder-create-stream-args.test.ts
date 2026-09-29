@@ -114,6 +114,14 @@ describe('StreamBuilder.toContractArgs()', () => {
     const builder = baseBuilder();
     expect(() => builder.clawbackEnabled('yes' as unknown as boolean)).toThrow('clawbackEnabled must be a boolean');
   });
+
+  it('supports cancelable and clawbackable fluent flags', () => {
+    const config = baseBuilder().setCancelable(false).setClawbackable(true).build();
+
+    expect(config.cancelable).toBe(false);
+    expect(config.clawbackable).toBe(true);
+    expect(config.clawbackEnabled).toBe(true);
+  });
 });
 
 describe('StreamBuilder.toBatchOperation() + ConduitBatcher', () => {

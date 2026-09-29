@@ -83,7 +83,9 @@ function i128(n: bigint) {
 // ── Tests ─────────────────────────────────────────────────────────────────────
 
 beforeEach(() => {
-  mockBuildTx.mockResolvedValue({ _stub: 'tx' });
+  // mockBuildTx needs a full reset, not just a re-resolve: an earlier test's
+  // calls would otherwise leak into a later `not.toHaveBeenCalled()`.
+  mockBuildTx.mockReset().mockResolvedValue({ _stub: 'tx' });
   mockSimulate.mockReset();
 });
 
@@ -140,5 +142,29 @@ describe('GovernorModule — getConfig()', () => {
     expect(config.maxRatePerSecond).toBe(0n);
     expect(config.feeRecipient).toBeUndefined();
     expect(config.factoryAddress).toBeUndefined();
+  });
+
+  it('rejects with AbortError before touching the network when the signal is already aborted (#795)', async () => {
+    const { GovernorModule } = await import('../governor.js');
+    const controller = new AbortController();
+    controller.abort();
+
+    // 'AbortError' only appears in the exception's `name`; the message is
+    // 'Aborted', so matchObject on `name` rather than toThrow(string).
+    await expect(new GovernorModule(cfg()).getConfig(controller.signal)).rejects.toMatchObject({ name: 'AbortError' });
+    expect(mockBuildTx).not.toHaveBeenCalled();
+    expect(mockSimulate).not.toHaveBeenCalled();
+  });
+
+  it('resolves normally when a non-aborted signal is passed (#795)', async () => {
+    const { GovernorModule } = await import('../governor.js');
+    mockSimulate.mockResolvedValueOnce(scvMap({
+      fee_bps: u32(30),
+      min_duration_seconds: u64(3_600n),
+      max_rate_per_second: i128(1_000_000_000_000_000n),
+    }));
+
+    const config = await new GovernorModule(cfg()).getConfig(new AbortController().signal);
+    expect(config.feeBps).toBe(30);
   });
 });

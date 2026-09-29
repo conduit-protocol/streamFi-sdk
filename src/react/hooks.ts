@@ -4,6 +4,7 @@ import type {
   StreamOperation,
   BatchWithdrawItem,
   BatchWithdrawResult,
+  FeeEstimate,
 } from '../types/index.js';
 import { useConduitClient } from './context.js';
 

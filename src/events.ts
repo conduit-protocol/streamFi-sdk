@@ -280,6 +280,45 @@ export function subscribeToStream(
   };
 }
 
+/**
+ * Subscribe to on-chain events for multiple DripStream contracts at once.
+ *
+ * A convenience that fans out to one `subscribeToStream` call per address
+ * internally and returns a single `Subscription` whose `unsubscribe()`
+ * tears all of them down together (#797). Without this, a UI showing a
+ * portfolio of streams (5, 20, 50 of them) has to call `subscribeToStream`
+ * once per stream and separately track and tear down that many independent
+ * `Subscription` objects itself.
+ *
+ * All addresses share the same `handlers` and each keeps its own polling
+ * interval, cursor, and backoff state — this does not merge the underlying
+ * polling into a single request. Event payloads (`WithdrawEvent`,
+ * `CancelEvent`, etc.) don't carry the originating stream's address, so a
+ * shared handler firing across several addresses can't by itself tell
+ * which stream an event came from; subscribe per-group with distinct
+ * handlers if you need to attribute events to a specific stream.
+ *
+ * @param rpcUrl    Soroban RPC endpoint
+ * @param addresses DripStream contract addresses (C…) to subscribe to
+ * @param handlers  Event handler callbacks, shared across all addresses
+ * @returns         `{ unsubscribe }` — stops polling for every address
+ */
+export function subscribeToStreams(
+  rpcUrl:    string,
+  addresses: string[],
+  handlers:  StreamEventHandlers,
+): Subscription {
+  const subscriptions = addresses.map((address) => subscribeToStream(rpcUrl, address, handlers));
+
+  return {
+    unsubscribe: () => {
+      for (const sub of subscriptions) {
+        sub.unsubscribe();
+      }
+    },
+  };
+}
+
 // ── Event dispatcher ──────────────────────────────────────────────────────────
 
 // Exported (but not re-exported from index.ts) so tests can exercise the
