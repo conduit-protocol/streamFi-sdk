@@ -614,7 +614,12 @@ export class StreamsModule {
     return this._invoke(await this._resolveAddr(BigInt(streamId), signal), 'resume', [], signal);
   }
 
-  /** Deposit additional tokens into the stream (sender only). */
+  /**
+   * Deposit additional tokens into the stream (sender only).
+   *
+   * The primary API: takes a `bigint` amount in stroops and an optional
+   * `signal`. See {@link topUpStream} for the string-typed wrapper.
+   */
   async topUp(streamId: bigint | string, amount: bigint, signal?: AbortSignal): Promise<string> {
     this._ensureCanMutate();
     if (signal?.aborted) throw new DOMException('Aborted', 'AbortError');
@@ -645,7 +650,18 @@ export class StreamsModule {
     return this._invoke(await this._resolveAddr(BigInt(streamId)), 'force_cancel', []);
   }
 
-  /** Alias for topUp. */
+  /**
+   * String-typed convenience wrapper over {@link topUp} — it coerces
+   * `amount` to a `bigint` and delegates, with no behaviour of its own.
+   *
+   * It exists for callers that already hold the amount as a string (form
+   * input, a `CreateStreamParams`-shaped value) and would otherwise have to
+   * convert before calling. **Prefer {@link topUp} in new code**: it is the
+   * primary method, takes the `bigint` amount the SDK uses for every other
+   * on-chain value, and accepts an `AbortSignal`, which this wrapper cannot
+   * forward. This is not a replacement for `topUp` and is not deprecated —
+   * both call the same contract method with the same validation.
+   */
   async topUpStream(streamId: bigint | string, amount: bigint | string): Promise<string> {
     return this.topUp(streamId, BigInt(amount));
   }

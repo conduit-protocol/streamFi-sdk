@@ -205,10 +205,11 @@ await walletAdapter.connect();
 client.setWallet(walletAdapter);
 ```
 
-`setWallet()` only affects `client.streams` — `client.factory` and `client.governor` are
-read-only and keep using `config.keypair` (if any) for simulation fee sourcing. It throws
-`UnsupportedChainError` if the adapter's `chainId` doesn't match the network the client was
-configured for. See [`setWallet`](docs/api.md#clientstreams) in the API reference for details.
+`setWallet()` propagates to `client.streams` and to an already-constructed `client.factory` (whose
+read simulations are sourced from the active wallet). `client.governor` is read-only and keeps
+using `config.keypair` (if any) for simulation fee sourcing. It throws `UnsupportedChainError` if
+the adapter's `chainId` doesn't match the network the client was configured for. See
+[`setWallet`](docs/api.md#clientstreams) in the API reference for details.
 
 ---
 
@@ -502,6 +503,13 @@ const count = await client.factory.streamCount();
 // Stream address by ID
 const address = await client.factory.streamAddress(streamId);
 
+// Addresses for a whole page, in one call — renders a stream list without
+// one RPC round trip per row. Ids already resolved (or cached as
+// not-found) cost nothing; only the cache-miss subset is fetched.
+const { ids } = await client.factory.streamsBySender(sender, 0, 50);
+const addresses = await client.factory.streamAddresses(ids);
+// Map<string, string | null>, keyed by decimal stream-id string
+
 // Protocol fee in basis points (e.g. 30 = 0.3%)
 const feeBps = await client.factory.protocolFeeBps();
 ```
@@ -513,16 +521,22 @@ const feeBps = await client.factory.protocolFeeBps();
 Read protocol configuration:
 
 ```typescript
-const config = await client.governor.config();
+const config = await client.governor.getConfig();
 // Returns:
 // {
 //   feeBps:               number,
 //   feeRecipient?:        string,
 //   minDurationSeconds:   number,
+//   maxDurationSeconds:   number,
 //   maxRatePerSecond:     bigint,
 //   factoryAddress?:      string,
 // }
 ```
+
+The result is reused for `governorConfigCacheTtlMs` (default 30s) — protocol parameters only
+change when a governance proposal passes, so a polling dashboard no longer pays a simulation
+per tick. Set it to `0` to re-simulate on every call, or call
+`client.governor.clearConfigCache()` to force a refresh.
 
 ---
 
