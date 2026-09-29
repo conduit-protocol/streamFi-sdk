@@ -18,12 +18,13 @@ import type {
   StreamConfig,
   StreamOperation,
   FeeEstimate,
+  ValidationResult,
 } from './types/index.js';
 import type { WalletAdapter } from './adapters/types.js';
 import type { Signer } from './signer.js';
 import { KeypairWalletAdapter } from './adapters/keypair.js';
 import { FeeEstimator } from './fee-estimator.js';
-import { toStroops, calculateRate, bigintSafeStringify } from './utils.js';
+import { toStroops, calculateRate, bigintSafeStringify, isValidAddress } from './utils.js';
 import {
   buildContractCallTx,
   scValToI128,
@@ -117,6 +118,143 @@ function warnV1Deprecated(methodName: string, replacement: string): void {
   );
 }
 import { ZERO_ADDR, DEFAULT_LIST_LIMIT, clampListLimit, USDC_ISSUER } from './constants.js';
+
+/**
+ * Standalone pure utility to validate stream parameters before contract invocation
+ * payloads are assembled.
+ *
+ * Checks required fields, address formats, duration/rate constraints, and timing parameters.
+ * Does not perform RPC or network calls.
+ *
+ * @param params - The stream configuration parameters.
+ * @returns A ValidationResult indicating validity and any localized error messages.
+ */
+export function validateStreamParameters(params: StreamConfig): ValidationResult {
+  const errors: string[] = [];
+
+  if (!params || typeof params !== 'object') {
+    return {
+      isValid: false,
+      errors: ['Invalid stream parameters: parameters object is required'],
+      error: 'Invalid stream parameters: parameters object is required',
+    };
+  }
+
+  const {
+    recipient,
+    sender,
+    token,
+    depositAmount,
+    durationSeconds,
+    ratePerSecond,
+    startTime,
+    stopTime: rawStopTime,
+    endTime: rawEndTime,
+  } = params;
+
+  // 1. Validate recipient address (must be valid 56-character Stellar address)
+  if (!recipient || typeof recipient !== 'string' || !recipient.trim()) {
+    errors.push('Invalid recipient address: must be a non-empty string');
+  } else if (recipient.length !== 56 || !isValidAddress(recipient)) {
+    errors.push('Invalid recipient address: must be a valid 56-character Stellar address');
+  }
+
+  // 2. Validate sender address if provided (must be valid 56-character Stellar address)
+  if (sender !== undefined && sender !== null) {
+    if (typeof sender !== 'string' || sender.length !== 56 || !isValidAddress(sender)) {
+      errors.push('Invalid sender address: must be a valid 56-character Stellar address');
+    }
+  }
+
+  // 3. Validate token address
+  if (!token || typeof token !== 'string' || !token.trim()) {
+    errors.push('Invalid token address: must be a non-empty string');
+  } else if (token !== 'native' && token !== 'USDC') {
+    if (token.length !== 56 || !isValidAddress(token)) {
+      errors.push('Invalid token address: must be "native", "USDC", or a valid 56-character Stellar address');
+    }
+  }
+
+  // 4. Validate deposit amount
+  if (!depositAmount || typeof depositAmount !== 'string' || !depositAmount.trim()) {
+    errors.push('Invalid deposit amount: must be a non-empty string');
+  } else {
+    try {
+      const stroops = toStroops(depositAmount);
+      if (stroops <= 0n) {
+        errors.push('Invalid deposit amount: must be a positive number');
+      }
+    } catch {
+      errors.push('Invalid deposit amount: must be a positive number');
+    }
+  }
+
+  // 5. Validate durationSeconds
+  if (durationSeconds !== undefined) {
+    if (typeof durationSeconds !== 'number' || durationSeconds <= 0) {
+      errors.push('Invalid durationSeconds: must be a positive number');
+    } else if (durationSeconds < MIN_STREAM_DURATION_SECONDS) {
+      errors.push(`Invalid durationSeconds: must be at least ${MIN_STREAM_DURATION_SECONDS} seconds (1 hour)`);
+    }
+  }
+
+  // 6. Validate ratePerSecond (> 0)
+  if (ratePerSecond !== undefined) {
+    if (typeof ratePerSecond !== 'string' || !ratePerSecond.trim()) {
+      errors.push('Invalid ratePerSecond: must be a non-empty string');
+    } else {
+      try {
+        const rate = BigInt(ratePerSecond);
+        if (rate <= 0n) {
+          errors.push('Invalid ratePerSecond: must be greater than 0');
+        }
+      } catch {
+        errors.push('Invalid ratePerSecond: must be greater than 0');
+      }
+    }
+  }
+
+  // Either durationSeconds or ratePerSecond (or stopTime/endTime) must be provided
+  if (!durationSeconds && !ratePerSecond && rawStopTime === undefined && rawEndTime === undefined) {
+    errors.push('Either durationSeconds or ratePerSecond must be provided');
+  }
+
+  // 7. Validate startTime and stopTime (> startTime)
+  const now = Math.floor(Date.now() / 1000);
+  if (startTime !== undefined) {
+    if (typeof startTime !== 'number' || !Number.isInteger(startTime)) {
+      errors.push('Invalid startTime: must be an integer Unix timestamp');
+    } else if (startTime < now) {
+      errors.push('Invalid startTime: cannot be in the past');
+    }
+  }
+
+  const effectiveStart = startTime ?? now;
+  let stopTime: number | undefined = rawStopTime ?? rawEndTime;
+  if (
+    stopTime === undefined &&
+    durationSeconds !== undefined &&
+    typeof durationSeconds === 'number' &&
+    durationSeconds > 0
+  ) {
+    stopTime = effectiveStart + durationSeconds;
+  }
+
+  if (stopTime !== undefined) {
+    if (typeof stopTime !== 'number' || !Number.isInteger(stopTime)) {
+      errors.push('Invalid stopTime: must be an integer Unix timestamp');
+    } else if (stopTime <= effectiveStart) {
+      errors.push('Invalid stopTime: stopTime must be greater than startTime');
+    }
+  }
+
+  const isValid = errors.length === 0;
+  return {
+    isValid,
+    errors,
+    ...(errors.length > 0 ? { error: errors[0] } : {}),
+  };
+}
 
 export class StreamsModule {
   private readonly rpcUrl:       string;
@@ -231,42 +369,20 @@ export class StreamsModule {
   async create(params: CreateStreamParams): Promise<CreateStreamResult> {
     warnV1Deprecated('StreamsModule.create()', 'StreamBuilder');
     const senderAddr = await this._getSenderAddress();
+
+    // Client-side validation to prevent invalid payloads
+    const validation = validateStreamParameters(params);
+    if (!validation.isValid) {
+      throw new Error(validation.error ?? 'Invalid stream parameters');
+    }
+
     const {
       recipient, token, depositAmount,
       durationSeconds, ratePerSecond,
       startTime, clawbackEnabled = false,
     } = params;
 
-    // Client-side validation to prevent invalid payloads
-    if (!recipient || typeof recipient !== 'string' || !recipient.trim()) {
-      throw new Error('Invalid recipient address: must be a non-empty string');
-    }
-    if (!token || typeof token !== 'string' || !token.trim()) {
-      throw new Error('Invalid token address: must be a non-empty string');
-    }
-    if (!depositAmount || typeof depositAmount !== 'string' || !depositAmount.trim()) {
-      throw new Error('Invalid deposit amount: must be a non-empty string');
-    }
-    if (durationSeconds !== undefined && (typeof durationSeconds !== 'number' || durationSeconds <= 0)) {
-      throw new Error('Invalid durationSeconds: must be a positive number');
-    }
-    if (durationSeconds !== undefined && durationSeconds < MIN_STREAM_DURATION_SECONDS) {
-      throw new Error(`Invalid durationSeconds: must be at least ${MIN_STREAM_DURATION_SECONDS} seconds (1 hour)`);
-    }
-    if (ratePerSecond !== undefined && (typeof ratePerSecond !== 'string' || !ratePerSecond.trim())) {
-      throw new Error('Invalid ratePerSecond: must be a non-empty string');
-    }
-    if (!durationSeconds && !ratePerSecond) {
-      throw new Error('Either durationSeconds or ratePerSecond must be provided');
-    }
-
     const factoryId = this.config.factoryAddress ?? '';
-
-    
-    const now = Math.floor(Date.now() / 1000);
-    if (startTime !== undefined && startTime < now) {
-      throw new Error('Invalid startTime: cannot be in the past');
-    }
 
     let resolvedToken = token;
     if (token === 'native') {
@@ -499,30 +615,16 @@ export class StreamsModule {
 
     const built = await Promise.all(configs.map(async (params, index) => {
       try {
+        const validation = validateStreamParameters(params);
+        if (!validation.isValid) {
+          throw new Error(validation.error ?? 'Invalid stream parameters');
+        }
+
         const {
           recipient, token, depositAmount,
           durationSeconds, ratePerSecond,
           startTime, clawbackEnabled = false,
         } = params;
-
-        if (!recipient || typeof recipient !== 'string' || !recipient.trim()) {
-          throw new Error('Invalid recipient address: must be a non-empty string');
-        }
-        if (!token || typeof token !== 'string' || !token.trim()) {
-          throw new Error('Invalid token address: must be a non-empty string');
-        }
-        if (!depositAmount || typeof depositAmount !== 'string' || !depositAmount.trim()) {
-          throw new Error('Invalid deposit amount: must be a non-empty string');
-        }
-        if (durationSeconds !== undefined && (typeof durationSeconds !== 'number' || durationSeconds <= 0)) {
-          throw new Error('Invalid durationSeconds: must be a positive number');
-        }
-        if (ratePerSecond !== undefined && (typeof ratePerSecond !== 'string' || !ratePerSecond.trim())) {
-          throw new Error('Invalid ratePerSecond: must be a non-empty string');
-        }
-        if (!durationSeconds && !ratePerSecond) {
-          throw new Error('Either durationSeconds or ratePerSecond must be provided');
-        }
 
         const decimals = await getTokenDecimals(this.rpcUrl, this.passphrase, senderAddr, token);
         const depositStroops = toStroops(depositAmount, decimals);

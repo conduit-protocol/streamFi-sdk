@@ -92,6 +92,12 @@ export interface CreateStreamParams {
   durationSeconds?: number;
   /** Unix timestamp; defaults to current ledger time */
   startTime?: number;
+  /** Optional stop/end time (Unix timestamp) */
+  stopTime?: number;
+  /** Optional stop/end time alias (Unix timestamp) */
+  endTime?: number;
+  /** Optional sender address */
+  sender?: string;
   /** Whether the sender can claw back unstreamed tokens */
   clawbackEnabled?: boolean;
   /** Override rate in stroops/s (mutually exclusive with durationSeconds) */
@@ -100,6 +106,12 @@ export interface CreateStreamParams {
 
 /** Configuration for a single stream in a batch creation. */
 export type StreamConfig = CreateStreamParams;
+
+export interface ValidationResult {
+  isValid: boolean;
+  errors: string[];
+  error?: string;
+}
 
 export interface CreateStreamResult {
   streamId:      bigint;
