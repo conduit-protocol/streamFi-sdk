@@ -12,6 +12,7 @@ export type { WithRetryOptions } from './with-retry.js';
 export {
   buildBatchTransactions,
   buildBatchTransactionsSync,
+  preBatchSimulate,
   BatchBuildError,
   BatchPartiallySubmittedError,
   submitBatch,
@@ -24,6 +25,8 @@ export type {
   BatchTxOutcome,
   BatchTxStatus,
   BatchSubmitOptions,
+  BatchSimulationResult,
+  BuildableOperation,
 } from './batch-tx.js';
 export { GraphQLIndexer, DEFAULT_INDEXER_TIMEOUT_MS, DEFAULT_INDEXER_MAX_PAGES } from './indexer.js';
 export { MockGraphQLIndexer, createMockIndexer } from './mock-indexer.js';
