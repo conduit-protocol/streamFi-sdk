@@ -41,6 +41,7 @@ import {
   DEFAULT_CONFIRMATION_MAX_ATTEMPTS,
   DEFAULT_CONFIRMATION_POLL_INTERVAL_MS,
   createRpcServer,
+  pollForConfirmation,
   resolveFee,
 } from './soroban.js';
 import {
@@ -1289,23 +1290,17 @@ export class StreamsModule {
     const hash = sent.hash;
     const maxAttempts = this.config.confirmationMaxAttempts ?? DEFAULT_CONFIRMATION_MAX_ATTEMPTS;
     const pollIntervalMs = this.config.confirmationPollIntervalMs ?? DEFAULT_CONFIRMATION_POLL_INTERVAL_MS;
-    for (let i = 0; i < maxAttempts; i++) {
-      await sleep(pollIntervalMs);
-      if (signal?.aborted) throw new DOMException("Aborted", "AbortError");
-      let s;
-      try {
-        s = await catchNetworkError('getTransaction', server.getTransaction(hash));
-      } catch (err) {
-        throw RateLimitError.fromRpcError(err) ?? err;
-      }
-      if (s.status === SorobanRpc.Api.GetTransactionStatus.SUCCESS) {
-        return { hash, returnValue: s.returnValue };
-      }
-      if (s.status === SorobanRpc.Api.GetTransactionStatus.FAILED) {
+    const outcome = await pollForConfirmation(server, hash, { pollIntervalMs, maxAttempts, signal });
+    switch (outcome.kind) {
+      case 'success':
+        return { hash, returnValue: outcome.returnValue };
+      case 'failed':
         throw new Error(`Transaction failed: ${hash}`);
-      }
+      case 'poll-error':
+        throw RateLimitError.fromRpcError(outcome.error) ?? outcome.error;
+      case 'timeout':
+        throw new Error(`Transaction timed out: ${hash}`);
     }
-    throw new Error(`Transaction timed out: ${hash}`);
   }
 }
 
@@ -1352,8 +1347,4 @@ export function parseStreamInfo(id: bigint, address: string, val: xdr.ScVal): St
   };
   (info as StreamInfo & { toJSON(): Record<string, unknown> }).toJSON = () => bigintSafeStringify(info as unknown as Record<string, unknown>);
   return info;
-}
-
-function sleep(ms: number): Promise<void> {
-  return new Promise(r => setTimeout(r, ms));
 }

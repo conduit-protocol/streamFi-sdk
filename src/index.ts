@@ -113,6 +113,8 @@ export { TokenModule } from './token.js';
 
 // RPC server lifecycle
 export { getServer, clearServerCache, resolveFee } from './soroban.js';
+export { waitForConfirmation } from './soroban.js';
+export type { WaitForConfirmationOptions, ConfirmedTransaction } from './soroban.js';
 export {
   getTokenDecimals,
   clearTokenDecimalsCache,

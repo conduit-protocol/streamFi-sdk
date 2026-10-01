@@ -504,6 +504,41 @@ deployed `DripGovernor` values for production use.
 
 ---
 
+## Waiting for confirmation
+
+### `waitForConfirmation(rpcUrl, txHash, options?) → Promise<ConfirmedTransaction>`
+
+Waits for an already-submitted transaction to confirm. Use it when you submit
+a transaction yourself (a raw `sendTransaction` call, or a wallet's own
+submission flow) and still want the SDK's poll-until-confirmed behavior. It is
+the same loop `StreamsModule` uses internally after it submits a transaction.
+
+| Option | Type | Default | Notes |
+| --- | --- | --- | --- |
+| `pollIntervalMs` | `number` | `1000` | Wait before each poll. |
+| `maxAttempts` | `number` | `30` | Polls before giving up. |
+| `signal` | `AbortSignal` | — | Abort the wait. |
+
+```typescript
+import { waitForConfirmation } from '@conduit-protocol/sdk';
+
+// `hash` came from a sendTransaction call made outside the SDK.
+const confirmed = await waitForConfirmation(rpcUrl, hash, {
+  pollIntervalMs: 2_000,
+  maxAttempts: 20,
+  signal: AbortSignal.timeout(60_000),
+});
+console.log(confirmed.returnValue);
+```
+
+Resolves with `{ hash, returnValue }` once the transaction succeeds. Rejects
+with an `Error` (`Transaction failed: <hash>`) if it fails,
+`ConfirmationTimeoutError` if it does not confirm within `maxAttempts` polls,
+an `AbortError` if `signal` aborts, and `RateLimitError` (or the underlying
+error) if the RPC call fails.
+
+---
+
 ## Utility functions
 
 ```typescript
