@@ -931,6 +931,7 @@ export class ConfirmationTimeoutError extends Error {
  * - {@link BackdatedStreamError}
  * - {@link ConfirmationTimeoutError}
  * - {@link ValidationError}
+ * - {@link IndexerMaxPagesExceededError}
  */
 export function isConduitError(value: unknown): value is Error {
   if (!(value instanceof Error)) return false;
@@ -954,6 +955,7 @@ export function isConduitError(value: unknown): value is Error {
     'BackdatedStreamError',
     'ConfirmationTimeoutError',
     'ValidationError',
+    'IndexerMaxPagesExceededError',
    ].includes(value.name);
 }
 
@@ -1139,6 +1141,50 @@ export class ValidationError extends Error {
     super(summary);
     this.name = 'ValidationError';
     this.issues = Object.freeze(issues.slice());
+    Object.setPrototypeOf(this, new.target.prototype);
+  }
+}
+
+/**
+ * Thrown by {@link GraphQLIndexer.fetchAll} when the paginated query
+ * accumulates more pages than the configured maximum
+ * (`DEFAULT_INDEXER_MAX_PAGES`, 1 000 by default), preventing runaway
+ * memory usage or accidental full-table scans.
+ *
+ * Consumers can distinguish this from network failures or timeouts with a
+ * standard `instanceof` check:
+ *
+ * @example
+ * ```ts
+ * try {
+ *   const rows = await indexer.fetchAll({ query, getNextCursor });
+ * } catch (err) {
+ *   if (err instanceof IndexerMaxPagesExceededError) {
+ *     console.error(
+ *       `Query aborted after ${err.attemptedPages} pages ` +
+ *       `(limit is ${err.maxPages}).`,
+ *     );
+ *   }
+ * }
+ * ```
+ *
+ * See #801.
+ */
+export class IndexerMaxPagesExceededError extends Error {
+  /** The number of pages that had been fetched when the limit was hit. */
+  readonly attemptedPages: number;
+  /** The maximum number of pages that was configured. */
+  readonly maxPages: number;
+
+  constructor(attemptedPages: number, maxPages: number) {
+    super(
+      `GraphQLIndexer.fetchAll exceeded the maximum page limit of ${maxPages} ` +
+      `(fetched ${attemptedPages} pages). ` +
+      `Refine your query filters or increase the limit via fetchAllOptions.maxPages.`,
+    );
+    this.name = 'IndexerMaxPagesExceededError';
+    this.attemptedPages = attemptedPages;
+    this.maxPages = maxPages;
     Object.setPrototypeOf(this, new.target.prototype);
   }
 }

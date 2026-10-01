@@ -5,6 +5,7 @@ export type {
   BatchOperation,
   BatchExecuteOptions,
   BatchExecuteAsyncOptions,
+  BatchChunkProgress,
   BatchResult,
 } from './builder.js';
 export { withRetry, isTransientRpcError } from './with-retry.js';
@@ -22,6 +23,7 @@ export type {
   BuiltBatchTransaction,
   ScValType,
   BatchSubmitResult,
+  BatchSubmitOutcome,
   BatchTxOutcome,
   BatchTxStatus,
   BatchSubmitOptions,
@@ -63,6 +65,7 @@ export {
    GovernorInvalidParamError,
    BackdatedStreamError,
    ConfirmationTimeoutError,
+   IndexerMaxPagesExceededError,
    isConduitError,
    SUPPORTED_NETWORKS,
    CAIP2_TO_NETWORK,

@@ -355,9 +355,11 @@ export class StreamsModule {
     if (token === 'native') {
       resolvedToken = Asset.native().contractId(this.passphrase);
     } else if (token === 'USDC') {
-      const issuer = this.passphrase.includes('Test SDF Network')
-        ? USDC_ISSUER.testnet
-        : USDC_ISSUER.mainnet;
+      // Resolve the issuer by network name, not by passphrase substring.
+      // The passphrase check silently fell through to the mainnet issuer for
+      // 'local' networks (their passphrase never includes 'Test SDF Network').
+      // USDC_ISSUER.local is a getter that throws a clear error. See #804.
+      const issuer = USDC_ISSUER[this.config.network];
       resolvedToken = new Asset('USDC', issuer).contractId(this.passphrase);
     }
 

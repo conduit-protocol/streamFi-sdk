@@ -1,4 +1,4 @@
-import { ConduitError, UNKNOWN_CONTRACT_ERROR_CODE } from './errors.js';
+import { ConduitError, IndexerMaxPagesExceededError, UNKNOWN_CONTRACT_ERROR_CODE } from './errors.js';
 import { IndexerTimeoutError, OperationAbortedError } from './errors.js';
 import { bigintSafeStringify } from './utils.js';
 
@@ -89,8 +89,38 @@ interface GraphQLServerMessage {
  * `dashboard/transaction-history.ts` and `examples/dashboard/.../apollo-client.ts`).
  */
 export const DEFAULT_INDEXER_TIMEOUT_MS = 15_000;
-/** Maximum number of pages fetched by {@link GraphQLIndexer.fetchAll}. */
+
+/**
+ * The default upper bound on the number of pages {@link GraphQLIndexer.fetchAll}
+ * will request before throwing an {@link IndexerMaxPagesExceededError}.
+ * Override per-call via `fetchAllOptions.maxPages`.
+ */
 export const DEFAULT_INDEXER_MAX_PAGES = 1_000;
+
+/**
+ * Options accepted by {@link GraphQLIndexer.fetchAll} (typed variant).
+ */
+export interface FetchAllOptions<TPage> {
+  /**
+   * The initial GraphQL query options (same shape as {@link GraphQLQueryOptions}).
+   * `variables` will be merged with `{ cursor }` on every subsequent page.
+   */
+  query: string;
+  variables?: Record<string, unknown>;
+  headers?: Record<string, string>;
+  /**
+   * Called after each page is fetched. Return the cursor string to use for
+   * the next page, or `null` / `undefined` when there are no more pages.
+   */
+  getNextCursor: (page: TPage) => string | null | undefined;
+  /**
+   * Maximum number of pages to fetch before throwing
+   * {@link IndexerMaxPagesExceededError}. Defaults to
+   * {@link DEFAULT_INDEXER_MAX_PAGES} (1 000).
+   */
+  maxPages?: number;
+}
+
 /**
  * Computes the SHA-256 hex digest of `input` using the Web Crypto API,
  * falling back to Node's `crypto` module when `crypto.subtle` is not
@@ -292,8 +322,12 @@ export class GraphQLIndexer {
    * The response is expected to contain one collection with an `items`,
    * `nodes`, or `results` array and GraphQL-style `pageInfo`. The helper
    * preserves the original query and updates its `variables.cursor` value.
+   *
+   * @deprecated Use the typed {@link fetchAll} overload with {@link FetchAllOptions}
+   * and a `getNextCursor` callback instead, which provides stronger types and
+   * throws {@link IndexerMaxPagesExceededError} on page-limit violations.
    */
-  async fetchAll(options: GraphQLQueryOptions): Promise<unknown[]> {
+  async fetchAllAuto(options: GraphQLQueryOptions): Promise<unknown[]> {
     const results: unknown[] = [];
     let cursor: unknown = options.variables?.cursor;
 
@@ -304,21 +338,21 @@ export class GraphQLIndexer {
       });
       const collection = findPaginatedCollection(data);
       if (!collection) {
-        throw new Error('GraphQLIndexer.fetchAll expected a paginated collection response');
+        throw new Error('GraphQLIndexer.fetchAllAuto expected a paginated collection response');
       }
       results.push(...collection.items);
 
       if (!collection.hasNextPage) return results;
       if (typeof collection.endCursor !== 'string' || collection.endCursor.length === 0) {
-        throw new Error('GraphQLIndexer.fetchAll received a page with no next cursor');
+        throw new Error('GraphQLIndexer.fetchAllAuto received a page with no next cursor');
       }
       if (collection.endCursor === cursor) {
-        throw new Error('GraphQLIndexer.fetchAll received an unchanged pagination cursor');
+        throw new Error('GraphQLIndexer.fetchAllAuto received an unchanged pagination cursor');
       }
       cursor = collection.endCursor;
     }
 
-    throw new Error(`GraphQLIndexer.fetchAll exceeded the maximum page limit of ${DEFAULT_INDEXER_MAX_PAGES}`);
+    throw new IndexerMaxPagesExceededError(DEFAULT_INDEXER_MAX_PAGES, DEFAULT_INDEXER_MAX_PAGES);
   }
 
   /**
@@ -676,6 +710,60 @@ export class GraphQLIndexer {
     }
 
     return subscription;
+  }
+
+  /**
+   * Fetches all pages of a paginated GraphQL query and returns the
+   * accumulated results as a single array.
+   *
+   * Each successive page is requested by merging the cursor returned by
+   * `getNextCursor` into the query variables as `{ cursor }`. Pagination
+   * stops when `getNextCursor` returns `null` or `undefined`.
+   *
+   * Throws {@link IndexerMaxPagesExceededError} (not a plain `Error`) if more
+   * than `maxPages` (default {@link DEFAULT_INDEXER_MAX_PAGES}) pages are
+   * required, so callers can `instanceof`-check for the page-limit case
+   * independently of network failures or timeouts. See #801.
+   *
+   * @example
+   * ```ts
+   * const rows = await indexer.fetchAll<{ transfers: Transfer[] }>({
+   *   query: LIST_TRANSFERS_QUERY,
+   *   variables: { limit: 100 },
+   *   getNextCursor: (page) => page.transfers.at(-1)?.cursor ?? null,
+   * });
+   * ```
+   */
+  async fetchAll<TPage>(options: FetchAllOptions<TPage>): Promise<TPage[]> {
+    const maxPages = options.maxPages ?? DEFAULT_INDEXER_MAX_PAGES;
+    const pages: TPage[] = [];
+    let cursor: string | null | undefined = undefined;
+    let pagesFetched = 0;
+
+    while (true) {
+      if (pagesFetched >= maxPages) {
+        throw new IndexerMaxPagesExceededError(pagesFetched, maxPages);
+      }
+
+      const variables: Record<string, unknown> = {
+        ...options.variables,
+        ...(cursor != null ? { cursor } : {}),
+      };
+
+      const result = await this.query({
+        query: options.query,
+        variables,
+        ...(options.headers != null ? { headers: options.headers } : {}),
+      });
+
+      pages.push(result as TPage);
+      pagesFetched += 1;
+
+      cursor = options.getNextCursor(result as TPage);
+      if (cursor == null) break;
+    }
+
+    return pages;
   }
 
   getSubscriptionCount(): number {

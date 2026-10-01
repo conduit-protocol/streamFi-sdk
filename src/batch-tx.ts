@@ -476,6 +476,18 @@ export interface BatchTxOutcome {
   dryRun?: boolean;
 }
 
+/** Per-transaction outcome produced by {@link submitBatch} (simple parallel variant). */
+export interface BatchSubmitOutcome {
+  /** The transaction's position in the original operations array. */
+  index: number;
+  /** `true` when the network accepted the transaction. */
+  success: boolean;
+  /** Transaction hash returned by the RPC node, when available. */
+  hash?: string;
+  /** Error message when `success` is `false`. */
+  error?: string;
+}
+
 /** Overall result returned by {@link submitBatch}. */
 export interface BatchSubmitResult {
   /**
@@ -489,6 +501,12 @@ export interface BatchSubmitResult {
    */
   firstFailureIndex: number;
   outcomes: BatchTxOutcome[];
+  /** Per-transaction outcomes (simple parallel variant). */
+  simpleOutcomes?: BatchSubmitOutcome[];
+  /** Number of transactions the network accepted. */
+  successCount?: number;
+  /** Number of transactions that failed. */
+  failureCount?: number;
 }
 
 /**
@@ -501,17 +519,64 @@ export class BatchPartiallySubmittedError extends Error {
   readonly skippedIndices: number[];
   readonly result: BatchSubmitResult;
 
-  constructor(result: BatchSubmitResult) {
+  /**
+   * The built transactions that were passed to {@link submitBatch}.
+   * Retained so {@link getFailedOperations} can correlate outcomes back to
+   * the caller's original operation list.
+   */
+  readonly builtTransactions: BuiltBatchTransaction[];
+
+  constructor(result: BatchSubmitResult, builtTransactions?: BuiltBatchTransaction[]) {
     super(
-      `Batch submission failed at transaction ${result.firstFailureIndex}. ` +
-      `${result.outcomes.filter(o => o.status === 'SKIPPED').length} transaction(s) skipped.`,
+      result.firstFailureIndex !== undefined && result.firstFailureIndex !== -1
+        ? `Batch submission failed at transaction ${result.firstFailureIndex}. ` +
+          `${result.outcomes.filter(o => o.status === 'SKIPPED').length} transaction(s) skipped.`
+        : `Batch partially submitted: ${result.failureCount ?? 0} of ${result.outcomes.length} transaction(s) failed. ` +
+          `Call getFailedOperations(originalOperations) to get the failed subset for retry.`,
     );
     this.name = 'BatchPartiallySubmittedError';
-    this.firstFailureIndex = result.firstFailureIndex;
+    this.firstFailureIndex = result.firstFailureIndex ?? -1;
     this.skippedIndices = result.outcomes
       .filter(o => o.status === 'SKIPPED')
       .map(o => o.index);
     this.result = result;
+    this.builtTransactions = builtTransactions ?? [];
+    Object.setPrototypeOf(this, new.target.prototype);
+  }
+
+  /**
+   * Returns the subset of `originalOperations` whose transactions failed,
+   * preserving the original order.
+   *
+   * Pass the same array you supplied to {@link buildBatchTransactions} that
+   * produced the built transactions stored in {@link builtTransactions}.
+   * The returned array is ready to feed directly back into
+   * `buildBatchTransactions` + `submitBatch` for a retry.
+   *
+   * @param originalOperations - The full list of operations that was passed to
+   *   `buildBatchTransactions`. Must be indexable by the `index` field on each
+   *   {@link BuiltBatchTransaction}.
+   */
+  getFailedOperations<T extends { method: string; params?: Record<string, unknown>; args?: unknown[] }>(
+    originalOperations: T[],
+  ): T[] {
+    const failedIndices = new Set(
+      this.result.outcomes
+        .filter(o => o.status === 'FAILED' || o.status === 'ERROR')
+        .map(o => o.index),
+    );
+    return this.builtTransactions
+      .filter(tx => failedIndices.has(tx.index))
+      .map(tx => {
+        const op = originalOperations[tx.index];
+        if (op === undefined) {
+          throw new RangeError(
+            `getFailedOperations: no operation at index ${tx.index}. ` +
+            `Make sure originalOperations is the same array passed to buildBatchTransactions.`,
+          );
+        }
+        return op;
+      });
   }
 }
 
@@ -549,6 +614,12 @@ export interface BatchSubmitOptions {
   dryRun?: boolean;
   /** When true, throws BatchPartiallySubmittedError if any tx fails. Default false. */
   throwOnError?: boolean;
+  /**
+   * When `true` and at least one transaction fails, throw a
+   * {@link BatchPartiallySubmittedError} instead of returning the aggregate
+   * result. Defaults to `false`.
+   */
+  throwOnPartial?: boolean;
 }
 
 const DEFAULT_SUBMIT_POLL_INTERVAL_MS = 1_000;
@@ -720,15 +791,21 @@ export async function submitBatch(
     }
   }
 
-  const result = {
+  const successCount = outcomes.filter(o => o.status === 'SUCCESS').length;
+  const failureCount = outcomes.length - successCount;
+
+  const result: BatchSubmitResult = {
     allSucceeded:      firstFailureIndex === -1,
     firstFailureIndex,
     outcomes,
+    successCount,
+    failureCount,
   };
 
-  if (options.throwOnError && !result.allSucceeded) {
-    throw new BatchPartiallySubmittedError(result);
+  if ((options.throwOnError || options.throwOnPartial) && !result.allSucceeded) {
+    throw new BatchPartiallySubmittedError(result, transactions);
   }
 
   return result;
 }
+
