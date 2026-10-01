@@ -54,6 +54,16 @@ All notable changes are documented here. Format based on [Keep a Changelog](http
 
 
 ### Documentation
+- Added an error-code collision warning to `ConduitError.fromContractError()`
+  and `ConduitError.fromSorobanMessage()` so callers are reminded to pass the
+  contract that produced the error; the same numeric code has different
+  meanings across the stream, factory, and governor contracts (#790).
+- Documented the relationship between `StreamsModule.topUp()` and
+  `StreamsModule.topUpStream()`: `topUpStream()` is the string-argument
+  convenience wrapper for `topUp()`, while both perform the same stream
+  deposit operation. New integrations should use whichever argument type best
+  matches their input, and upgrades do not require a migration between them
+  (#791).
 - Removed non-existent `contracts/*-abi.ts` entry from `docs/architecture.md` module map (#440).
 - Replaced orphaned `MAX_ROOM_SIZE` `.env.example` with a comprehensive SDK environment configuration template and updated `README.md` (#441).
 - Added an API reference section for `GraphQLIndexer`, which was previously exported but undocumented.
