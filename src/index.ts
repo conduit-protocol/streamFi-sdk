@@ -68,7 +68,7 @@ export {
    IndexerMaxPagesExceededError,
    isConduitError,
    SUPPORTED_NETWORKS,
-   CAIP2_TO_NETWORK,
+   CAI2_TO_NETWORK,
    UNKNOWN_CONTRACT_ERROR_CODE,
  } from './errors.js';
  export type { ConduitContract, StreamLifecycleState, SorobanDiagnosticInfo } from './errors.js';
@@ -127,7 +127,7 @@ export {
   getTokenDecimalsCacheMetrics,
   resetTokenDecimalsCacheMetrics,
 } from './soroban.js';
-export { getCircuitState, recordSuccess, recordFailure, resetCircuit, getAllCircuitStates, type CircuitState, type CircuitStatus } from "./rpc-circuit-state.js";
+export { getCircuitState, recordSuccess, recordFailure, resetCircuit, getAllCircuitStates, onCircuitChange, onCircuitStateChange, type CircuitState, type CircuitStatus } from "./rpc-circuit-state.js";
 
 export {
   formatAddress,
