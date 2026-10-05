@@ -267,6 +267,63 @@ also exposes `refetch()` and `reset()`.
 
 ---
 
+## useStreamCountdown
+
+Live countdown to a cliff, cancellation, or completion deadline. The hook
+ticks once per second, so a vesting or payroll card can render the remaining
+time without wiring up its own timer.
+
+`targetTimestamp` and the optional `startTimestamp` are Unix timestamps in
+**seconds** (the same unit as `StreamInfo.startTime` / `StreamInfo.endTime`),
+not milliseconds.
+
+```tsx
+import { useStreamCountdown } from '@streamfi/react';
+
+function CliffCountdown({ stream }) {
+  const { days, hours, minutes, seconds, isPast, progressFraction } =
+    useStreamCountdown(stream.endTime, stream.startTime);
+
+  if (isPast) return <p>Stream complete — everything has unlocked.</p>;
+
+  return (
+    <div>
+      <p>
+        {days}d {hours}h {minutes}m {seconds}s remaining
+      </p>
+      {progressFraction !== null && (
+        <progress value={progressFraction} max={1} />
+      )}
+    </div>
+  );
+}
+```
+
+### Return Type
+
+```ts
+interface UseStreamCountdownResult {
+  days: number;
+  hours: number;
+  minutes: number;
+  seconds: number;
+  isPast: boolean;
+  progressFraction: number | null;
+}
+```
+
+### Parameters
+
+- `targetTimestamp`: The deadline to count down to, in Unix seconds. Pass
+  `null` or `undefined` to render a zeroed, not-yet-started state (handy
+  while a stream is still loading).
+- `startTimestamp` (optional): The start of the window, in Unix seconds.
+  Supplying it adds `progressFraction` — the elapsed share of the window,
+  clamped to `0`-`1`. Without it `progressFraction` is `null`, since a
+  deadline alone cannot define a range.
+
+---
+
 ## Error Handling
 
 Each hook exposes an `error` field that captures:

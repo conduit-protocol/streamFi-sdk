@@ -4,7 +4,7 @@ import {
   onCircuitChange,
   resetCircuit,
   type CircuitStatus,
-} from '../../src/rpc-circuit-state.js';
+} from '../../../../src/rpc-circuit-state.js';
 
 export interface UseCircuitStateResult {
   /** Current circuit status for the given scope. */
