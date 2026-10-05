@@ -18,12 +18,13 @@ import type {
   StreamConfig,
   StreamOperation,
   FeeEstimate,
+  ValidationResult,
 } from './types/index.js';
 import type { WalletAdapter } from './adapters/types.js';
 import type { Signer } from './signer.js';
 import { KeypairWalletAdapter } from './adapters/keypair.js';
 import { FeeEstimator } from './fee-estimator.js';
-import { toStroops, calculateRate, bigintSafeStringify } from './utils.js';
+import { toStroops, calculateRate, bigintSafeStringify, isValidAddress } from './utils.js';
 import {
   buildContractCallTx,
   scValToI128,
@@ -40,6 +41,7 @@ import {
   DEFAULT_CONFIRMATION_MAX_ATTEMPTS,
   DEFAULT_CONFIRMATION_POLL_INTERVAL_MS,
   createRpcServer,
+  pollForConfirmation,
   resolveFee,
 } from './soroban.js';
 import {
@@ -51,6 +53,7 @@ import {
 import { buildBatchTransactions } from './batch-tx.js';
 import type { BatchTransactionContext } from './batch-tx.js';
 import { FactoryModule } from './factory.js';
+import { mapWithConcurrency, DEFAULT_LIST_CONCURRENCY } from './map-with-concurrency.js';
 import {
   ConduitError,
   RateLimitError,
@@ -67,32 +70,6 @@ import {
  * Tracks which v1-deprecated methods have already warned this session, so
  * repeated calls (e.g. in a hot loop) do not spam the console.
  */
-/** Default concurrency limit for bounded page-fetching (Issue #549). */
-const DEFAULT_LIST_CONCURRENCY = 8;
-
-/**
- * Runs `fn` over `items` with at most `concurrency` in-flight calls.
- * Preserves result ordering to match a naive `Promise.all` fan-out.
- */
-async function mapWithConcurrency<T, R>(
-  items: T[],
-  concurrency: number,
-  fn: (item: T) => Promise<R>,
-): Promise<R[]> {
-  const results = new Array<R>(items.length);
-  let index = 0;
-
-  async function worker() {
-    while (index < items.length) {
-      const i = index++;
-      results[i] = await fn(items[i]!);
-    }
-  }
-
-  const workers = Array.from({ length: Math.min(concurrency, items.length) }, () => worker());
-  await Promise.all(workers);
-  return results;
-}
 
 const _warnedDeprecations = new Set<string>();
 
@@ -118,6 +95,143 @@ function warnV1Deprecated(methodName: string, replacement: string): void {
 }
 import { ZERO_ADDR, DEFAULT_LIST_LIMIT, clampListLimit, USDC_ISSUER } from './constants.js';
 
+/**
+ * Standalone pure utility to validate stream parameters before contract invocation
+ * payloads are assembled.
+ *
+ * Checks required fields, address formats, duration/rate constraints, and timing parameters.
+ * Does not perform RPC or network calls.
+ *
+ * @param params - The stream configuration parameters.
+ * @returns A ValidationResult indicating validity and any localized error messages.
+ */
+export function validateStreamParameters(params: StreamConfig): ValidationResult {
+  const errors: string[] = [];
+
+  if (!params || typeof params !== 'object') {
+    return {
+      isValid: false,
+      errors: ['Invalid stream parameters: parameters object is required'],
+      error: 'Invalid stream parameters: parameters object is required',
+    };
+  }
+
+  const {
+    recipient,
+    sender,
+    token,
+    depositAmount,
+    durationSeconds,
+    ratePerSecond,
+    startTime,
+    stopTime: rawStopTime,
+    endTime: rawEndTime,
+  } = params;
+
+  // 1. Validate recipient address (must be valid 56-character Stellar address)
+  if (!recipient || typeof recipient !== 'string' || !recipient.trim()) {
+    errors.push('Invalid recipient address: must be a non-empty string');
+  } else if (recipient.length !== 56 || !isValidAddress(recipient)) {
+    errors.push('Invalid recipient address: must be a valid 56-character Stellar address');
+  }
+
+  // 2. Validate sender address if provided (must be valid 56-character Stellar address)
+  if (sender !== undefined && sender !== null) {
+    if (typeof sender !== 'string' || sender.length !== 56 || !isValidAddress(sender)) {
+      errors.push('Invalid sender address: must be a valid 56-character Stellar address');
+    }
+  }
+
+  // 3. Validate token address
+  if (!token || typeof token !== 'string' || !token.trim()) {
+    errors.push('Invalid token address: must be a non-empty string');
+  } else if (token !== 'native' && token !== 'USDC') {
+    if (token.length !== 56 || !isValidAddress(token)) {
+      errors.push('Invalid token address: must be "native", "USDC", or a valid 56-character Stellar address');
+    }
+  }
+
+  // 4. Validate deposit amount
+  if (!depositAmount || typeof depositAmount !== 'string' || !depositAmount.trim()) {
+    errors.push('Invalid deposit amount: must be a non-empty string');
+  } else {
+    try {
+      const stroops = toStroops(depositAmount);
+      if (stroops <= 0n) {
+        errors.push('Invalid deposit amount: must be a positive number');
+      }
+    } catch {
+      errors.push('Invalid deposit amount: must be a positive number');
+    }
+  }
+
+  // 5. Validate durationSeconds
+  if (durationSeconds !== undefined) {
+    if (typeof durationSeconds !== 'number' || durationSeconds <= 0) {
+      errors.push('Invalid durationSeconds: must be a positive number');
+    } else if (durationSeconds < MIN_STREAM_DURATION_SECONDS) {
+      errors.push(`Invalid durationSeconds: must be at least ${MIN_STREAM_DURATION_SECONDS} seconds (1 hour)`);
+    }
+  }
+
+  // 6. Validate ratePerSecond (> 0)
+  if (ratePerSecond !== undefined) {
+    if (typeof ratePerSecond !== 'string' || !ratePerSecond.trim()) {
+      errors.push('Invalid ratePerSecond: must be a non-empty string');
+    } else {
+      try {
+        const rate = BigInt(ratePerSecond);
+        if (rate <= 0n) {
+          errors.push('Invalid ratePerSecond: must be greater than 0');
+        }
+      } catch {
+        errors.push('Invalid ratePerSecond: must be greater than 0');
+      }
+    }
+  }
+
+  // Either durationSeconds or ratePerSecond (or stopTime/endTime) must be provided
+  if (!durationSeconds && !ratePerSecond && rawStopTime === undefined && rawEndTime === undefined) {
+    errors.push('Either durationSeconds or ratePerSecond must be provided');
+  }
+
+  // 7. Validate startTime and stopTime (> startTime)
+  const now = Math.floor(Date.now() / 1000);
+  if (startTime !== undefined) {
+    if (typeof startTime !== 'number' || !Number.isInteger(startTime)) {
+      errors.push('Invalid startTime: must be an integer Unix timestamp');
+    } else if (startTime < now) {
+      errors.push('Invalid startTime: cannot be in the past');
+    }
+  }
+
+  const effectiveStart = startTime ?? now;
+  let stopTime: number | undefined = rawStopTime ?? rawEndTime;
+  if (
+    stopTime === undefined &&
+    durationSeconds !== undefined &&
+    typeof durationSeconds === 'number' &&
+    durationSeconds > 0
+  ) {
+    stopTime = effectiveStart + durationSeconds;
+  }
+
+  if (stopTime !== undefined) {
+    if (typeof stopTime !== 'number' || !Number.isInteger(stopTime)) {
+      errors.push('Invalid stopTime: must be an integer Unix timestamp');
+    } else if (stopTime <= effectiveStart) {
+      errors.push('Invalid stopTime: stopTime must be greater than startTime');
+    }
+  }
+
+  const isValid = errors.length === 0;
+  return {
+    isValid,
+    errors,
+    ...(errors.length > 0 ? { error: errors[0] } : {}),
+  };
+}
+
 export class StreamsModule {
   private readonly rpcUrl:       string;
   private readonly passphrase:   string;
@@ -131,15 +245,6 @@ export class StreamsModule {
    * Resolved once from `config.fee` / `config.feeMultiplier` (see #509).
    */
   private readonly _fee: string;
-
-  /**
-   * Session-scoped cache of stream ID → contract address resolutions.
-   * Avoids a redundant factory RPC on every get/withdraw/cancel/pause/resume/topUp/clawback call
-   * for the same stream within a single StreamsModule lifetime. The cache is
-   * intentionally not invalidated on writes — a stream's contract address is
-   * immutable once assigned by the factory.
-   */
-  private readonly _addrCache = new Map<bigint, string>();
 
   /**
    * Cached rate-limit-retry proxy for this module's RPC URL.
@@ -231,50 +336,30 @@ export class StreamsModule {
   async create(params: CreateStreamParams): Promise<CreateStreamResult> {
     warnV1Deprecated('StreamsModule.create()', 'StreamBuilder');
     const senderAddr = await this._getSenderAddress();
+
+    // Client-side validation to prevent invalid payloads
+    const validation = validateStreamParameters(params);
+    if (!validation.isValid) {
+      throw new Error(validation.error ?? 'Invalid stream parameters');
+    }
+
     const {
       recipient, token, depositAmount,
       durationSeconds, ratePerSecond,
       startTime, clawbackEnabled = false,
     } = params;
 
-    // Client-side validation to prevent invalid payloads
-    if (!recipient || typeof recipient !== 'string' || !recipient.trim()) {
-      throw new Error('Invalid recipient address: must be a non-empty string');
-    }
-    if (!token || typeof token !== 'string' || !token.trim()) {
-      throw new Error('Invalid token address: must be a non-empty string');
-    }
-    if (!depositAmount || typeof depositAmount !== 'string' || !depositAmount.trim()) {
-      throw new Error('Invalid deposit amount: must be a non-empty string');
-    }
-    if (durationSeconds !== undefined && (typeof durationSeconds !== 'number' || durationSeconds <= 0)) {
-      throw new Error('Invalid durationSeconds: must be a positive number');
-    }
-    if (durationSeconds !== undefined && durationSeconds < MIN_STREAM_DURATION_SECONDS) {
-      throw new Error(`Invalid durationSeconds: must be at least ${MIN_STREAM_DURATION_SECONDS} seconds (1 hour)`);
-    }
-    if (ratePerSecond !== undefined && (typeof ratePerSecond !== 'string' || !ratePerSecond.trim())) {
-      throw new Error('Invalid ratePerSecond: must be a non-empty string');
-    }
-    if (!durationSeconds && !ratePerSecond) {
-      throw new Error('Either durationSeconds or ratePerSecond must be provided');
-    }
-
     const factoryId = this.config.factoryAddress ?? '';
-
-    
-    const now = Math.floor(Date.now() / 1000);
-    if (startTime !== undefined && startTime < now) {
-      throw new Error('Invalid startTime: cannot be in the past');
-    }
 
     let resolvedToken = token;
     if (token === 'native') {
       resolvedToken = Asset.native().contractId(this.passphrase);
     } else if (token === 'USDC') {
-      const issuer = this.passphrase.includes('Test SDF Network')
-        ? USDC_ISSUER.testnet
-        : USDC_ISSUER.mainnet;
+      // Resolve the issuer by network name, not by passphrase substring.
+      // The passphrase check silently fell through to the mainnet issuer for
+      // 'local' networks (their passphrase never includes 'Test SDF Network').
+      // USDC_ISSUER.local is a getter that throws a clear error. See #804.
+      const issuer = USDC_ISSUER[this.config.network];
       resolvedToken = new Asset('USDC', issuer).contractId(this.passphrase);
     }
 
@@ -499,30 +584,16 @@ export class StreamsModule {
 
     const built = await Promise.all(configs.map(async (params, index) => {
       try {
+        const validation = validateStreamParameters(params);
+        if (!validation.isValid) {
+          throw new Error(validation.error ?? 'Invalid stream parameters');
+        }
+
         const {
           recipient, token, depositAmount,
           durationSeconds, ratePerSecond,
           startTime, clawbackEnabled = false,
         } = params;
-
-        if (!recipient || typeof recipient !== 'string' || !recipient.trim()) {
-          throw new Error('Invalid recipient address: must be a non-empty string');
-        }
-        if (!token || typeof token !== 'string' || !token.trim()) {
-          throw new Error('Invalid token address: must be a non-empty string');
-        }
-        if (!depositAmount || typeof depositAmount !== 'string' || !depositAmount.trim()) {
-          throw new Error('Invalid deposit amount: must be a non-empty string');
-        }
-        if (durationSeconds !== undefined && (typeof durationSeconds !== 'number' || durationSeconds <= 0)) {
-          throw new Error('Invalid durationSeconds: must be a positive number');
-        }
-        if (ratePerSecond !== undefined && (typeof ratePerSecond !== 'string' || !ratePerSecond.trim())) {
-          throw new Error('Invalid ratePerSecond: must be a non-empty string');
-        }
-        if (!durationSeconds && !ratePerSecond) {
-          throw new Error('Either durationSeconds or ratePerSecond must be provided');
-        }
 
         const decimals = await getTokenDecimals(this.rpcUrl, this.passphrase, senderAddr, token);
         const depositStroops = toStroops(depositAmount, decimals);
@@ -639,7 +710,12 @@ export class StreamsModule {
     return this._invoke(await this._resolveAddr(BigInt(streamId), signal), 'resume', [], signal);
   }
 
-  /** Deposit additional tokens into the stream (sender only). */
+  /**
+   * Deposit additional tokens into the stream (sender only).
+   *
+   * The primary API: takes a `bigint` amount in stroops and an optional
+   * `signal`. See {@link topUpStream} for the string-typed wrapper.
+   */
   async topUp(streamId: bigint | string, amount: bigint, signal?: AbortSignal): Promise<string> {
     this._ensureCanMutate();
     if (signal?.aborted) throw new DOMException('Aborted', 'AbortError');
@@ -670,7 +746,18 @@ export class StreamsModule {
     return this._invoke(await this._resolveAddr(BigInt(streamId)), 'force_cancel', []);
   }
 
-  /** Alias for topUp. */
+  /**
+   * String-typed convenience wrapper over {@link topUp} — it coerces
+   * `amount` to a `bigint` and delegates, with no behaviour of its own.
+   *
+   * It exists for callers that already hold the amount as a string (form
+   * input, a `CreateStreamParams`-shaped value) and would otherwise have to
+   * convert before calling. **Prefer {@link topUp} in new code**: it is the
+   * primary method, takes the `bigint` amount the SDK uses for every other
+   * on-chain value, and accepts an `AbortSignal`, which this wrapper cannot
+   * forward. This is not a replacement for `topUp` and is not deprecated —
+   * both call the same contract method with the same validation.
+   */
   async topUpStream(streamId: bigint | string, amount: bigint | string): Promise<string> {
     return this.topUp(streamId, BigInt(amount));
   }
@@ -957,6 +1044,22 @@ export class StreamsModule {
     this._factory.clearAddressCache();
   }
 
+  /**
+   * Address-resolution cache performance metrics.
+   *
+   * StreamsModule resolves stream IDs through FactoryModule's bounded LRU
+   * cache, so these metrics report the same cache that _resolveAddr() and
+   * subscribeAsync() actually use.
+   */
+  getCacheMetrics(): { hits: number; misses: number; size: number } {
+    return this._factory.getCacheMetrics();
+  }
+
+  /** Reset address-cache hit/miss counters without clearing cached addresses. */
+  resetCacheStats(): void {
+    this._factory.resetCacheStats();
+  }
+
   /** Synchronous subscribe - resolves address lazily on first poll tick. */
   subscribe(streamId: bigint | string, handlers: StreamEventHandlers): Subscription {
     let inner: Subscription | null = null;
@@ -1189,23 +1292,17 @@ export class StreamsModule {
     const hash = sent.hash;
     const maxAttempts = this.config.confirmationMaxAttempts ?? DEFAULT_CONFIRMATION_MAX_ATTEMPTS;
     const pollIntervalMs = this.config.confirmationPollIntervalMs ?? DEFAULT_CONFIRMATION_POLL_INTERVAL_MS;
-    for (let i = 0; i < maxAttempts; i++) {
-      await sleep(pollIntervalMs);
-      if (signal?.aborted) throw new DOMException("Aborted", "AbortError");
-      let s;
-      try {
-        s = await catchNetworkError('getTransaction', server.getTransaction(hash));
-      } catch (err) {
-        throw RateLimitError.fromRpcError(err) ?? err;
-      }
-      if (s.status === SorobanRpc.Api.GetTransactionStatus.SUCCESS) {
-        return { hash, returnValue: s.returnValue };
-      }
-      if (s.status === SorobanRpc.Api.GetTransactionStatus.FAILED) {
+    const outcome = await pollForConfirmation(server, hash, { pollIntervalMs, maxAttempts, signal });
+    switch (outcome.kind) {
+      case 'success':
+        return { hash, returnValue: outcome.returnValue };
+      case 'failed':
         throw new Error(`Transaction failed: ${hash}`);
-      }
+      case 'poll-error':
+        throw RateLimitError.fromRpcError(outcome.error) ?? outcome.error;
+      case 'timeout':
+        throw new Error(`Transaction timed out: ${hash}`);
     }
-    throw new Error(`Transaction timed out: ${hash}`);
   }
 }
 
@@ -1252,8 +1349,4 @@ export function parseStreamInfo(id: bigint, address: string, val: xdr.ScVal): St
   };
   (info as StreamInfo & { toJSON(): Record<string, unknown> }).toJSON = () => bigintSafeStringify(info as unknown as Record<string, unknown>);
   return info;
-}
-
-function sleep(ms: number): Promise<void> {
-  return new Promise(r => setTimeout(r, ms));
 }

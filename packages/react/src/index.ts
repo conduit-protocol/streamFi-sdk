@@ -16,7 +16,9 @@ export type {
 export { useWithdrawStream } from './hooks/useWithdrawStream.js';
 export type { UseWithdrawStreamResult, WithdrawStreamFn } from './hooks/useWithdrawStream.js';
 export { useCancelStream } from './hooks/useCancelStream.js';
-export type { UseCancelStreamResult, CancelStreamFn } from './hooks/useCancelStream.js';
+export type { UseCancelStreamResult, CancelStreamFn, CancelSettlement } from './hooks/useCancelStream.js';
+export { CancelStreamConfirmation } from './components/CancelStreamConfirmation.js';
+export type { CancelStreamConfirmationProps } from './components/CancelStreamConfirmation.js';
 export { usePauseStream } from './hooks/usePauseStream.js';
 export type { UsePauseStreamResult, PauseStreamFn } from './hooks/usePauseStream.js';
 export { useResumeStream } from './hooks/useResumeStream.js';
@@ -48,6 +50,8 @@ export { useStreamedTotal } from './hooks/useStreamedTotal.js';
 export type { UseStreamedTotalResult } from './hooks/useStreamedTotal.js';
 export { useFactoryStreamCount } from './hooks/useFactoryStreamCount.js';
 export type { UseFactoryStreamCountResult } from './hooks/useFactoryStreamCount.js';
+export { useFactoryPauseStatus } from './hooks/useFactoryPauseStatus.js';
+export type { UseFactoryPauseStatusResult } from './hooks/useFactoryPauseStatus.js';
 export { useProtocolFeeBps } from './hooks/useProtocolFeeBps.js';
 export type { UseProtocolFeeBpsResult } from './hooks/useProtocolFeeBps.js';
 export { useStreamsBySender } from './hooks/useStreamsBySender.js';
@@ -69,3 +73,5 @@ export type {
   ApproveTokenAllowanceFn,
   UseTokenAllowanceResult,
 } from './hooks/useTokenAllowance.js';
+export { useNetworkSwitcher } from './hooks/useNetworkSwitcher.js';
+export type { UseNetworkSwitcherResult } from './hooks/useNetworkSwitcher.js';

@@ -54,6 +54,28 @@ export interface Module49Metrics {
  * 3. **Batch Allocation Strategy**:
  *    - `Module49`: Accumulates chunked results while capturing batch execution time.
  *    - `Module48`: Pre-allocates result arrays by item length.
+ *
+ * @example
+ * ```ts
+ * import { Module49 } from '@conduit-protocol/sdk';
+ *
+ * // `stream` is an active StreamInfo: 10n per second from t=1000 to t=2000
+ * // with nothing withdrawn yet.
+ * const analytics = new Module49();
+ * const item = { id: 'a', stream, timestamp: 1_500 };
+ *
+ * const first = analytics.processSingleItem(item);
+ * console.log(first.withdrawable); // 5000n
+ * console.log(first.progress);     // 0.5
+ * console.log(first.isCached);     // false
+ *
+ * // The same item again, this time through the batch entry point: cached.
+ * analytics.processStreamBatch([item])[0]?.isCached; // true
+ *
+ * analytics.getPerformanceMetrics().hitRate; // 0.5 (1 hit out of 2 requests)
+ *
+ * analytics.computeOptimizedYield(10n, 100); // 1000n
+ * ```
  */
 export class Module49 {
   private readonly enableOptimization: boolean;

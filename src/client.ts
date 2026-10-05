@@ -9,6 +9,7 @@ import type {
   Subscription,
   FeeEstimate,
   StreamOperation,
+  Network,
 } from "./types/index.js";
 import type { WalletAdapter } from "./adapters/types.js";
 import { DEFAULT_RPC, getServer } from "./soroban.js";
@@ -187,6 +188,13 @@ export class ConduitClient {
   }
 
   /**
+   * The Stellar network this client is connected to.
+   */
+  get network(): Network {
+    return this.config.network;
+  }
+
+  /**
    * The underlying raw {@link SorobanRpc.Server} instance used by
    * this client. Advanced integrators building custom contract
    * interactions can use this to call Soroban RPC methods directly
@@ -348,9 +356,11 @@ export class ConduitClient {
    *   operations (create, withdraw, cancel, etc.) use the new wallet.
    * - {@link TokenModule}: Updated immediately — subsequent token approvals
    *   use the new wallet.
-   * - {@link FactoryModule}: NOT updated — this module is read-only and
-   *   uses `config.keypair` for simulation fee sourcing. It does not hold
-   *   a wallet reference and is unaffected by `setWallet()`.
+   * - {@link FactoryModule}: Updated — its read simulations are sourced
+   *   from the active wallet's public key, so a wallet swap re-resolves the
+   *   simulation source instead of leaving it pinned to the previous
+   *   wallet. A `client.factory` that has not been constructed yet picks
+   *   the new wallet up from `config` when it is lazily built (#784).
    * - {@link GovernorModule}: NOT updated — this module is read-only and
    *   uses `config.keypair` for simulation fee sourcing. It does not hold
    *   a wallet reference and is unaffected by `setWallet()`.
@@ -364,6 +374,12 @@ export class ConduitClient {
     this.config.wallet = wallet;
     this.streams.setWallet(wallet);
     this.tokens.setWallet(wallet);
+    // #784 — `FactoryModule` resolves its read-simulation source from a
+    // wallet adapter captured at construction, so it needs the swap too.
+    // Only when already constructed: a factory built later from the updated
+    // `config.wallet` above has nothing to catch up on. GovernorModule
+    // deliberately stays out — it holds no wallet at all.
+    this._factory?.setWallet(wallet);
   }
 
   /**

@@ -5,9 +5,12 @@ All notable changes are documented here. Format based on [Keep a Changelog](http
 ## [Unreleased]
 
 ### Added
-- `@streamfi/react` exports `useStreamCountdown(targetTimestamp, startTimestamp?)` — a 1-second-tick countdown (`days`/`hours`/`minutes`/`seconds`, `isPast`, and an optional `progressFraction`) for cliff and cancellation/completion deadlines, so vesting and payroll cards no longer hand-roll timers (#830).
+- `@streamfi/react`: `useNetworkSwitcher()` hook and reactive network switching in `StreamFiProvider` (`network`, `setNetwork`, `isSupportedNetwork`, `availableNetworks`), allowing dApps to switch between Stellar networks seamlessly without remounting or managing out-of-band state (#833).
+- `ConduitClient.network` getter returning the active configured network (`Network`).
 - `NETWORK_NAMES`, `EXPLORER_URLS`, and `NetworkType` provide shared human-readable Stellar network labels and Stellar Expert transaction, contract, and account URL bases (#832).
 - `TokenModule` exposes SEP-41 `allowance()` and `approve()` operations through `client.tokens`, and `@streamfi/react` now exports `useTokenAllowance()` for allowance verification and approval state (#851).
+- `FactoryModule.streamAddresses(ids[], signal?, options?)` resolves a page of stream IDs to contract addresses in one call, returning a `Map` keyed by decimal stream-id string (`null` for ids the contract reports as not-found). Rendering a page of `streamsBySender()` results no longer costs one simulated RPC round trip per row on a cold cache: duplicate and string/bigint id forms are de-duplicated, only the cache-miss subset is fetched, and in-flight simulations are bounded by `options.maxConcurrency` (default 8) to match a default `stellar-rpc`'s 8 preflight workers. Every id is resolved through `streamAddress()`, so the address cache, its hit/miss counters and the negative-cache TTL are shared with single-id lookups; a resolution that throws propagates and is never cached as a not-found result. `StreamAddressesOptions` is exported from the package entry point (#783).
+- `ConduitConfig.governorConfigCacheTtlMs` (default 30_000) bounds how long a `GovernorModule.getConfig()` read is reused. Protocol parameters only change when a governance proposal passes, so a dashboard polling `getConfig()` on an interval no longer pays a simulation per tick for data that is almost always unchanged. Concurrent misses share a single simulation, a failed simulation is never cached, each caller gets its own object so mutating a result cannot corrupt what the next caller sees, and `clearConfigCache()` forces the next call to re-simulate. Set the TTL to `0` to disable caching (#785).
 - `timeoutSignal(ms)` utility (exported from the package root and `/utils`) — a portable `AbortSignal` that aborts after `ms`, using the native `AbortSignal.timeout()` when available and falling back to `AbortController` + `setTimeout` (with `unref()` on Node) otherwise. Pass it as `signal` to any method that accepts one (#634).
 - `examples/quickstart.ts` — a runnable, end-to-end create -> accrue -> withdraw script on testnet, and the README Quickstart now mirrors it (#633).
 - `GraphQLIndexer.query()` now accepts optional `timeoutMs` (default 15s) and `signal` on `GraphQLQueryOptions` and wires a per-request `AbortController` into the underlying `fetch`, so a hung/slow indexer no longer leaves the caller's `await` pending forever. On timeout it rejects with a `IndexerTimeoutError` (endpoint + `timeoutMs` exposed); a caller-supplied `signal` surfaces the underlying `AbortError`. `IndexerTimeoutError` and `DEFAULT_INDEXER_TIMEOUT_MS` are exported from the package entry point (#569).
@@ -35,6 +38,9 @@ All notable changes are documented here. Format based on [Keep a Changelog](http
 - `buildBatchTransactions()` (the RPC-prepared batch path) now simulates all operations in a batch concurrently instead of one at a time, cutting the wall-clock time of an N-operation batch from N sequential RPC round trips to one.
 
 ### Changed
+- `ConduitClient.setWallet()` now propagates the new wallet to an already-constructed `FactoryModule`, whose read simulations are sourced from the active wallet. Previously the JSDoc documented `FactoryModule` as "not updated … does not hold a wallet reference and is unaffected by setWallet()", which contradicted the module's own `setWallet()`/`activeWallet` support and left a dApp that swapped wallets with a `client.factory` still simulating as the previous wallet. `FactoryModule.setWallet()` itself is unchanged and remains public API (#784).
+- `StreamsModule.topUpStream()` is documented as the string-typed convenience wrapper over `topUp()` that it is, including which one new code should prefer. Both call the same contract method with the same validation; `topUpStream` additionally cannot forward an `AbortSignal` (#786).
+- `StreamsModule.getStreamInfos({ maxConcurrency })` now treats a bound below 1 (or a non-finite one) as 1 instead of resolving to no results at all. The shared `mapWithConcurrency` helper and its default bound moved to `src/map-with-concurrency.ts` so the paged `list()` path and `FactoryModule.streamAddresses()` cannot drift apart (#783).
 - `u64ToScVal()` now rejects a non-integer `number` or a negative value with a clear `RangeError` naming the argument, and `estimateRequiredFee()` guards every `BigInt(...)` coercion (truncating a numeric input, catching an un-parseable one) and falls through to `fallbackStroops` — a non-conforming RPC response with a float `minResourceFee` no longer aborts a `create()` with a raw `RangeError` out of the fee-estimation path (#577).
 - `StreamsModule` now routes all signer-selection logic through its private `_signer()` helper instead of touching `config.signer` directly, removing dead code (#446).
 - CAIP-2→network mapping consolidated into a single exported `CAIP2_TO_NETWORK` constant shared by `ConduitClient`'s wallet network check and `WalletConnectAdapter`'s chain validation, so the two can never disagree (#445).
@@ -48,6 +54,16 @@ All notable changes are documented here. Format based on [Keep a Changelog](http
 
 
 ### Documentation
+- Added an error-code collision warning to `ConduitError.fromContractError()`
+  and `ConduitError.fromSorobanMessage()` so callers are reminded to pass the
+  contract that produced the error; the same numeric code has different
+  meanings across the stream, factory, and governor contracts (#790).
+- Documented the relationship between `StreamsModule.topUp()` and
+  `StreamsModule.topUpStream()`: `topUpStream()` is the string-argument
+  convenience wrapper for `topUp()`, while both perform the same stream
+  deposit operation. New integrations should use whichever argument type best
+  matches their input, and upgrades do not require a migration between them
+  (#791).
 - Removed non-existent `contracts/*-abi.ts` entry from `docs/architecture.md` module map (#440).
 - Replaced orphaned `MAX_ROOM_SIZE` `.env.example` with a comprehensive SDK environment configuration template and updated `README.md` (#441).
 - Added an API reference section for `GraphQLIndexer`, which was previously exported but undocumented.

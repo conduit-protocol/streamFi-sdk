@@ -66,6 +66,29 @@ interface CachedResult {
  * 3. **Batch Allocation Strategy**:
  *    - `Module48`: Pre-allocates result array (`new Array(items.length)`) for deterministic index mapping during chunked processing.
  *    - `Module49`: Appends results dynamically per chunk while measuring total batch wall-clock execution time.
+ *
+ * @example
+ * ```ts
+ * import { Module48 } from '@conduit-protocol/sdk';
+ *
+ * // `stream` is an active StreamInfo: 10n per second from t=1000 to t=2000
+ * // with nothing withdrawn yet.
+ * const analytics = new Module48();
+ * const item = { id: 'a', stream, timestamp: 1_500 };
+ *
+ * const first = analytics.processSingleItem(item);
+ * console.log(first.withdrawable); // 5000n
+ * console.log(first.progress);     // 0.5
+ * console.log(first.isCached);     // false
+ *
+ * // The same item again, this time through the batch entry point: cached.
+ * analytics.processStreamBatch([item])[0]?.isCached; // true
+ *
+ * const { cacheHits, cacheMisses } = analytics.getPerformanceMetrics();
+ * // cacheHits === 1, cacheMisses === 1
+ *
+ * analytics.computeOptimizedYield(10n, 100); // 1000n
+ * ```
  */
 export class Module48 {
   private readonly enableOptimization: boolean;

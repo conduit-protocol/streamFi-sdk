@@ -174,6 +174,38 @@ export function withdrawableLocal(stream: StreamInfo, nowSec = Math.floor(Date.n
 }
 
 /**
+ * Cumulative amount streamed since the stream started, from a StreamInfo
+ * snapshot, without a contract call. The local counterpart of
+ * `StreamsModule.streamedTotal()`.
+ *
+ * Unlike {@link withdrawableLocal}, `withdrawn` is not subtracted, so the
+ * value keeps counting up after withdrawals. Accounts for pause state and
+ * `endTime` with the same clamp order as {@link withdrawableLocal}.
+ *
+ * `StreamInfo` does not record when a stream was cancelled, so the amount
+ * streamed up to that moment cannot be projected. A cancelled stream
+ * therefore reports `withdrawn`, the amount known to have been paid out (a
+ * lower bound), instead of continuing to accrue.
+ */
+export function streamedTotalLocal(stream: StreamInfo, nowSec = Math.floor(Date.now() / 1000)): bigint {
+  if (stream.cancelled) return stream.withdrawn;
+
+  // Same clamp order as `withdrawableLocal` (see the note there): `endTime`
+  // first, then freeze at `pausedAt` only while the stream is still running.
+  const endClamped =
+    stream.endTime > 0 && nowSec > stream.endTime ? stream.endTime : nowSec;
+  const effectiveNow =
+    stream.paused && stream.pausedAt < endClamped ? stream.pausedAt : endClamped;
+
+  if (effectiveNow < stream.startTime) return 0n;
+
+  const elapsed = effectiveNow - stream.startTime;
+  if (elapsed <= 0) return 0n;
+
+  return stream.ratePerSecond * BigInt(elapsed);
+}
+
+/**
  * Classifies a stream's current lifecycle state.
  *
  * Precedence mirrors the on-chain clamp order used by {@link withdrawableLocal}:
@@ -413,6 +445,22 @@ export function sumWithdrawable(streams: StreamInfo[], nowSec = Math.floor(Date.
 }
 
 /**
+ * Sum of the cumulative amounts streamed across multiple streams.
+ *
+ * Computes the total amount streamed so far from an array of streams without
+ * making any contract calls, using {@link streamedTotalLocal} for each one.
+ * Unlike {@link sumWithdrawable}, withdrawals are not subtracted, so the total
+ * keeps counting up after recipients withdraw.
+ *
+ * @param streams Array of StreamInfo objects
+ * @param nowSec  Current time in seconds (defaults to now)
+ * @returns Total streamed amount in stroops across all streams
+ */
+export function sumStreamedTotal(streams: StreamInfo[], nowSec = Math.floor(Date.now() / 1000)): bigint {
+  return streams.reduce((sum, stream) => sum + streamedTotalLocal(stream, nowSec), 0n);
+}
+
+/**
  * A portable `AbortSignal` that aborts after `ms` milliseconds — pass it as
  * the `signal` option to any SDK method that accepts one, e.g.
  *
@@ -435,4 +483,68 @@ export function timeoutSignal(ms: number): AbortSignal {
   );
   (timer as unknown as { unref?: () => void }).unref?.();
   return controller.signal;
+}
+
+/**
+ * Format a raw token amount (in stroops/smallest unit) to a human-readable string
+ * with configurable decimal precision.
+ *
+ * @param amount - The raw amount as bigint or string (e.g., stroops for XLM)
+ * @param decimals - The number of decimals the token uses (e.g., 7 for XLM, 6 for USDC)
+ * @param displayDecimals - Optional: number of decimal places to display (default: decimals)
+ *                          Always shows exactly this many decimal places, padding with zeros if needed.
+ *
+ * @example
+ * ```ts
+ * // XLM with 7 decimals
+ * formatTokenAmount(10_000_000n, 7)        // '1.0000000'
+ * formatTokenAmount(10_000_000n, 7, 2)     // '1.00'
+ * formatTokenAmount(1234567n, 7)           // '0.1234567'
+ *
+ * // USDC with 6 decimals
+ * formatTokenAmount('1000000', 6)          // '1.000000'
+ * formatTokenAmount('1500000', 6, 2)       // '1.50'
+ *
+ * // Custom precision
+ * formatTokenAmount(123456789n, 8, 4)      // '1.2346' (rounded)
+ * ```
+ */
+export function formatTokenAmount(
+  amount: bigint | string,
+  decimals: number,
+  displayDecimals?: number,
+): string {
+  const displayDec = displayDecimals ?? decimals;
+  const factor = pow10(decimals);
+  const displayFactor = pow10(displayDec);
+
+  // Convert amount to bigint if it's a string
+  const amountBI = typeof amount === 'string' ? BigInt(amount) : amount;
+
+  // Handle negative amounts
+  const neg = amountBI < 0n;
+  const absAmount = neg ? -amountBI : amountBI;
+
+  // Calculate whole and fractional parts
+  const whole = absAmount / factor;
+  const rem = absAmount % factor;
+
+  if (displayDec === 0) {
+    // No decimal places needed - just round the whole number
+    const rounded = (rem * 2n >= factor) ? whole + 1n : whole;
+    return `${neg ? '-' : ''}${rounded.toString()}`;
+  }
+
+  // Scale remainder to display precision with rounding
+  // We need to multiply remainder by 10^displayDec and divide by 10^decimals
+  const scaledRem = (rem * displayFactor + factor / 2n) / factor; // rounding
+  const cappedRem = scaledRem >= displayFactor ? 0n : scaledRem; // handle carry
+  const carry = scaledRem >= displayFactor ? 1n : 0n;
+
+  const wholeWithCarry = whole + carry;
+  const fracStr = cappedRem.toString().padStart(displayDec, '0');
+
+  // Always show exactly displayDec decimal places (including trailing zeros)
+  // This matches the expected behavior for token display
+  return `${neg ? '-' : ''}${wholeWithCarry.toString()}.${fracStr}`;
 }

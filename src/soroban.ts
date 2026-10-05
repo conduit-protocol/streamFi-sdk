@@ -97,6 +97,119 @@ function normalizePollingOptions(options: ConfirmationPollingOptions = {}): Requ
   };
 }
 
+/** What happened when a submitted transaction was polled for confirmation. */
+export type ConfirmationPollOutcome =
+  | { kind: 'success'; returnValue: xdr.ScVal | undefined }
+  | { kind: 'failed' }
+  | { kind: 'timeout'; attempts: number }
+  | { kind: 'poll-error'; error: unknown; attempt: number };
+
+/**
+ * The single poll-until-confirmed loop shared by {@link waitForConfirmation},
+ * {@link invokeContract} and `StreamsModule`.
+ *
+ * Waits `pollIntervalMs` before each `getTransaction` call and reports what
+ * it saw instead of deciding what to throw: each caller keeps its own policy
+ * for a failed transaction, a timeout or an RPC error (for example,
+ * `invokeContract` can resolve a still-unconfirmed hash as pending). The one
+ * exception is `signal`: an aborted signal always throws an `AbortError`.
+ *
+ * @internal
+ */
+export async function pollForConfirmation(
+  server: SorobanRpc.Server,
+  hash: string,
+  options: { pollIntervalMs: number; maxAttempts: number; signal?: AbortSignal | undefined },
+): Promise<ConfirmationPollOutcome> {
+  const { pollIntervalMs, maxAttempts, signal } = options;
+  for (let i = 0; i < maxAttempts; i++) {
+    if (signal?.aborted) throw new DOMException('Aborted', 'AbortError');
+    await sleep(pollIntervalMs);
+    if (signal?.aborted) throw new DOMException('Aborted', 'AbortError');
+
+    let status;
+    try {
+      status = await catchNetworkError('getTransaction', server.getTransaction(hash));
+    } catch (error) {
+      return { kind: 'poll-error', error, attempt: i + 1 };
+    }
+    if (status.status === SorobanRpc.Api.GetTransactionStatus.SUCCESS) {
+      return { kind: 'success', returnValue: status.returnValue };
+    }
+    if (status.status === SorobanRpc.Api.GetTransactionStatus.FAILED) {
+      return { kind: 'failed' };
+    }
+  }
+  return { kind: 'timeout', attempts: maxAttempts };
+}
+
+export interface WaitForConfirmationOptions {
+  /** Milliseconds to wait before each poll. Default {@link DEFAULT_CONFIRMATION_POLL_INTERVAL_MS}. */
+  pollIntervalMs?: number;
+  /** Maximum number of polls before giving up. Default {@link DEFAULT_CONFIRMATION_MAX_ATTEMPTS}. */
+  maxAttempts?: number;
+  /** Abort the wait; the returned promise rejects with an `AbortError`. */
+  signal?: AbortSignal | undefined;
+}
+
+/** A transaction that reached a successful terminal status. */
+export interface ConfirmedTransaction {
+  hash: string;
+  /** The contract call's return value, when the transaction has one. */
+  returnValue: xdr.ScVal | undefined;
+}
+
+/**
+ * Wait for an already-submitted transaction to confirm, for a transaction you
+ * sent through some other path (a raw `sendTransaction`, a wallet's own
+ * submission flow, ...). This is the same poll loop the SDK uses internally
+ * after it submits a transaction.
+ *
+ * Resolves once the transaction reaches a successful terminal status and
+ * rejects otherwise:
+ * - the transaction failed: an `Error` (`Transaction failed: <hash>`);
+ * - it did not confirm within `maxAttempts` polls: {@link ConfirmationTimeoutError};
+ * - `signal` was aborted: an `AbortError`;
+ * - the RPC call failed: {@link RateLimitError} for rate limiting, otherwise
+ *   the underlying error.
+ *
+ * @example
+ * ```ts
+ * import { waitForConfirmation } from '@conduit-protocol/sdk';
+ *
+ * // `hash` came from a `sendTransaction` call made outside the SDK.
+ * const { returnValue } = await waitForConfirmation(rpcUrl, hash, {
+ *   pollIntervalMs: 2_000,
+ *   maxAttempts: 20,
+ *   signal: AbortSignal.timeout(60_000),
+ * });
+ * ```
+ */
+export async function waitForConfirmation(
+  rpcUrl: string,
+  txHash: string,
+  options: WaitForConfirmationOptions = {},
+): Promise<ConfirmedTransaction> {
+  const { pollIntervalMs, maxAttempts } = normalizePollingOptions(options);
+  const server = createRpcServer(rpcUrl);
+  const outcome = await pollForConfirmation(server, txHash, {
+    pollIntervalMs,
+    maxAttempts,
+    signal: options.signal,
+  });
+
+  switch (outcome.kind) {
+    case 'success':
+      return { hash: txHash, returnValue: outcome.returnValue };
+    case 'failed':
+      throw new Error(`Transaction failed: ${txHash}`);
+    case 'timeout':
+      throw new ConfirmationTimeoutError(txHash, outcome.attempts, outcome.attempts * pollIntervalMs);
+    case 'poll-error':
+      throw RateLimitError.fromRpcError(outcome.error) ?? outcome.error;
+  }
+}
+
 
 /**
  * Creates a SorobanRpc.Server instance wrapped with an exponential backoff retry mechanism.
@@ -247,40 +360,34 @@ export async function invokeContract(
 
   // Poll for confirmation
   const hash = sent.hash;
-  for (let i = 0; i < polling.maxAttempts; i++) {
-    await sleep(polling.pollIntervalMs);
-    let status;
-    try {
-      status = await catchNetworkError('getTransaction', server.getTransaction(hash));
-    } catch (err) {
+  const outcome = await pollForConfirmation(server, hash, polling);
+  switch (outcome.kind) {
+    case 'success':
+      return hash;
+    case 'failed':
+      throw new Error(`Transaction failed: ${hash}`);
+    case 'poll-error':
       if (polling.strict) {
         throw new ConfirmationTimeoutError(
           hash,
-          i + 1,
-          (i + 1) * polling.pollIntervalMs,
+          outcome.attempt,
+          outcome.attempt * polling.pollIntervalMs,
         );
       }
       // Transaction was already submitted; return the hash as pending.
       // Polling failures don't indicate submission failure.
       return hash;
-    }
-    if (status.status === SorobanRpc.Api.GetTransactionStatus.SUCCESS) {
+    case 'timeout':
+      if (polling.strict) {
+        throw new ConfirmationTimeoutError(
+          hash,
+          polling.maxAttempts,
+          polling.maxAttempts * polling.pollIntervalMs,
+        );
+      }
+      // Polling timed out but transaction was submitted; return hash as pending.
       return hash;
-    }
-    if (status.status === SorobanRpc.Api.GetTransactionStatus.FAILED) {
-      throw new Error(`Transaction failed: ${hash}`);
-    }
   }
-  if (polling.strict) {
-    throw new ConfirmationTimeoutError(
-      hash,
-      polling.maxAttempts,
-      polling.maxAttempts * polling.pollIntervalMs,
-    );
-  }
-  // Polling timed out but transaction was submitted; return hash as pending.
-  return hash;
-
 }
 
 /**

@@ -22,6 +22,8 @@ new ConduitClient(config: ConduitConfig)
 | `wallet` | `WalletAdapter` | | — |
 | `fee` | `string` | | Explicit inclusion (bid) fee in stroops for submitted transactions. Takes precedence over `feeMultiplier`. Defaults to `BASE_FEE` (100 stroops) |
 | `feeMultiplier` | `number` | | Multiplier applied to `BASE_FEE` to compute the inclusion fee, e.g. `10` bids 10x the network minimum. Ignored when `fee` is set |
+| `negativeCacheTtlMs` | `number` | | How long a not-found `streamAddress()` result is cached. Default 30_000 |
+| `governorConfigCacheTtlMs` | `number` | | How long a `governor.getConfig()` read is reused. Default 30_000. `0` disables the cache |
 
 > **Inclusion fee.** Every submitted transaction previously used `BASE_FEE`
 > (the network minimum, 100 stroops) unconditionally, with no way to raise
@@ -36,7 +38,7 @@ new ConduitClient(config: ConduitConfig)
 
 * `pauseStream(streamId: string) → Promise<string>` — equivalent to `client.streams.pause(streamId)`.
 * `unpauseStream(streamId: string) → Promise<string>` — equivalent to `client.streams.resume(streamId)`.
-* `setWallet(wallet: WalletAdapter): void` — dynamically attach or change the active wallet adapter. Throws `UnsupportedChainError` if the wallet's `chainId` is on a different network than the client was configured for. See [Wallet Adapters](#wallet-adapters) below. Propagates to `client.streams` and `client.tokens`; `client.factory` and `client.governor` are read-only and unaffected.
+* `setWallet(wallet: WalletAdapter): void` — dynamically attach or change the active wallet adapter. Throws `UnsupportedChainError` if the wallet's `chainId` is on a different network than the client was configured for. See [Wallet Adapters](#wallet-adapters) below. Propagates to `client.streams` and `client.tokens`, and to an already-constructed `client.factory` (whose read simulations are sourced from the active wallet). `client.governor` is read-only, uses `config.keypair` for simulation fee sourcing, and is unaffected.
 
 ---
 
@@ -187,9 +189,13 @@ Resumes a paused stream. Paused duration is excluded from streaming time.
 
 ---
 
-### `topUp(streamId, amount) → Promise<string>`
+### `topUp(streamId, amount, signal?) → Promise<string>`
 
 Adds tokens to the stream balance. Extends effective stream duration.
+
+`amount` is a `bigint` in stroops. For callers that already hold the amount as a string,
+`topUpStream(streamId, amount)` is a thin string-typed wrapper that coerces it and delegates —
+prefer `topUp` in new code, since it also accepts an `signal`.
 
 **Requires:** `keypair` set (sender)  
 **Throws:** `Error` (client-side) if `amount` is `<= 0n` — validated before any RPC round-trip; `ConduitError` with `contract: 'stream'` — `StreamErrorCode.StreamCancelled`, `.InvalidAmount`
@@ -329,13 +335,42 @@ endpoint; call `subscribe()` again to restart it.
 ## `client.factory`
 
 ### `streamCount() → Promise<bigint>`
+
 ### `streamAddress(id) → Promise<string | null>`
 
 Resolved (non-null) addresses are cached in-memory for the lifetime of the client, since a
 stream's contract address is fixed at creation and never changes. A `null` result (stream not
-yet found) is not cached, so a later call for the same `id` will still hit the network. This
-cache is what `StreamsModule` relies on to avoid re-resolving the same address on every
-`get`/`withdraw`/`cancel`/`pause`/`resume`/`topUp`/`clawback` call and when paginating `list()`.
+yet found) is cached for `ConduitConfig.negativeCacheTtlMs` (default 30s) so a polled list page
+does not re-simulate every missing id on every refresh; call `clearAddressCache()` to drop it
+earlier. This cache is what `StreamsModule` relies on to avoid re-resolving the same address on
+every `get`/`withdraw`/`cancel`/`pause`/`resume`/`topUp`/`clawback` call and when paginating
+`list()`.
+
+### `streamAddresses(ids, signal?, options?) → Promise<Map<string, string | null>>`
+
+Resolves a whole page of stream IDs in one call, instead of one simulated RPC round trip per id.
+
+```typescript
+const { ids } = await client.factory.streamsBySender(sender, 0, 50);
+const addresses = await client.factory.streamAddresses(ids);
+
+for (const [id, address] of addresses) {
+  // address is null when the id does not resolve to a deployed stream
+}
+```
+
+| Param | Type | Notes |
+|-------|------|-------|
+| `ids` | `(bigint \| string)[]` | Duplicates — including the same id in both forms — are fetched once |
+| `signal` | `AbortSignal?` | Rejects with an `AbortError` if aborted before or during resolution |
+| `options.maxConcurrency` | `number?` | Max simulations in flight; default 8 (a default `stellar-rpc` serves `simulateTransaction` from 8 preflight workers). Values below 1 are treated as 1 |
+
+The returned `Map` is keyed by the decimal stream-id string and preserves first-seen input
+order. Every id is resolved through `streamAddress()`, so the address cache, its hit/miss
+counters and the negative-cache TTL above are shared with single-id lookups in both directions —
+only the cache-miss subset costs a network call. A resolution that *fails* (as opposed to
+resolving to "not found") rejects the whole call and is never cached as a not-found result; ids
+that did resolve stay cached, so a retry re-fetches only the failures.
 
 ### `protocolFeeBps() → Promise<number>`
 
@@ -343,17 +378,25 @@ cache is what `StreamsModule` relies on to avoid re-resolving the same address o
 
 ## `client.governor`
 
-### `config() → Promise<GovernorConfig>`
+### `getConfig(signal?) → Promise<GovernorConfig>`
 
 ```typescript
 interface GovernorConfig {
   feeBps:             number;
   feeRecipient?:      string;
   minDurationSeconds: number;
+  maxDurationSeconds: number;
   maxRatePerSecond:   bigint;
   factoryAddress?:    string;
 }
 ```
+
+The result is reused for `ConduitConfig.governorConfigCacheTtlMs` (default 30s, ~6 ledgers at
+the 5s close cadence), since protocol parameters only change when a governance proposal passes —
+a dashboard polling `getConfig()` no longer pays a simulation per tick. Concurrent misses share
+a single simulation, a failed simulation is never cached, and each caller receives its own object
+so mutating a result cannot change what the next caller sees. Set `governorConfigCacheTtlMs: 0`
+to re-simulate on every call, or call `clearConfigCache()` to force the next call to re-simulate.
 
 ---
 
@@ -461,11 +504,46 @@ deployed `DripGovernor` values for production use.
 
 ---
 
+## Waiting for confirmation
+
+### `waitForConfirmation(rpcUrl, txHash, options?) → Promise<ConfirmedTransaction>`
+
+Waits for an already-submitted transaction to confirm. Use it when you submit
+a transaction yourself (a raw `sendTransaction` call, or a wallet's own
+submission flow) and still want the SDK's poll-until-confirmed behavior. It is
+the same loop `StreamsModule` uses internally after it submits a transaction.
+
+| Option | Type | Default | Notes |
+| --- | --- | --- | --- |
+| `pollIntervalMs` | `number` | `1000` | Wait before each poll. |
+| `maxAttempts` | `number` | `30` | Polls before giving up. |
+| `signal` | `AbortSignal` | — | Abort the wait. |
+
+```typescript
+import { waitForConfirmation } from '@conduit-protocol/sdk';
+
+// `hash` came from a sendTransaction call made outside the SDK.
+const confirmed = await waitForConfirmation(rpcUrl, hash, {
+  pollIntervalMs: 2_000,
+  maxAttempts: 20,
+  signal: AbortSignal.timeout(60_000),
+});
+console.log(confirmed.returnValue);
+```
+
+Resolves with `{ hash, returnValue }` once the transaction succeeds. Rejects
+with an `Error` (`Transaction failed: <hash>`) if it fails,
+`ConfirmationTimeoutError` if it does not confirm within `maxAttempts` polls,
+an `AbortError` if `signal` aborts, and `RateLimitError` (or the underlying
+error) if the RPC call fails.
+
+---
+
 ## Utility functions
 
 ```typescript
 import { toStroops, fromStroops, calculateRate, streamProgress, withdrawableLocal,
-  bigintSafeStringify, isValidAddress }
+  streamedTotalLocal, sumWithdrawable, sumStreamedTotal, bigintSafeStringify, isValidAddress }
   from '@conduit-protocol/sdk/utils';
 
 toStroops('100.5')             // → 1005000000n
@@ -473,9 +551,14 @@ fromStroops(1005000000n)       // → '100.5'
 calculateRate('1000', 2592000) // → 3858n  stroops/sec
 streamProgress(streamInfo)     // → 0.42   (0–1 fraction elapsed)
 withdrawableLocal(streamInfo)  // → bigint (client-side estimate, no RPC call)
+streamedTotalLocal(streamInfo) // → bigint (cumulative streamed, ignores withdrawals)
+sumWithdrawable(streams)       // → bigint (withdrawable across many streams)
+sumStreamedTotal(streams)      // → bigint (streamed total across many streams)
 ```
 
 `withdrawableLocal` is useful for building live counters without polling the chain on every render tick.
+
+`streamedTotalLocal` and `sumStreamedTotal` are the local counterparts of `streamedTotal()`: they do not subtract `withdrawn`, so a "total streamed so far" display keeps counting up after withdrawals. `StreamInfo` has no cancellation time, so a cancelled stream reports its `withdrawn` amount (a lower bound) rather than continuing to accrue.
 
 `toStroops`, `fromStroops`, `calculateRate`, and `calculateYield` use a precomputed `POW10`
 lookup table for decimal values 0–19, avoiding repeated `BigInt(10 ** decimals)` computation

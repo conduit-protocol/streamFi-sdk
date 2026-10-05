@@ -84,6 +84,14 @@ export interface BuiltBatchTransaction {
   prepared: boolean;
 }
 
+/** Result of the pre-flight simulation for one batch operation. */
+export interface BatchSimulationResult {
+  index: number;
+  method: string;
+  success: boolean;
+  error?: string;
+}
+
 export class BatchBuildError extends Error {
   constructor(message: string) {
     super(message);
@@ -239,7 +247,7 @@ export function operationToScVals(operation: {
   ];
 }
 
-interface BuildableOperation {
+export interface BuildableOperation {
   method: string;
   params?: Record<string, unknown> | undefined;
   /** Per-field ScVal type hints for `params` map entries (see #497). */
@@ -284,6 +292,70 @@ export function buildBatchTransactionsSync(
 
     return { index, method: operation.method, xdr: tx.toXDR(), prepared: false };
   });
+}
+
+/**
+ * Simulate every operation independently and retain the operation-level
+ * failures. This is useful for batch UIs: a failed aggregate preflight should
+ * identify the exact stream creation that would revert.
+ */
+export async function preBatchSimulate(
+  operations: BuildableOperation[],
+  context: BatchTransactionContext,
+): Promise<BatchSimulationResult[]> {
+  const errors = validateContext(context);
+  if (errors.length > 0) throw new BatchBuildError(errors.join('; '));
+  if (!context.rpcUrl) {
+    throw new BatchBuildError('preBatchSimulate requires rpcUrl');
+  }
+
+  const server = createRpcServer(context.rpcUrl);
+  let sequence = context.sequence;
+  if (sequence === undefined) {
+    try {
+      sequence = (await server.getAccount(context.sourceAccount)).sequenceNumber();
+    } catch (err) {
+      throw RateLimitError.fromRpcError(err) ?? err;
+    }
+  }
+
+  const passphrase = resolvePassphrase(context);
+  const contract = new Contract(context.contractId);
+  const fee = context.fee ?? BASE_FEE;
+  const timeout = context.timeoutSeconds ?? DEFAULT_BATCH_TIMEOUT_SECONDS;
+  const txs = operations.map((operation, index) => {
+    if (!operation?.method || typeof operation.method !== 'string') {
+      throw new BatchBuildError(`Operation at index ${index} is missing a method name`);
+    }
+    const account = new Account(context.sourceAccount, (BigInt(sequence!) + BigInt(index)).toString());
+    return {
+      operation,
+      index,
+      tx: new TransactionBuilder(account, { fee, networkPassphrase: passphrase })
+        .addOperation(contract.call(operation.method, ...operationToScVals(operation)))
+        .setTimeout(timeout)
+        .build(),
+    };
+  });
+
+  const results = await Promise.all(txs.map(async ({ tx, index, operation }) => {
+    let simulation;
+    try {
+      simulation = await server.simulateTransaction(tx);
+    } catch (err) {
+      throw RateLimitError.fromRpcError(err) ?? err;
+    }
+    if (SorobanRpc.Api.isSimulationError(simulation)) {
+      return {
+        index,
+        method: operation.method,
+        success: false,
+        error: simulation.error,
+      } satisfies BatchSimulationResult;
+    }
+    return { index, method: operation.method, success: true } satisfies BatchSimulationResult;
+  }));
+  return results;
 }
 
 /**
@@ -340,24 +412,38 @@ export async function buildBatchTransactions(
     return { operation, index, tx };
   });
 
-  const simulationResults = await Promise.all(
-    txs.map(async ({ tx, index, operation }) => {
-      let simulation;
-      try {
-        simulation = await server.simulateTransaction(tx);
-      } catch (err) {
-        throw RateLimitError.fromRpcError(err) ?? err;
-      }
-      if (SorobanRpc.Api.isSimulationError(simulation)) {
-        throw new BatchBuildError(
-          `Simulation failed for operation ${index} (${operation.method}): ${simulation.error}`,
-        );
-      }
-      return { index, operation, tx, simulation };
-    }),
-  );
+  const simulationResults = await Promise.allSettled(txs.map(async ({ tx, index, operation }) => {
+    let simulation;
+    try {
+      simulation = await server.simulateTransaction(tx);
+    } catch (err) {
+      throw RateLimitError.fromRpcError(err) ?? err;
+    }
+    if (SorobanRpc.Api.isSimulationError(simulation)) {
+      throw new BatchBuildError(
+        `Simulation failed for operation ${index} (${operation.method}): ${simulation.error}`,
+      );
+    }
+    return { index, operation, tx, simulation };
+  }));
 
-  return simulationResults.map(({ index, operation, tx, simulation }) => {
+  const rejected = simulationResults.filter(
+    (result): result is PromiseRejectedResult => result.status === 'rejected',
+  );
+  if (rejected.length > 0) {
+    const details = rejected.map(result => result.reason instanceof Error
+      ? result.reason.message
+      : String(result.reason));
+    throw new BatchBuildError(details.join('; '));
+  }
+
+  return simulationResults.map(result => {
+    const { index, operation, tx, simulation } = (result as PromiseFulfilledResult<{
+      index: number;
+      operation: BuildableOperation;
+      tx: Transaction;
+      simulation: SorobanRpc.Api.SimulateTransactionResponse;
+    }>).value;
     const assembled = SorobanRpc.assembleTransaction(tx, simulation).build();
     return { index, method: operation.method, xdr: assembled.toXDR(), prepared: true };
   });
@@ -390,6 +476,18 @@ export interface BatchTxOutcome {
   dryRun?: boolean;
 }
 
+/** Per-transaction outcome produced by {@link submitBatch} (simple parallel variant). */
+export interface BatchSubmitOutcome {
+  /** The transaction's position in the original operations array. */
+  index: number;
+  /** `true` when the network accepted the transaction. */
+  success: boolean;
+  /** Transaction hash returned by the RPC node, when available. */
+  hash?: string;
+  /** Error message when `success` is `false`. */
+  error?: string;
+}
+
 /** Overall result returned by {@link submitBatch}. */
 export interface BatchSubmitResult {
   /**
@@ -403,6 +501,12 @@ export interface BatchSubmitResult {
    */
   firstFailureIndex: number;
   outcomes: BatchTxOutcome[];
+  /** Per-transaction outcomes (simple parallel variant). */
+  simpleOutcomes?: BatchSubmitOutcome[];
+  /** Number of transactions the network accepted. */
+  successCount?: number;
+  /** Number of transactions that failed. */
+  failureCount?: number;
 }
 
 /**
@@ -415,17 +519,64 @@ export class BatchPartiallySubmittedError extends Error {
   readonly skippedIndices: number[];
   readonly result: BatchSubmitResult;
 
-  constructor(result: BatchSubmitResult) {
+  /**
+   * The built transactions that were passed to {@link submitBatch}.
+   * Retained so {@link getFailedOperations} can correlate outcomes back to
+   * the caller's original operation list.
+   */
+  readonly builtTransactions: BuiltBatchTransaction[];
+
+  constructor(result: BatchSubmitResult, builtTransactions?: BuiltBatchTransaction[]) {
     super(
-      `Batch submission failed at transaction ${result.firstFailureIndex}. ` +
-      `${result.outcomes.filter(o => o.status === 'SKIPPED').length} transaction(s) skipped.`,
+      result.firstFailureIndex !== undefined && result.firstFailureIndex !== -1
+        ? `Batch submission failed at transaction ${result.firstFailureIndex}. ` +
+          `${result.outcomes.filter(o => o.status === 'SKIPPED').length} transaction(s) skipped.`
+        : `Batch partially submitted: ${result.failureCount ?? 0} of ${result.outcomes.length} transaction(s) failed. ` +
+          `Call getFailedOperations(originalOperations) to get the failed subset for retry.`,
     );
     this.name = 'BatchPartiallySubmittedError';
-    this.firstFailureIndex = result.firstFailureIndex;
+    this.firstFailureIndex = result.firstFailureIndex ?? -1;
     this.skippedIndices = result.outcomes
       .filter(o => o.status === 'SKIPPED')
       .map(o => o.index);
     this.result = result;
+    this.builtTransactions = builtTransactions ?? [];
+    Object.setPrototypeOf(this, new.target.prototype);
+  }
+
+  /**
+   * Returns the subset of `originalOperations` whose transactions failed,
+   * preserving the original order.
+   *
+   * Pass the same array you supplied to {@link buildBatchTransactions} that
+   * produced the built transactions stored in {@link builtTransactions}.
+   * The returned array is ready to feed directly back into
+   * `buildBatchTransactions` + `submitBatch` for a retry.
+   *
+   * @param originalOperations - The full list of operations that was passed to
+   *   `buildBatchTransactions`. Must be indexable by the `index` field on each
+   *   {@link BuiltBatchTransaction}.
+   */
+  getFailedOperations<T extends { method: string; params?: Record<string, unknown>; args?: unknown[] }>(
+    originalOperations: T[],
+  ): T[] {
+    const failedIndices = new Set(
+      this.result.outcomes
+        .filter(o => o.status === 'FAILED' || o.status === 'ERROR')
+        .map(o => o.index),
+    );
+    return this.builtTransactions
+      .filter(tx => failedIndices.has(tx.index))
+      .map(tx => {
+        const op = originalOperations[tx.index];
+        if (op === undefined) {
+          throw new RangeError(
+            `getFailedOperations: no operation at index ${tx.index}. ` +
+            `Make sure originalOperations is the same array passed to buildBatchTransactions.`,
+          );
+        }
+        return op;
+      });
   }
 }
 
@@ -463,6 +614,12 @@ export interface BatchSubmitOptions {
   dryRun?: boolean;
   /** When true, throws BatchPartiallySubmittedError if any tx fails. Default false. */
   throwOnError?: boolean;
+  /**
+   * When `true` and at least one transaction fails, throw a
+   * {@link BatchPartiallySubmittedError} instead of returning the aggregate
+   * result. Defaults to `false`.
+   */
+  throwOnPartial?: boolean;
 }
 
 const DEFAULT_SUBMIT_POLL_INTERVAL_MS = 1_000;
@@ -634,15 +791,21 @@ export async function submitBatch(
     }
   }
 
-  const result = {
+  const successCount = outcomes.filter(o => o.status === 'SUCCESS').length;
+  const failureCount = outcomes.length - successCount;
+
+  const result: BatchSubmitResult = {
     allSucceeded:      firstFailureIndex === -1,
     firstFailureIndex,
     outcomes,
+    successCount,
+    failureCount,
   };
 
-  if (options.throwOnError && !result.allSucceeded) {
-    throw new BatchPartiallySubmittedError(result);
+  if ((options.throwOnError || options.throwOnPartial) && !result.allSucceeded) {
+    throw new BatchPartiallySubmittedError(result, transactions);
   }
 
   return result;
 }
+

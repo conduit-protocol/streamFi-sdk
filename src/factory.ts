@@ -2,7 +2,7 @@
  * FactoryModule — DripFactory read queries.
  */
 
-import { nativeToScVal, xdr, Address } from '@stellar/stellar-sdk';
+import { nativeToScVal, xdr, Address, hash, StrKey } from '@stellar/stellar-sdk';
 import type { ConduitConfig } from './types/index.js';
 import type { WalletAdapter } from './adapters/types.js';
 import { KeypairWalletAdapter } from './adapters/keypair.js';
@@ -16,6 +16,7 @@ import {
   DEFAULT_RPC,
 } from './soroban.js';
 import { SUPPORTED_NETWORKS, UnsupportedChainError } from './errors.js';
+import { mapWithConcurrency, DEFAULT_LIST_CONCURRENCY } from './map-with-concurrency.js';
 
 /**
  * A `null` (not-found) `streamAddress` result is cached only briefly — a
@@ -29,6 +30,16 @@ const NEGATIVE_ADDRESS_CACHE_TTL_MS = 30_000;
 export interface FactoryStreamListResult {
   ids: bigint[];
   hasMore: boolean;
+}
+
+/** Options for {@link FactoryModule.streamAddresses}. */
+export interface StreamAddressesOptions {
+  /**
+   * Maximum number of `stream_address` simulations in flight at once.
+   * Defaults to 8 — the number of preflight workers a default `stellar-rpc`
+   * serves `simulateTransaction` from. Values below 1 are treated as 1.
+   */
+  maxConcurrency?: number;
 }
 
 export class FactoryModule {
@@ -241,6 +252,81 @@ export class FactoryModule {
   }
 
   /**
+   * Resolve many stream IDs to their contract addresses in one call (#783).
+   *
+   * {@link streamAddress} costs one simulated RPC call per id, so rendering a
+   * page of `streamsBySender()` results costs one round trip per row on a
+   * cold cache. This resolves a whole page at once: the already-cached ids
+   * (positive hits, and negative hits still inside their
+   * `negativeCacheTtlMs` window) are served from memory and only the
+   * cache-miss subset is fetched, with at most `maxConcurrency` simulations
+   * in flight so the client does not outrun the RPC's preflight workers.
+   *
+   * Ids may be `bigint` or `string`, and duplicates (including the same id
+   * in both forms) are fetched once. The returned `Map` is keyed by the
+   * decimal id string and preserves first-seen input order; an id the
+   * contract reports as `None` maps to `null`, exactly as
+   * {@link streamAddress} returns.
+   *
+   * Because each id is resolved through {@link streamAddress}, the address
+   * cache, its hit/miss counters and the negative-cache TTL are shared with
+   * single-id lookups in both directions.
+   *
+   * @param ids - Stream IDs to resolve.
+   * @param signal - Abort signal; rejects with an `AbortError` if aborted
+   *   before or during resolution.
+   * @param options - See {@link StreamAddressesOptions}.
+   * @returns A `Map` of decimal stream-id string to contract address, or
+   *   `null` for ids that do not resolve to a deployed stream.
+   * @throws If any single resolution fails. Ids that did resolve stay
+   *   cached, so a retry only re-fetches the ones that failed. A failed
+   *   resolution is never recorded as a not-found result.
+   *
+   * @example
+   * ```typescript
+   * const { ids } = await client.factory.streamsBySender(sender, 0, 50);
+   * const addresses = await client.factory.streamAddresses(ids);
+   * for (const [id, address] of addresses) {
+   *   console.log(id, address ?? 'not found');
+   * }
+   * ```
+   */
+  async streamAddresses(
+    ids: (bigint | string)[],
+    signal?: AbortSignal,
+    options: StreamAddressesOptions = {},
+  ): Promise<Map<string, string | null>> {
+    if (signal?.aborted) throw new DOMException("Aborted", "AbortError");
+
+    // De-duplicate first so a page that repeats an id (or mixes the string
+    // and bigint forms of one) never schedules two simulations for it.
+    const keys: string[] = [];
+    const seen = new Set<string>();
+    for (const id of ids) {
+      const key = BigInt(id).toString();
+      if (!seen.has(key)) {
+        seen.add(key);
+        keys.push(key);
+      }
+    }
+
+    // Cached ids resolve without a network call, so they simply occupy a
+    // slot in the pool for no RPC cost; keeping one code path means the
+    // batch method can never drift from the single-id one.
+    const resolved = await mapWithConcurrency(
+      keys,
+      options.maxConcurrency ?? DEFAULT_LIST_CONCURRENCY,
+      (key) => this.streamAddress(key, signal),
+    );
+
+    const out = new Map<string, string | null>();
+    keys.forEach((key, i) => {
+      out.set(key, resolved[i] ?? null);
+    });
+    return out;
+  }
+
+  /**
    * Whether `streamId` resolves to a deployed stream contract (#794).
    *
    * Thin wrapper over `streamAddress()` so callers can ask "does stream #42
@@ -332,9 +418,136 @@ export class FactoryModule {
     return scValToU32(val);
   }
 
+  /**
+   * Check if the factory is paused by governance.
+   * When paused, stream creation will fail.
+   *
+   * Reads the `paused` storage key from the factory contract.
+   */
+  async factoryPaused(signal?: AbortSignal): Promise<boolean> {
+    if (signal?.aborted) throw new DOMException("Aborted", "AbortError");
+    this._cacheMisses++;
+    const caller = await this._resolveCallerAddress();
+    const tx  = await buildContractCallTx(
+      this.rpcUrl, this.passphrase, caller,
+      this.factoryId, 'paused', [],
+    );
+    const val = await simulateReadOnly(this.rpcUrl, this.passphrase, tx);
+    // Contract returns a boolean (scvBool)
+    if (val.switch().name !== 'scvBool') {
+      throw new Error(`Expected a bool ScVal, got "${val.switch().name}" instead.`);
+    }
+    // TypeScript doesn't narrow the return type of .value() after switch check,
+    // so we assert it as boolean since we've verified the variant.
+    return val.value() as boolean;
+  }
+
   private parseU64Vec(val: xdr.ScVal): bigint[] {
     const items = val.vec();
     if (!items) return [];
     return items.map(v => scValToU64(v));
   }
+}
+
+/**
+ * Parameters for predicting a stream contract address.
+ */
+export interface PredictStreamAddressParams {
+  /** The factory contract address (deployer). */
+  factoryAddress: string;
+  /** The salt used for deployment (32 bytes). Typically derived from stream ID/sequence. */
+  salt: Uint8Array | Buffer | string;
+  /** Network passphrase (e.g., Networks.TESTNET, Networks.PUBLIC). */
+  networkPassphrase: string;
+}
+
+/**
+ * Predicts the Soroban contract address that will be deployed by the factory
+ * using the given salt. This allows integrators to display the future contract
+ * address to users before the transaction is mined.
+ *
+ * The address is computed as:
+ *   contractId = sha256(networkPassphrase + ContractIdPreimageFromAddress(factoryAddress, salt))
+ *
+ * @example
+ * ```ts
+ * import { predictStreamAddress } from '@conduit-protocol/sdk';
+ * import { Networks } from '@stellar/stellar-sdk';
+ *
+ * const streamId = 42n;
+ * const salt = Buffer.alloc(32);
+ * salt.writeBigUInt64BE(streamId); // or use the factory's salt derivation scheme
+ *
+ * const predictedAddress = predictStreamAddress({
+ *   factoryAddress: 'CABC...',
+ *   salt,
+ *   networkPassphrase: Networks.TESTNET,
+ * });
+ * // predictedAddress: 'CDEF...'
+ * ```
+ */
+export function predictStreamAddress(params: PredictStreamAddressParams): string {
+  const { factoryAddress, salt, networkPassphrase } = params;
+
+  // Normalize salt to 32-byte Buffer
+  let saltBytes: Buffer;
+  if (typeof salt === 'string') {
+    // Assume hex string
+    saltBytes = Buffer.from(salt, 'hex');
+  } else if (salt instanceof Uint8Array) {
+    saltBytes = Buffer.from(salt);
+  } else {
+    saltBytes = salt;
+  }
+
+  if (saltBytes.length !== 32) {
+    throw new Error(`Salt must be 32 bytes, got ${saltBytes.length} bytes`);
+  }
+
+  // Decode factory address to get the ScAddress
+  const factoryScAddress = Address.fromString(factoryAddress).toScAddress();
+
+  // Build ContractIdPreimageFromAddress
+  const contractIdPreimage = xdr.ContractIdPreimage.contractIdPreimageFromAddress(
+    new xdr.ContractIdPreimageFromAddress({
+      address: factoryScAddress,
+      salt: xdr.Uint256.fromXDR(saltBytes),
+    }),
+  );
+
+  // Compute network ID (sha256 of network passphrase)
+  const networkId = hash(Buffer.from(networkPassphrase));
+
+  // Build HashIdPreimageContractId
+  const hashIdPreimage = xdr.HashIdPreimage.envelopeTypeContractId(
+    new xdr.HashIdPreimageContractId({
+      networkId: networkId,
+      contractIdPreimage: contractIdPreimage,
+    }),
+  );
+
+  // Hash the preimage to get the contract ID
+  const contractIdBytes = hash(hashIdPreimage.toXDR());
+
+  // Encode as StrKey contract address (C...)
+  return StrKey.encodeContract(contractIdBytes);
+}
+
+/**
+ * Convenience function to derive a salt from a stream ID (u64).
+ * Pads the 8-byte stream ID to 32 bytes (big-endian).
+ *
+ * @example
+ * ```ts
+ * const salt = streamIdToSalt(42n); // 32-byte Buffer with 42 in the last 8 bytes
+ * ```
+ */
+export function streamIdToSalt(streamId: bigint | number): Buffer {
+  const salt = Buffer.alloc(32);
+  const id = BigInt(streamId);
+  // Write as big-endian u64 in the last 8 bytes
+  for (let i = 0; i < 8; i++) {
+    salt[31 - i] = Number((id >> (8n * BigInt(i))) & 0xffn);
+  }
+  return salt;
 }

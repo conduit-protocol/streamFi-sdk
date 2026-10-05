@@ -57,6 +57,26 @@ export function onCircuitChange(listener: CircuitListener): () => void {
   };
 }
 
+/**
+ * Subscribe to circuit state changes for a specific scope. Returns an
+ * unsubscribe function. The callback is invoked only when the circuit's
+ * state actually transitions (e.g. closed -> open), not on every call.
+ */
+export function onCircuitStateChange(
+  scope: string,
+  callback: (state: CircuitStatus) => void,
+): () => void {
+  const listener: CircuitListener = (scopedScope, state) => {
+    if (scopedScope === scope) {
+      callback(state);
+    }
+  };
+  listeners.add(listener);
+  return () => {
+    listeners.delete(listener);
+  };
+}
+
 const DEFAULT_THRESHOLD = 5;
 const DEFAULT_COOLDOWN_MS = 30_000;
 
@@ -102,11 +122,14 @@ export function getCircuitState(scope: string): CircuitStatus {
 export function recordSuccess(scope: string): void {
   const entry = circuits.get(scope);
   if (!entry) return;
+  const previousState = entry.state;
   entry.failureCount = 0;
   entry.lastSuccessAt = Date.now();
   entry.state = 'closed';
   entry.cooldownUntil = null;
-  notifyListeners(scope, getCircuitState(scope));
+  if (previousState !== 'closed') {
+    notifyListeners(scope, getCircuitState(scope));
+  }
 }
 
 /**
@@ -134,12 +157,17 @@ export function recordFailure(
     circuits.set(scope, entry);
   }
 
+  const previousState = entry.state;
+
   // In half-open state, any failure re-opens the circuit
   if (entry.state === 'half-open') {
     entry.state = 'open';
     entry.failureCount += 1;
     entry.lastFailureAt = now;
     entry.cooldownUntil = now + cooldownMs;
+    if (previousState !== 'open') {
+      notifyListeners(scope, getCircuitState(scope));
+    }
     return;
   }
 
@@ -150,15 +178,20 @@ export function recordFailure(
     entry.state = 'open';
     entry.cooldownUntil = now + cooldownMs;
   }
-  notifyListeners(scope, getCircuitState(scope));
+  if (entry.state !== previousState) {
+    notifyListeners(scope, getCircuitState(scope));
+  }
 }
 
 /**
  * Reset the circuit for a given scope (e.g. on manual retry).
  */
 export function resetCircuit(scope: string): void {
+  const hadEntry = circuits.has(scope);
   circuits.delete(scope);
-  notifyListeners(scope, getCircuitState(scope));
+  if (hadEntry) {
+    notifyListeners(scope, getCircuitState(scope));
+  }
 }
 
 /**

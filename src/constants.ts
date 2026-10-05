@@ -45,23 +45,6 @@ export const EXPLORER_URLS: Record<
  */
 export const ZERO_ADDR = 'GAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAWHF';
 
-/**
- * Circle's USDC issuer accounts, keyed by network. Used to resolve the
- * `'USDC'` shorthand in `StreamsModule.create` to a real Stellar asset (see
- * #508 — the previous mainnet constant was a placeholder strkey that failed
- * checksum validation and threw on every mainnet `create({ token: 'USDC' })`
- * call), */
-export const USDC_ISSUER = {
-  testnet: 'GBBD47IF6LWK7P7MDEVSCWR7DPUWV3NY3DTQEVFL4NAT4AQH3ZLLFLA5',
-  mainnet: 'GA5ZSEJYB37JRC5AVCIA5MOP4RHTM335X2KGX3IHOJAPP5RE34K4KZVN',
-} as const;
-
-for (const [network, issuer] of Object.entries(USDC_ISSUER)) {
-  if (!StrKey.isValidEd25519PublicKey(issuer)) {
-    throw new Error(`Invalid USDC issuer strkey configured for ${network}: "${issuer}")`);
-  }
-}
-
 /** Minimum stream duration (in seconds). Streams cannot be created with duration less than this. */
 export const MIN_STREAM_DURATION_SECONDS = 3600;
 
@@ -112,3 +95,32 @@ export function clampOffset(offset: number): number {
 export const STREAM_FLAG_PAUSED = 1;
 export const STREAM_FLAG_CLAWBACK_ENABLED = 1 << 1;
 export const STREAM_FLAG_CANCELLED = 1 << 2;
+
+/**
+ * Known USDC issuer G-addresses per network.
+ *
+ * - `mainnet` — Circle's production issuer.
+ * - `testnet` — Circle's Testnet issuer (SDF Test Network).
+ * - `local`   — No canonical USDC issuer exists on a local Soroban instance.
+ *   Accessing this entry throws at runtime so callers get a clear error
+ *   instead of silently inheriting the mainnet address (see #804).
+ *
+ * @example
+ * ```ts
+ * import { USDC_ISSUER } from './constants.js';
+ * const issuer = USDC_ISSUER[network]; // throws on 'local'
+ * ```
+ */
+export const USDC_ISSUER: Record<'mainnet' | 'testnet', string> & {
+  readonly local: never;
+} = {
+  mainnet: 'GA5ZSEJYB37JRC5AVCIA5MOP4RHTM335X2KGX3IHOJAPP5RE34K4KZVN',
+  testnet: 'GBBD47IF6LWK7P7MDEVSCWR7DPUWV3NY3DTQEVFL4NAT4AQH3ZLLFLA5',
+  get local(): never {
+    throw new Error(
+      "token: 'USDC' is not supported on the 'local' network — no canonical " +
+      'USDC issuer exists on a local Soroban instance. ' +
+      'Pass an explicit contract address for your locally-deployed token instead.',
+    );
+  },
+} as const;

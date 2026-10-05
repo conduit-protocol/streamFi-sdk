@@ -1,9 +1,11 @@
 export { ConduitClient } from './client.js';
+export { StreamsModule, validateStreamParameters } from './streams.js';
 export { StreamBuilder, ConduitBatcher } from './builder.js';
 export type {
   BatchOperation,
   BatchExecuteOptions,
   BatchExecuteAsyncOptions,
+  BatchChunkProgress,
   BatchResult,
 } from './builder.js';
 export { withRetry, isTransientRpcError } from './with-retry.js';
@@ -11,6 +13,7 @@ export type { WithRetryOptions } from './with-retry.js';
 export {
   buildBatchTransactions,
   buildBatchTransactionsSync,
+  preBatchSimulate,
   BatchBuildError,
   BatchPartiallySubmittedError,
   submitBatch,
@@ -20,9 +23,12 @@ export type {
   BuiltBatchTransaction,
   ScValType,
   BatchSubmitResult,
+  BatchSubmitOutcome,
   BatchTxOutcome,
   BatchTxStatus,
   BatchSubmitOptions,
+  BatchSimulationResult,
+  BuildableOperation,
 } from './batch-tx.js';
 export { GraphQLIndexer, DEFAULT_INDEXER_TIMEOUT_MS, DEFAULT_INDEXER_MAX_PAGES } from './indexer.js';
 export { MockGraphQLIndexer, createMockIndexer } from './mock-indexer.js';
@@ -59,9 +65,10 @@ export {
    GovernorInvalidParamError,
    BackdatedStreamError,
    ConfirmationTimeoutError,
+   IndexerMaxPagesExceededError,
    isConduitError,
    SUPPORTED_NETWORKS,
-   CAIP2_TO_NETWORK,
+   CAI2_TO_NETWORK,
    UNKNOWN_CONTRACT_ERROR_CODE,
  } from './errors.js';
  export type { ConduitContract, StreamLifecycleState, SorobanDiagnosticInfo } from './errors.js';
@@ -88,6 +95,8 @@ export {
    normalizeProgress,
    withdrawableLocal,
    sumWithdrawable,
+   streamedTotalLocal,
+   sumStreamedTotal,
    bigintSafeStringify,
    timeoutSignal,
    streamStatus,
@@ -95,6 +104,7 @@ export {
    parseDuration,
    validateAndNormalizeAddress,
    isValidAddress,
+   formatTokenAmount,
  } from './utils.js';
 
 // Constants
@@ -109,13 +119,15 @@ export { TokenModule } from './token.js';
 
 // RPC server lifecycle
 export { getServer, clearServerCache, resolveFee } from './soroban.js';
+export { waitForConfirmation } from './soroban.js';
+export type { WaitForConfirmationOptions, ConfirmedTransaction } from './soroban.js';
 export {
   getTokenDecimals,
   clearTokenDecimalsCache,
   getTokenDecimalsCacheMetrics,
   resetTokenDecimalsCacheMetrics,
 } from './soroban.js';
-export { getCircuitState, recordSuccess, recordFailure, resetCircuit, getAllCircuitStates, type CircuitState, type CircuitStatus } from "./rpc-circuit-state.js";
+export { getCircuitState, recordSuccess, recordFailure, resetCircuit, getAllCircuitStates, onCircuitChange, onCircuitStateChange, type CircuitState, type CircuitStatus } from "./rpc-circuit-state.js";
 
 export {
   formatAddress,
@@ -168,6 +180,6 @@ export type {
 } from './module44.js';
 
 export { FactoryModule } from './factory.js';
-export type { FactoryStreamListResult } from './factory.js';
+export type { FactoryStreamListResult, StreamAddressesOptions } from './factory.js';
 export { GovernorModule } from './governor.js';
 export type { GovernorProposal } from './governor.js';

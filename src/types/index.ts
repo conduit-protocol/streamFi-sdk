@@ -56,6 +56,14 @@ export interface ConduitConfig {
    * retrying. Default 30_000 (30 seconds).
    */
   negativeCacheTtlMs?: number;
+  /**
+   * How long a `GovernorModule.getConfig()` read is reused, in milliseconds.
+   * Protocol parameters only change when a governance proposal passes, so a
+   * short window removes the need to re-simulate on every poll. Default
+   * 30_000 (30 seconds, ~6 ledgers). Set `0` to disable the cache and
+   * re-simulate on every call.
+   */
+  governorConfigCacheTtlMs?: number;
 }
 
 export interface StreamInfo {
@@ -92,6 +100,12 @@ export interface CreateStreamParams {
   durationSeconds?: number;
   /** Unix timestamp; defaults to current ledger time */
   startTime?: number;
+  /** Optional stop/end time (Unix timestamp) */
+  stopTime?: number;
+  /** Optional stop/end time alias (Unix timestamp) */
+  endTime?: number;
+  /** Optional sender address */
+  sender?: string;
   /** Whether the sender can claw back unstreamed tokens */
   clawbackEnabled?: boolean;
   /** Override rate in stroops/s (mutually exclusive with durationSeconds) */
@@ -100,6 +114,12 @@ export interface CreateStreamParams {
 
 /** Configuration for a single stream in a batch creation. */
 export type StreamConfig = CreateStreamParams;
+
+export interface ValidationResult {
+  isValid: boolean;
+  errors: string[];
+  error?: string;
+}
 
 export interface CreateStreamResult {
   streamId:      bigint;

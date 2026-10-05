@@ -793,13 +793,37 @@ interface PendingBatch {
   operations: BatchOperation[];
   signal?: AbortSignal | undefined;
   context?: BatchTransactionContext | undefined;
+  onProgress?: ((info: BatchChunkProgress) => void) | undefined;
   resolve: (result: BatchResult) => void;
+}
+
+/** Progress info delivered to {@link BatchExecuteAsyncOptions.onProgress} after each chunk. */
+export interface BatchChunkProgress {
+  /** Number of chunks whose transactions have been built and submitted so far. */
+  completedChunks: number;
+  /** Total number of chunks the batch was split into. */
+  totalChunks: number;
 }
 
 export interface BatchExecuteAsyncOptions {
   signal?: AbortSignal;
   /** Chain context used to build real transactions. Required to produce XDR. */
   context?: BatchTransactionContext;
+  /**
+   * Called after each chunk's transactions are built and submitted.
+   * Useful for rendering progress in a UI, e.g. "chunk 3 of 7 submitted".
+   *
+   * @example
+   * ```ts
+   * await batcher.executeAsync(operations, {
+   *   context,
+   *   onProgress: ({ completedChunks, totalChunks }) => {
+   *     setProgress(completedChunks / totalChunks);
+   *   },
+   * });
+   * ```
+   */
+  onProgress?: (info: BatchChunkProgress) => void;
 }
 
 /**
@@ -921,9 +945,12 @@ export class ConduitBatcher {
     const context = isSignal
       ? undefined
       : (signalOrOptions as BatchExecuteAsyncOptions | undefined)?.context;
+    const onProgress = isSignal
+      ? undefined
+      : (signalOrOptions as BatchExecuteAsyncOptions | undefined)?.onProgress;
 
     return new Promise<BatchResult>((resolve) => {
-      const entry: PendingBatch = { operations, signal, context, resolve };
+      const entry: PendingBatch = { operations, signal, context, onProgress, resolve };
       this.batchQueue.push(entry);
 
       const cleanup = () => {
@@ -947,7 +974,7 @@ export class ConduitBatcher {
       const entry = this.batchQueue.shift();
       if (!entry) continue;
 
-      const { operations: ops, signal, context, resolve } = entry;
+      const { operations: ops, signal, context, onProgress, resolve } = entry;
 
       let cancelled = false;
       const onAbort = () => { cancelled = true; };
@@ -993,12 +1020,37 @@ export class ConduitBatcher {
         }
 
         try {
-          const built = await buildBatchTransactions(sanitized, context);
-          if (cancelled) {
-            resolve(toFailure(['Operation aborted']));
-            continue;
+          // Split into chunks of DEFAULT_MAX_BATCH_SIZE so we can report
+          // progress after each one, matching execute()'s chunking behaviour.
+          const totalChunks = Math.ceil(sanitized.length / DEFAULT_MAX_BATCH_SIZE);
+          const allBuilt: BuiltBatchTransaction[] = [];
+
+          for (let i = 0; i < totalChunks; i++) {
+            if (cancelled) {
+              resolve(toFailure(['Operation aborted']));
+              break;
+            }
+
+            const chunkStart = i * DEFAULT_MAX_BATCH_SIZE;
+            const chunk = sanitized.slice(chunkStart, chunkStart + DEFAULT_MAX_BATCH_SIZE);
+            const built = await buildBatchTransactions(chunk, context);
+            allBuilt.push(...built);
+
+            if (cancelled) {
+              resolve(toFailure(['Operation aborted']));
+              break;
+            }
+
+            try {
+              onProgress?.({ completedChunks: i + 1, totalChunks });
+            } catch {
+              // Never let a caller's onProgress throw abort the batch.
+            }
           }
-          resolve(toBatchResult(built));
+
+          if (!cancelled) {
+            resolve(toBatchResult(allBuilt, totalChunks));
+          }
         } catch (err) {
           const message = err instanceof Error ? err.message : String(err);
           resolve(toFailure([message]));

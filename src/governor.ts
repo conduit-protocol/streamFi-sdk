@@ -5,6 +5,7 @@
 import { Address, xdr } from '@stellar/stellar-sdk';
 import type { ConduitConfig, GovernorConfig } from './types/index.js';
 import { ZERO_ADDR } from './constants.js';
+import { coalesceAsync } from './coalesce-async.js';
 import {
   buildContractCallTx,
   simulateReadOnly,
@@ -16,12 +17,45 @@ import {
 } from './soroban.js';
 import { SUPPORTED_NETWORKS, UnsupportedChainError } from './errors.js';
 
+/**
+ * How long a `config` read is reused before re-simulating (#785).
+ *
+ * Governance parameters change only when a proposal passes, so the window
+ * is a staleness budget rather than a correctness requirement. 30s is ~6
+ * Stellar ledgers at the 5s close cadence, and matches the default
+ * `negativeCacheTtlMs` so the two caches in this SDK fail fresh at the same
+ * time. Override it with `ConduitConfig.governorConfigCacheTtlMs`, or set
+ * `0` to disable caching.
+ */
+const GOVERNOR_CONFIG_CACHE_TTL_MS = 30_000;
+
 export class GovernorModule {
   private readonly rpcUrl:      string;
   private readonly passphrase:  string;
   private readonly governorId: string | undefined;
   private readonly callerAddr:  string;
   private readonly network:     ConduitConfig['network'];
+
+  /**
+   * Cached `config` read and the timestamp it goes stale at (#785). A single
+   * entry is enough: a `GovernorModule` reads exactly one contract, so there
+   * is only ever one key.
+   */
+  private configCache: { value: GovernorConfig; expiresAt: number } | undefined;
+  private readonly configCacheTtlMs: number;
+  /**
+   * In-flight `config` fetches, keyed by the constant `'config'`. Coalesces
+   * the burst of calls a TTL cache produces the moment its entry expires —
+   * without it, N concurrent callers all miss at once and N simulations go
+   * out. Reuses {@link coalesceAsync} (the same helper `soroban.ts` uses for
+   * token decimals), which evicts a rejection so the next caller retries.
+   *
+   * Entries are released as soon as the shared fetch settles, because
+   * `coalesceAsync` only evicts on rejection and a retained *fulfilled*
+   * promise would pin the first result past its TTL. An in-flight entry is
+   * therefore always a fetch that has not completed yet.
+   */
+  private readonly inFlightConfig = new Map<string, Promise<GovernorConfig>>();
 
   // Unlike FactoryModule (a hard prerequisite for virtually all StreamsModule
   // methods), GovernorModule is orthogonal to stream operations — a caller
@@ -40,9 +74,27 @@ export class GovernorModule {
     this.governorId = cfg.governorAddress;
     this.callerAddr = cfg.keypair?.publicKey() ?? ZERO_ADDR;
     this.network    = cfg.network;
+    this.configCacheTtlMs = cfg.governorConfigCacheTtlMs ?? GOVERNOR_CONFIG_CACHE_TTL_MS;
   }
 
-  /** Fetch the current protocol config from the DripGovernor contract. */
+  /**
+   * Fetch the current protocol config from the DripGovernor contract.
+   *
+   * The result is cached for `governorConfigCacheTtlMs` (default 30s) —
+   * governance parameters only change when a proposal passes, so a polling
+   * dashboard should not pay a simulation per tick for data that is almost
+   * always unchanged (#785). Concurrent misses share a single simulation,
+   * and a failed one is never cached.
+   *
+   * Each caller receives its own object, so mutating a result (e.g. holding
+   * a locally-adjusted copy) cannot change what the next caller sees. Call
+   * {@link clearConfigCache} to force the next call to re-simulate, or set
+   * `governorConfigCacheTtlMs: 0` to disable caching outright.
+   *
+   * @param signal - Abort signal; rejects with an `AbortError` if already
+   *   aborted. The signal gates *this* call only — it never aborts an
+   *   in-flight simulation that other concurrent callers are also awaiting.
+   */
   async getConfig(signal?: AbortSignal): Promise<GovernorConfig> {
     if (signal?.aborted) throw new DOMException("Aborted", "AbortError");
     if (!this.governorId) {
@@ -50,12 +102,39 @@ export class GovernorModule {
         `ConduitConfig.governorAddress is required (no default DripGovernor is known for network "${this.network}").`,
       );
     }
-    const tx  = await buildContractCallTx(
-      this.rpcUrl, this.passphrase, this.callerAddr,
-      this.governorId, 'config', [],
-    );
-    const val = await simulateReadOnly(this.rpcUrl, this.passphrase, tx);
-    return parseGovernorConfig(val);
+
+    const cached = this.configCache;
+    if (cached && Date.now() < cached.expiresAt) {
+      return { ...cached.value };
+    }
+
+    const value = await coalesceAsync(this.inFlightConfig, 'config', async () => {
+      const tx  = await buildContractCallTx(
+        this.rpcUrl, this.passphrase, this.callerAddr,
+        this.governorId!, 'config', [],
+      );
+      const val = await simulateReadOnly(this.rpcUrl, this.passphrase, tx);
+      const parsed = parseGovernorConfig(val);
+      // Stamped on completion, so the TTL bounds staleness from the moment
+      // the data was actually read rather than from when the call started.
+      // A TTL of 0 (or less) yields an entry that is never fresh again, so
+      // caching is effectively off without a separate code path.
+      this.configCache = { value: parsed, expiresAt: Date.now() + this.configCacheTtlMs };
+      return parsed;
+    });
+
+    // `coalesceAsync` holds on to a *fulfilled* promise, which would pin the
+    // first result forever and defeat the TTL. Release the entry once the
+    // shared fetch has settled (callers already awaiting it keep their
+    // reference); a rejection was already evicted by `coalesceAsync` itself.
+    this.inFlightConfig.delete('config');
+
+    return { ...value };
+  }
+
+  /** Drop the cached `config` read so the next {@link getConfig} re-simulates. */
+  clearConfigCache(): void {
+    this.configCache = undefined;
   }
 
   /** Fetch active governance proposals from the DripGovernor contract. */
