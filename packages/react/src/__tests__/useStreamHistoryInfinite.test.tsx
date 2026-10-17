@@ -1,0 +1,76 @@
+import { describe, it, expect, vi, beforeEach } from 'vitest';
+import { render, screen, waitFor, fireEvent } from '@testing-library/react';
+import { QueryClient, QueryClientProvider } from '@tanstack/react-query';
+import { StreamFiProvider, useStreamHistoryInfinite } from '../index.js';
+
+const mockGetHistory = vi.fn();
+
+vi.mock('@conduit-protocol/sdk', () => ({
+  SUPPORTED_NETWORKS: ['testnet', 'mainnet', 'local'],
+  UnsupportedChainError: class extends Error {},
+  clearServerCache: vi.fn(),
+  clearTokenDecimalsCache: vi.fn(),
+  ConduitClient: vi.fn(function () {
+    return { streams: { getHistory: mockGetHistory } };
+  }),
+}));
+
+const entry = (id: string) => ({ id, kind: 'withdraw', ledger: 1, timestamp: '', txHash: id, event: {} });
+
+function History({ id, pageSize }: { id: string | undefined; pageSize?: number }) {
+  const h = useStreamHistoryInfinite(id, pageSize);
+  if (h.error) return <div data-testid="error">{h.error.message}</div>;
+  return (
+    <div>
+      <div data-testid="loading">{String(h.isLoading)}</div>
+      <div data-testid="ids">{h.entries.map((e) => e.id).join(',')}</div>
+      <div data-testid="more">{String(h.hasNextPage)}</div>
+      <button onClick={() => void h.fetchNextPage()}>more</button>
+    </div>
+  );
+}
+
+function renderHistory(ui: React.ReactElement) {
+  const qc = new QueryClient({ defaultOptions: { queries: { retry: false } } });
+  return render(
+    <QueryClientProvider client={qc}>
+      <StreamFiProvider config={{ network: 'testnet' as const }}>{ui}</StreamFiProvider>
+    </QueryClientProvider>,
+  );
+}
+
+describe('useStreamHistoryInfinite', () => {
+  beforeEach(() => {
+    mockGetHistory.mockReset();
+  });
+
+  it('loads the first page and appends further pages via the cursor', async () => {
+    mockGetHistory
+      .mockResolvedValueOnce({ entries: [entry('a'), entry('b')], nextCursor: 'c1' })
+      .mockResolvedValueOnce({ entries: [entry('c')], nextCursor: undefined });
+
+    renderHistory(<History id="7" pageSize={2} />);
+
+    await waitFor(() => expect(screen.getByTestId('ids')).toHaveTextContent('a,b'));
+    expect(screen.getByTestId('more')).toHaveTextContent('true');
+    expect(mockGetHistory).toHaveBeenNthCalledWith(1, '7', { limit: 2 });
+
+    fireEvent.click(screen.getByText('more'));
+
+    await waitFor(() => expect(screen.getByTestId('ids')).toHaveTextContent('a,b,c'));
+    expect(mockGetHistory).toHaveBeenNthCalledWith(2, '7', { limit: 2, cursor: 'c1' });
+    expect(screen.getByTestId('more')).toHaveTextContent('false');
+  });
+
+  it('does not fetch until a stream id is provided', async () => {
+    renderHistory(<History id={undefined} />);
+    await waitFor(() => expect(screen.getByTestId('ids')).toBeInTheDocument());
+    expect(mockGetHistory).not.toHaveBeenCalled();
+  });
+
+  it('surfaces errors', async () => {
+    mockGetHistory.mockRejectedValue(new Error('rpc down'));
+    renderHistory(<History id="7" />);
+    await waitFor(() => expect(screen.getByTestId('error')).toHaveTextContent('rpc down'));
+  });
+});

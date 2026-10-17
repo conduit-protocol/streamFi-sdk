@@ -355,3 +355,43 @@ function StreamForm() {
   );
 }
 ```
+
+---
+
+## useStreamHistoryInfinite
+
+Infinite-scroll activity history (withdrawals, top-ups, pauses, …) for a stream, built on
+TanStack Query's `useInfiniteQuery`. Requires `@tanstack/react-query` v5 (an optional peer
+dependency) and a `<QueryClientProvider>` above the component.
+
+```tsx
+import { useStreamHistoryInfinite } from '@streamfi/react';
+
+function Activity({ streamId }) {
+  const { entries, hasNextPage, fetchNextPage, isFetchingNextPage, isLoading, error } =
+    useStreamHistoryInfinite(streamId, 25);
+
+  if (isLoading) return <p>Loading…</p>;
+  if (error) return <p>{error.message}</p>;
+
+  return (
+    <>
+      <ul>
+        {entries.map((e) => (
+          <li key={e.id}>{e.kind} · ledger {e.ledger}</li>
+        ))}
+      </ul>
+      {hasNextPage && (
+        <button disabled={isFetchingNextPage} onClick={() => fetchNextPage()}>
+          Load more
+        </button>
+      )}
+    </>
+  );
+}
+```
+
+`entries` is oldest first. Pages come from `client.streams.getHistory()`, which reads Soroban RPC
+events and so only covers the RPC retention window (about seven days); use the indexer for
+older history. `pageSize` is 1–200 (default 50); the query is disabled while `streamId` is
+`undefined`.

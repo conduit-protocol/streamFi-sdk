@@ -2,12 +2,15 @@
  * GovernorModule — DripGovernor config reads.
  */
 
-import { Address, xdr } from '@stellar/stellar-sdk';
+import { Address, Transaction, nativeToScVal, xdr } from '@stellar/stellar-sdk';
 import type { ConduitConfig, GovernorConfig } from './types/index.js';
+import type { Signer } from './signer.js';
 import { ZERO_ADDR } from './constants.js';
 import { coalesceAsync } from './coalesce-async.js';
 import {
   buildContractCallTx,
+  invokeContract,
+  resolveFee,
   simulateReadOnly,
   scValToI128,
   scValToU32,
@@ -35,6 +38,7 @@ export class GovernorModule {
   private readonly governorId: string | undefined;
   private readonly callerAddr:  string;
   private readonly network:     ConduitConfig['network'];
+  private readonly cfg:         ConduitConfig;
 
   /**
    * Cached `config` read and the timestamp it goes stale at (#785). A single
@@ -74,6 +78,7 @@ export class GovernorModule {
     this.governorId = cfg.governorAddress;
     this.callerAddr = cfg.keypair?.publicKey() ?? ZERO_ADDR;
     this.network    = cfg.network;
+    this.cfg        = cfg;
     this.configCacheTtlMs = cfg.governorConfigCacheTtlMs ?? GOVERNOR_CONFIG_CACHE_TTL_MS;
   }
 
@@ -151,6 +156,128 @@ export class GovernorModule {
     const val = await simulateReadOnly(this.rpcUrl, this.passphrase, tx);
     return parseGovernorProposals(val);
   }
+
+  /**
+   * Execute several approved proposals, e.g. to apply a multi-step parameter
+   * change (pause threshold and fee bps) in one call.
+   *
+   * Soroban allows only one `invoke_host_function` operation per transaction,
+   * so this cannot be a single atomic transaction: each proposal is submitted
+   * as its own transaction, one at a time, in the order given. Submitting
+   * sequentially also keeps the caller's sequence numbers valid (the same
+   * reason `StreamsModule.batchWithdraw` is sequential). Results are reported
+   * per proposal, so a failure does not hide the outcome of the others.
+   *
+   * Because later proposals may depend on earlier ones, pass
+   * `{ stopOnError: true }` to halt at the first failure; the remaining
+   * proposals are then reported as skipped rather than submitted.
+   *
+   * @param proposalIds - Proposal ids to execute. Duplicates are rejected.
+   * @param options.signal - Abort signal, checked before each submission.
+   * @throws if no signer is configured, `proposalIds` is empty, or an id is
+   *   not a non-negative safe integer / is duplicated.
+   */
+  async executeMultipleProposals(
+    proposalIds: number[],
+    options: ExecuteProposalsOptions = {},
+  ): Promise<ExecuteProposalResult[]> {
+    if (!this.governorId) {
+      throw new Error(
+        `ConduitConfig.governorAddress is required (no default DripGovernor is known for network "${this.network}").`,
+      );
+    }
+    if (!Array.isArray(proposalIds) || proposalIds.length === 0) {
+      throw new Error('proposalIds must be a non-empty array');
+    }
+    const seen = new Set<number>();
+    for (const id of proposalIds) {
+      if (!Number.isSafeInteger(id) || id < 0) {
+        throw new Error(`Invalid proposal id ${String(id)}: must be a non-negative integer`);
+      }
+      if (seen.has(id)) throw new Error(`Duplicate proposal id ${id}`);
+      seen.add(id);
+    }
+
+    const signer = this.resolveSigner();
+    const caller = await this.resolveCaller();
+    const fee    = resolveFee(this.cfg);
+    const polling = {
+      ...(this.cfg.confirmationPollIntervalMs !== undefined && { pollIntervalMs: this.cfg.confirmationPollIntervalMs }),
+      ...(this.cfg.confirmationMaxAttempts !== undefined && { maxAttempts: this.cfg.confirmationMaxAttempts }),
+    };
+
+    const results: ExecuteProposalResult[] = [];
+    let halted = false;
+    for (const proposalId of proposalIds) {
+      if (halted) {
+        results.push({ proposalId, success: false, skipped: true, error: new Error('Skipped after an earlier proposal failed') });
+        continue;
+      }
+      try {
+        if (options.signal?.aborted) throw new DOMException('Aborted', 'AbortError');
+        const tx = await buildContractCallTx(
+          this.rpcUrl, this.passphrase, caller, this.governorId,
+          'execute', [nativeToScVal(BigInt(proposalId), { type: 'u64' })], fee,
+        );
+        const txHash = await invokeContract(this.rpcUrl, this.passphrase, signer, tx, polling);
+        results.push({ proposalId, success: true, txHash });
+      } catch (err) {
+        // DOMException (AbortError) is not an `Error` subclass in every runtime.
+        const error = err instanceof Error || (typeof err === 'object' && err !== null && 'message' in err)
+          ? (err as Error)
+          : new Error(String(err));
+        results.push({ proposalId, success: false, error });
+        if (options.stopOnError) halted = true;
+      }
+    }
+    return results;
+  }
+
+  private resolveSigner(): Signer {
+    const { wallet, signer, keypair } = this.cfg;
+    if (wallet) {
+      const passphrase = this.passphrase;
+      return {
+        publicKey: () => { throw new Error('use wallet.getPublicKey()'); },
+        sign: async (tx) => {
+          const signed = await wallet.signTransaction(tx, { networkPassphrase: passphrase });
+          if (signed == null) throw new Error('Wallet adapter signTransaction returned null or undefined');
+          return typeof signed === 'string' ? new Transaction(signed, passphrase) : signed;
+        },
+      };
+    }
+    if (signer) return signer;
+    if (keypair) {
+      return { publicKey: () => keypair.publicKey(), sign: (tx) => { tx.sign(keypair); } };
+    }
+    throw new Error('keypair, wallet adapter, or signer is required for mutating operations');
+  }
+
+  private async resolveCaller(): Promise<string> {
+    const { wallet, signer, keypair } = this.cfg;
+    if (wallet) return wallet.getPublicKey();
+    if (signer) return signer.publicKey();
+    if (keypair) return keypair.publicKey();
+    throw new Error('keypair, wallet adapter, or signer is required for mutating operations');
+  }
+}
+
+export interface ExecuteProposalsOptions {
+  /** Halt at the first failed proposal; later ones are reported as skipped. Default `false`. */
+  stopOnError?: boolean;
+  /** Abort signal, checked before each submission. */
+  signal?: AbortSignal;
+}
+
+export interface ExecuteProposalResult {
+  proposalId: number;
+  success: boolean;
+  /** Transaction hash, present when `success` is true. */
+  txHash?: string;
+  /** Failure reason, present when `success` is false. */
+  error?: Error;
+  /** True when not attempted because `stopOnError` halted the run. */
+  skipped?: boolean;
 }
 
 export interface GovernorProposal {

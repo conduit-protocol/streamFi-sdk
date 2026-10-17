@@ -5,6 +5,10 @@ All notable changes are documented here. Format based on [Keep a Changelog](http
 ## [Unreleased]
 
 ### Added
+- `KeypairWalletAdapter.exportKeystore(passphrase)` / `KeypairWalletAdapter.fromKeystore(keystore, passphrase)` — passphrase-encrypted (PBKDF2-SHA256 + AES-256-GCM, Web Crypto) key export so CLI tools and bots no longer need a plaintext secret on disk (#819).
+- `GovernorModule.executeMultipleProposals(ids, { stopOnError?, signal? })` — executes several approved proposals sequentially with per-proposal results (#846).
+- `ConduitConfig.customFetch` routes Soroban RPC requests (via an axios interceptor, since stellar-sdk v12 has no fetch hook) and the fee estimator's Horizon call through a caller-supplied `fetch` for edge runtimes, proxies and tracing headers (#862).
+- `StreamsModule.getHistory()` / `getStreamHistory()` — cursor-paginated stream event history, and `@streamfi/react` `useStreamHistoryInfinite(streamId, pageSize)` built on TanStack Query's `useInfiniteQuery` (new optional peer dependency `@tanstack/react-query` ^5) (#863).
 - `@streamfi/react`: `useNetworkSwitcher()` hook and reactive network switching in `StreamFiProvider` (`network`, `setNetwork`, `isSupportedNetwork`, `availableNetworks`), allowing dApps to switch between Stellar networks seamlessly without remounting or managing out-of-band state (#833).
 - `ConduitClient.network` getter returning the active configured network (`Network`).
 - `NETWORK_NAMES`, `EXPLORER_URLS`, and `NetworkType` provide shared human-readable Stellar network labels and Stellar Expert transaction, contract, and account URL bases (#832).
@@ -75,6 +79,8 @@ All notable changes are documented here. Format based on [Keep a Changelog](http
 - Documented `StreamBuilder.startTime()`/`endTime()`/`clawbackEnabled()`/`toContractArgs()`/`toBatchOperation()` in `docs/api.md`, and added a note under `ConduitBatcher` clarifying that `execute()` alone cannot build a real `create_stream` invocation (#435).
 
 ### Fixed
+- `invokeContract()` now uses the `Transaction` returned by `Signer.sign()` instead of discarding it, matching `StreamsModule`; the `CAI2_TO_NETWORK` export typo in `src/index.ts` that broke `tsc` is corrected to `CAIP2_TO_NETWORK`.
+- `invokeContract()` now uses the `Transaction` returned by `Signer.sign()` instead of discarding it, matching `StreamsModule` (#519); the `index.ts` `CAI2_TO_NETWORK` export typo that broke `tsc` is corrected to `CAIP2_TO_NETWORK`.
 - `formatAmount()` no longer returns a signed-zero string (`"-0"`) for negative stroop values that scale to nothing, and a non-finite `decimals` argument now falls back to 7 instead of producing `NaN`-scaled output. Property/fuzz tests lock the round-trip and no-throw invariants (#618).
 - `ConduitBatcher.execute()`'s `create_stream` path now builds ABI-exact positional args — `deposit_amount`/`rate_per_sec` as `i128`, `start_time`/`end_time` as `u64` (honoring `startTime`/`endTime`/`clawbackEnabled` when present) — instead of feeding raw values through the old blanket i64/i128 encoding (#497).
 - Removed a duplicate `let consecutiveFailures = 0;` declaration in `src/events.ts` that made the module a `SyntaxError` at load time, breaking `npm run typecheck`, the `npm ci` build, and every event-subscription test.

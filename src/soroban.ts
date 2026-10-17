@@ -7,6 +7,7 @@
 
 import {
   SorobanRpc,
+  Transaction,
   TransactionBuilder,
   Networks,
   Contract,
@@ -344,13 +345,15 @@ export async function invokeContract(
   // Assemble (adds soroban auth + footprint)
   const assembled = SorobanRpc.assembleTransaction(tx, simResult).build();
 
-  // Sign
-  await signer.sign(assembled);
+  // Sign. A Signer may mutate in place (void) or return a new signed
+  // Transaction (see Signer.sign); honour the latter or the signature is lost.
+  const signedResult = await signer.sign(assembled);
+  const signed = signedResult instanceof Transaction ? signedResult : assembled;
 
   // Submit
   let sent;
   try {
-    sent = await catchNetworkError('sendTransaction', server.sendTransaction(assembled));
+    sent = await catchNetworkError('sendTransaction', server.sendTransaction(signed));
   } catch (err) {
     throw RateLimitError.fromRpcError(err) ?? err;
   }

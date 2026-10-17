@@ -50,6 +50,7 @@ import {
   STREAM_FLAG_CLAWBACK_ENABLED,
   MIN_STREAM_DURATION_SECONDS,
 } from './constants.js';
+import type { StreamHistoryOptions, StreamHistoryPage } from './events.js';
 import { buildBatchTransactions } from './batch-tx.js';
 import type { BatchTransactionContext } from './batch-tx.js';
 import { FactoryModule } from './factory.js';
@@ -236,7 +237,7 @@ export class StreamsModule {
   private readonly rpcUrl:       string;
   private readonly passphrase:   string;
   private readonly _factory:     FactoryModule;
-  private readonly feeEstimator: FeeEstimator = new FeeEstimator();
+  private readonly feeEstimator: FeeEstimator;
   private readonly feeEstimateCache = new Map<string, { estimate: FeeEstimate; fetchedAt: number }>();
   private activeWallet?:         WalletAdapter;
 
@@ -266,6 +267,7 @@ export class StreamsModule {
     this.passphrase = NETWORK_PASSPHRASE[config.network];
     this._factory   = new FactoryModule(config);
     this._fee       = resolveFee(config);
+    this.feeEstimator = new FeeEstimator(100n, config.customFetch ? { fetch: config.customFetch } : {});
 
     if (config.wallet) {
       this.activeWallet = config.wallet;
@@ -1037,6 +1039,20 @@ export class StreamsModule {
     // otherwise a client built without an explicit rpcUrl passes `undefined`
     // to `createRpcServer`, which throws / never connects.
     return subscribeToStream(this.rpcUrl, address, handlers);
+  }
+
+  /**
+   * Fetch one page of a stream's event history (withdrawals, top-ups, pauses,
+   * etc.), oldest first. Pass the returned `nextCursor` back as `cursor` to
+   * page forward — see {@link getStreamHistory} for the RPC retention caveat.
+   */
+  async getHistory(
+    streamId: bigint | string,
+    options: StreamHistoryOptions = {},
+  ): Promise<StreamHistoryPage> {
+    const addr = await this._resolveAddr(BigInt(streamId));
+    const { getStreamHistory } = await import('./events.js');
+    return getStreamHistory(this.rpcUrl, addr, options);
   }
 
   /** Clear the address cache. Useful for testing or manual memory management. */

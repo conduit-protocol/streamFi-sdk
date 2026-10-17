@@ -521,3 +521,114 @@ export function dispatchEvent(
 
   return sequence;
 }
+
+// ── History (paginated, one-shot) ────────────────────────────────────────────
+
+/** Soroban RPC retains roughly seven days of events at ~5s per ledger. */
+export const DEFAULT_HISTORY_LOOKBACK_LEDGERS = 120_000;
+export const DEFAULT_HISTORY_PAGE_SIZE = 50;
+export const MAX_HISTORY_PAGE_SIZE = 200;
+
+interface StreamHistoryBase {
+  /** Soroban event id, unique per event. */
+  id:        string;
+  ledger:    number;
+  /** ISO-8601 ledger close time. */
+  timestamp: string;
+  txHash:    string;
+}
+
+/** One decoded stream event, discriminated by `kind`. */
+export type StreamHistoryEntry = StreamHistoryBase & (
+  | { kind: 'created';  event: CreatedEvent }
+  | { kind: 'withdraw'; event: WithdrawEvent }
+  | { kind: 'top_up';   event: TopUpEvent }
+  | { kind: 'pause';    event: PauseEvent }
+  | { kind: 'resume';   event: ResumeEvent }
+  | { kind: 'cancel';   event: CancelEvent }
+  | { kind: 'clawback'; event: ClawbackEvent }
+);
+
+export interface StreamHistoryPage {
+  /** Entries in ledger order, oldest first. */
+  entries:    StreamHistoryEntry[];
+  /** Pass as `cursor` to fetch the next page; `undefined` when exhausted. */
+  nextCursor: string | undefined;
+}
+
+export interface StreamHistoryOptions {
+  /** Cursor from a previous page's `nextCursor`. Omit for the first page. */
+  cursor?:      string;
+  /** Events per page, 1–{@link MAX_HISTORY_PAGE_SIZE}. Default {@link DEFAULT_HISTORY_PAGE_SIZE}. */
+  limit?:       number;
+  /**
+   * Ledger to start from on the first page (ignored when `cursor` is set).
+   * Defaults to {@link DEFAULT_HISTORY_LOOKBACK_LEDGERS} before the latest
+   * ledger. Soroban RPC only serves events inside its retention window; use
+   * the indexer for older history.
+   */
+  startLedger?: number;
+}
+
+/**
+ * Fetch one page of a stream contract's event history.
+ *
+ * Unlike {@link subscribeToStream} this is a single request, suited to
+ * "load more" / infinite-scroll UIs: feed `nextCursor` back as `cursor`.
+ */
+export async function getStreamHistory(
+  rpcUrl:        string,
+  streamAddress: string,
+  options:       StreamHistoryOptions = {},
+): Promise<StreamHistoryPage> {
+  const limit = options.limit ?? DEFAULT_HISTORY_PAGE_SIZE;
+  if (!Number.isInteger(limit) || limit < 1 || limit > MAX_HISTORY_PAGE_SIZE) {
+    throw new Error(`limit must be an integer between 1 and ${MAX_HISTORY_PAGE_SIZE}`);
+  }
+
+  const server = createRpcServer(rpcUrl);
+  let request: SorobanRpc.Server.GetEventsRequest;
+  const filters = [{ type: 'contract' as const, contractIds: [streamAddress] }];
+  if (options.cursor) {
+    request = { cursor: options.cursor, filters, limit };
+  } else {
+    let startLedger = options.startLedger;
+    if (startLedger === undefined) {
+      const latest = await server.getLatestLedger();
+      startLedger = Math.max(1, latest.sequence - DEFAULT_HISTORY_LOOKBACK_LEDGERS);
+    }
+    request = { startLedger, filters, limit };
+  }
+
+  const response = await server.getEvents(request);
+  const entries: StreamHistoryEntry[] = [];
+
+  for (const raw of response.events) {
+    let entry: StreamHistoryEntry | undefined;
+    const base: StreamHistoryBase = {
+      id: raw.id, ledger: raw.ledger, timestamp: raw.ledgerClosedAt, txHash: raw.txHash,
+    };
+    try {
+      dispatchEvent(raw, {
+        onCreated:  (event) => { entry = { ...base, kind: 'created', event }; },
+        onWithdraw: (event) => { entry = { ...base, kind: 'withdraw', event }; },
+        onTopUp:    (event) => { entry = { ...base, kind: 'top_up', event }; },
+        onPause:    (event) => { entry = { ...base, kind: 'pause', event }; },
+        onResume:   (event) => { entry = { ...base, kind: 'resume', event }; },
+        onCancel:   (event) => { entry = { ...base, kind: 'cancel', event }; },
+        onClawback: (event) => { entry = { ...base, kind: 'clawback', event }; },
+      });
+    } catch (err) {
+      // One undecodable event must not hide the rest of the page.
+      console.warn('[conduit-sdk] skipping undecodable history event:', err);
+    }
+    if (entry) entries.push(entry);
+  }
+
+  // A full page means there may be more. The cursor is a response field the
+  // SDK's types omit; fall back to the last event's paging token.
+  const last = response.events[response.events.length - 1];
+  const cursor = (response as { cursor?: string }).cursor ?? last?.pagingToken;
+  const nextCursor = response.events.length >= limit ? cursor : undefined;
+  return { entries, nextCursor };
+}

@@ -68,7 +68,7 @@ export {
    IndexerMaxPagesExceededError,
    isConduitError,
    SUPPORTED_NETWORKS,
-   CAI2_TO_NETWORK,
+   CAIP2_TO_NETWORK,
    UNKNOWN_CONTRACT_ERROR_CODE,
  } from './errors.js';
  export type { ConduitContract, StreamLifecycleState, SorobanDiagnosticInfo } from './errors.js';
@@ -182,4 +182,9 @@ export type {
 export { FactoryModule } from './factory.js';
 export type { FactoryStreamListResult, StreamAddressesOptions } from './factory.js';
 export { GovernorModule } from './governor.js';
-export type { GovernorProposal } from './governor.js';
+export type {
+  StreamHistoryEntry,
+  StreamHistoryPage,
+  StreamHistoryOptions,
+} from './events.js';
+export type { GovernorProposal, ExecuteProposalResult, ExecuteProposalsOptions } from './governor.js';

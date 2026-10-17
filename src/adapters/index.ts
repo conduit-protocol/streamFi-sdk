@@ -9,6 +9,8 @@ export interface AvailableWallet {
 }
 
 export { KeypairWalletAdapter } from './keypair.js';
+export { DEFAULT_KEYSTORE_ITERATIONS, KEYSTORE_VERSION } from './keystore.js';
+export type { Keystore, ExportKeystoreOptions } from './keystore.js';
 export {
   WalletConnectAdapter,
   type WalletConnectAdapterOptions,

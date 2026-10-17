@@ -122,6 +122,7 @@ const client = new ConduitClient(config: ConduitConfig);
 | `governorAddress` | `string` | No | Override deployed governor contract ID |
 | `fee` | `string` | No | Explicit inclusion fee in stroops (overrides feeMultiplier) |
 | `feeMultiplier` | `number` | No | Multiplier applied to BASE_FEE when fee is not set |
+| `customFetch` | `typeof fetch` | No | `fetch` used for Soroban RPC and fee-estimator requests (edge runtimes, proxies, tracing headers, timeouts). Registered per `rpcUrl`, process-wide |
 
 ### Fee Precedence
 
@@ -537,6 +538,31 @@ The result is reused for `governorConfigCacheTtlMs` (default 30s) — protocol p
 change when a governance proposal passes, so a polling dashboard no longer pays a simulation
 per tick. Set it to `0` to re-simulate on every call, or call
 `client.governor.clearConfigCache()` to force a refresh.
+
+Execute several approved proposals (e.g. a pause threshold and a fee change) in one call:
+
+```typescript
+const results = await client.governor.executeMultipleProposals([12, 13], { stopOnError: true });
+// [{ proposalId: 12, success: true, txHash: '…' }, { proposalId: 13, success: false, error }]
+```
+
+Soroban permits one contract invocation per transaction, so each proposal is its own transaction,
+submitted sequentially in the order given. Failures are reported per proposal; `stopOnError`
+marks the remainder `skipped`. Requires a `keypair`, `wallet`, or `signer`.
+
+### Encrypted keystore
+
+Persist a `KeypairWalletAdapter` key on disk without a plaintext `S...` secret:
+
+```typescript
+const adapter = new KeypairWalletAdapter(Keypair.fromSecret(secret));
+await fs.writeFile('key.json', JSON.stringify(await adapter.exportKeystore(passphrase)));
+
+const restored = await KeypairWalletAdapter.fromKeystore(await fs.readFile('key.json', 'utf8'), passphrase);
+```
+
+PBKDF2-SHA256 (600k iterations) + AES-256-GCM via Web Crypto; the public key is readable without
+the passphrase. This is the SDK's own format, not Ethereum Web3 Secret Storage.
 
 ---
 

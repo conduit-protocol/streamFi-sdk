@@ -15,6 +15,7 @@ import type {
 } from "./types/index.js";
 import type { WalletAdapter } from "./adapters/types.js";
 import { DEFAULT_RPC, getServer } from "./soroban.js";
+import { registerCustomFetch } from "./custom-fetch.js";
 import { SorobanRpc } from '@stellar/stellar-sdk';
 import { StreamsModule } from "./streams.js";
 import { FactoryModule } from "./factory.js";
@@ -230,6 +231,11 @@ export class ConduitClient {
       ...config,
       rpcUrl: config.rpcUrl ?? DEFAULT_RPC[config.network],
     };
+
+    // Must precede module construction: modules may issue RPC calls at once.
+    if (this.config.customFetch) {
+      registerCustomFetch(this.config.rpcUrl, this.config.customFetch);
+    }
 
     // If a wallet is provided at construction time, validate its chain too.
     if (this.config.wallet) {

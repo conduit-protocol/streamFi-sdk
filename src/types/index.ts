@@ -64,6 +64,17 @@ export interface ConduitConfig {
    * re-simulate on every call.
    */
   governorConfigCacheTtlMs?: number;
+  /**
+   * Custom `fetch` used for Soroban RPC requests and for the fee estimator's
+   * Horizon `/fee_stats` call — for edge runtimes (Cloudflare Workers),
+   * proxies/custom HTTP agents, request-tracing headers, or timeouts that the
+   * global `fetch` does not provide.
+   *
+   * RPC routing is registered per `rpcUrl` and is process-wide, so two
+   * clients sharing an `rpcUrl` share the most recently supplied function.
+   * Indexer (GraphQL) traffic is configured separately on `GraphQLIndexer`.
+   */
+  customFetch?: typeof fetch;
 }
 
 export interface StreamInfo {
