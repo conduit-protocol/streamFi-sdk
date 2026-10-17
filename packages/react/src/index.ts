@@ -17,7 +17,7 @@ export { useWithdrawStream } from './hooks/useWithdrawStream.js';
 export type { UseWithdrawStreamResult, WithdrawStreamFn } from './hooks/useWithdrawStream.js';
 export { useCancelStream } from './hooks/useCancelStream.js';
 export type { UseCancelStreamResult, CancelStreamFn, CancelSettlement } from './hooks/useCancelStream.js';
-export { CancelStreamConfirmation } from './components/CancelStreamConfirmation.js';
+export { CancelStreamConfirmation, CancelStreamConfirmationModal } from './components/CancelStreamConfirmation.js';
 export type { CancelStreamConfirmationProps } from './components/CancelStreamConfirmation.js';
 export { usePauseStream } from './hooks/usePauseStream.js';
 export type { UsePauseStreamResult, PauseStreamFn } from './hooks/usePauseStream.js';
@@ -30,7 +30,7 @@ export type { UseForceCancelStreamResult, ForceCancelStreamFn } from './hooks/us
 export { useTransferStreamRecipient } from './hooks/useTransferStreamRecipient.js';
 export type { UseTransferStreamRecipientResult, TransferRecipientFn } from './hooks/useTransferStreamRecipient.js';
 export { useClawbackStream } from './hooks/useClawbackStream.js';
-export type { UseClawbackStreamResult, ClawbackStreamFn } from './hooks/useClawbackStream.js';
+export type { UseClawbackStreamResult, UseClawbackStreamOptions, ClawbackStreamFn } from './hooks/useClawbackStream.js';
 export { useClawbackStreamMutation, useStreamClawbackMutation } from './hooks/useClawbackStreamMutation.js';
 export type { UseClawbackStreamMutationResult, ClawbackMutationOptions, ClawbackStatus } from './hooks/useClawbackStreamMutation.js';
 export { useBatchWithdraw } from './hooks/useBatchWithdraw.js';
