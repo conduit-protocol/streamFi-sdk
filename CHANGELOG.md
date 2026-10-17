@@ -5,6 +5,10 @@ All notable changes are documented here. Format based on [Keep a Changelog](http
 ## [Unreleased]
 
 ### Added
+- `ProposalState` enum plus `parseProposalState()` / `formatProposalState()` exported from the package root, so UIs can render governor proposal badges without their own mapping table. Unknown values format as `Unknown` instead of throwing (#860).
+- `@streamfi/react`: `useStreamSearch(streams, query, { status, fields, fuzzy, limit })` — memoised client-side filtering by address, sender, recipient, memo/note and metadata, with multi-term AND matching and fuzzy ranking, no indexer refetch (#821).
+- `StreamBuilder.simulate(options)` — Soroban dry run of `create_stream` returning `minResourceFee`, CPU instructions and read/write bytes without signing or submitting; plus `StreamBuilder.buildTransaction(options)` for the unsigned envelope. `buildContractCallTx` takes an optional trailing `memo` (#820).
+- `StreamBuilder.withMemo(string | Memo)` / `getMemo()` — attaches a memo to the stream-creation transaction for exchange and custodian deposit routing. String memos are validated against Stellar's 28-byte limit (#849).
 - `KeypairWalletAdapter.exportKeystore(passphrase)` / `KeypairWalletAdapter.fromKeystore(keystore, passphrase)` — passphrase-encrypted (PBKDF2-SHA256 + AES-256-GCM, Web Crypto) key export so CLI tools and bots no longer need a plaintext secret on disk (#819).
 - `GovernorModule.executeMultipleProposals(ids, { stopOnError?, signal? })` — executes several approved proposals sequentially with per-proposal results (#846).
 - `ConduitConfig.customFetch` routes Soroban RPC requests (via an axios interceptor, since stellar-sdk v12 has no fetch hook) and the fee estimator's Horizon call through a caller-supplied `fetch` for edge runtimes, proxies and tracing headers (#862).

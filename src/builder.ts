@@ -1,6 +1,14 @@
-import { StrKey, Address, nativeToScVal } from '@stellar/stellar-sdk';
+import { StrKey, Address, Memo, SorobanRpc, nativeToScVal } from '@stellar/stellar-sdk';
 import { bigintSafeStringify, toStroops, isValidAddress } from './utils.js';
-import { boolToScVal } from './soroban.js';
+import {
+  boolToScVal,
+  buildContractCallTx,
+  catchNetworkError,
+  createRpcServer,
+  DEFAULT_RPC,
+  NETWORK_PASSPHRASE,
+  resolveFee,
+} from './soroban.js';
 import {
   buildBatchTransactions,
   buildBatchTransactionsSync,
@@ -9,7 +17,7 @@ import {
 } from './batch-tx.js';
 import { OperationAbortedError, ValidationError } from './errors.js';
 import type { BatchTransactionContext, BuiltBatchTransaction, ScValType } from './batch-tx.js';
-import type { CreateStreamParams } from './types/index.js';
+import type { CreateStreamParams, Network } from './types/index.js';
 
 export interface SubmitOptions {
   maxRetries?: number;
@@ -20,6 +28,32 @@ export interface SubmitOptions {
   maxQueueSize?: number;
   /** AbortSignal to cancel the submission while in-flight. */
   signal?: AbortSignal;
+}
+
+/** Network settings for {@link StreamBuilder.simulate} and {@link StreamBuilder.buildTransaction}. */
+export interface SimulateOptions {
+  /** DripFactory contract id that `create_stream` is invoked on. */
+  factoryId: string;
+  /** Defaults to `testnet`. */
+  network?: Network;
+  /** Overrides the default RPC URL for `network`. */
+  rpcUrl?: string;
+  /** Overrides the default network passphrase for `network`. */
+  networkPassphrase?: string;
+  /** Inclusion fee in stroops; falls back to the SDK base fee. */
+  fee?: string;
+  feeMultiplier?: number;
+}
+
+/** Estimated cost of a stream-creation transaction, from Soroban simulation. */
+export interface SimulationResult {
+  /** Minimum resource fee in stroops. */
+  minResourceFee: bigint;
+  cpuInstructions: number;
+  readBytes: number;
+  writeBytes: number;
+  /** Raw RPC simulation response, for callers needing footprint/auth/events. */
+  raw: SorobanRpc.Api.SimulateTransactionSuccessResponse;
 }
 
 const DEFAULT_CONCURRENCY = 10;
@@ -63,6 +97,7 @@ export class StreamBuilder {
   private _clawbackEnabled?: boolean | undefined;
   private _cancelable?: boolean | undefined;
   private _clawbackable?: boolean | undefined;
+  private _memo?: Memo | undefined;
 
   private pendingQueue: Array<Record<string, unknown>> = [];
   private activeTimers: Set<NodeJS.Timeout> = new Set();
@@ -243,6 +278,37 @@ export class StreamBuilder {
   }
 
   /**
+   * Attaches a memo to the stream-creation transaction, e.g. for exchange or
+   * custodian deposit routing (#849). A string becomes a text memo (max 28
+   * bytes, per Stellar); pass a `Memo` for id/hash/return memos.
+   *
+   * The memo applies to transactions produced by {@link buildTransaction} and
+   * {@link simulate}; it is not part of the {@link build} payload.
+   * @throws {ValidationError} If the string memo exceeds 28 bytes or is not a valid memo.
+   */
+  withMemo(memo: string | Memo): this {
+    if (typeof memo === 'string') {
+      try {
+        this._memo = Memo.text(memo);
+      } catch (err) {
+        throw new ValidationError([
+          `memo is invalid: ${err instanceof Error ? err.message : String(err)}`,
+        ]);
+      }
+    } else if (memo instanceof Memo) {
+      this._memo = memo;
+    } else {
+      throw new ValidationError(['memo must be a string or a stellar-sdk Memo']);
+    }
+    return this;
+  }
+
+  /** The memo set via {@link withMemo}, if any. */
+  getMemo(): Memo | undefined {
+    return this._memo;
+  }
+
+  /**
    * Validates and produces the final stream configuration.
    * Any bigint fields are converted to strings to guarantee safe
    * serialisation across all browsers (Safari/WebKit included).
@@ -372,6 +438,52 @@ export class StreamBuilder {
    */
   toBatchOperation(method = 'create_stream'): BatchOperation {
     return { method, params: {}, args: this.toContractArgs() };
+  }
+
+  /**
+   * Builds the unsigned `create_stream` transaction envelope (including any
+   * {@link withMemo} memo) for `options.factoryId`, sourced from the sender.
+   */
+  async buildTransaction(options: SimulateOptions): Promise<Awaited<ReturnType<typeof buildContractCallTx>>> {
+    if (this.isDestroyed) {
+      throw new Error('StreamBuilder has been destroyed');
+    }
+    const args = this.toContractArgs() as Parameters<typeof buildContractCallTx>[5];
+    const network = options.network ?? 'testnet';
+    return buildContractCallTx(
+      options.rpcUrl ?? DEFAULT_RPC[network],
+      options.networkPassphrase ?? NETWORK_PASSPHRASE[network],
+      this._sender as string,
+      options.factoryId,
+      'create_stream',
+      args,
+      resolveFee(options),
+      this._memo,
+    );
+  }
+
+  /**
+   * Dry run (#820): simulates `create_stream` via Soroban RPC and returns the
+   * estimated resource fee and CPU/IO breakdown. Nothing is signed or
+   * submitted, so no wallet prompt is triggered.
+   * @throws {Error} If the simulation is rejected by the RPC.
+   */
+  async simulate(options: SimulateOptions): Promise<SimulationResult> {
+    const tx = await this.buildTransaction(options);
+    const network = options.network ?? 'testnet';
+    const server = createRpcServer(options.rpcUrl ?? DEFAULT_RPC[network]);
+    const sim = await catchNetworkError('simulateTransaction (dry run)', server.simulateTransaction(tx));
+    if (SorobanRpc.Api.isSimulationError(sim)) {
+      throw new Error(`Simulation failed: ${sim.error}`);
+    }
+    const resources = sim.transactionData.build().resources();
+    return {
+      minResourceFee: BigInt(sim.minResourceFee),
+      cpuInstructions: resources.instructions(),
+      readBytes: resources.readBytes(),
+      writeBytes: resources.writeBytes(),
+      raw: sim as SorobanRpc.Api.SimulateTransactionSuccessResponse,
+    };
   }
 
   /**
@@ -508,6 +620,7 @@ export class StreamBuilder {
     this._startTime = undefined;
     this._endTime = undefined;
     this._clawbackEnabled = undefined;
+    this._memo = undefined;
     for (const timer of this.activeTimers) {
       clearTimeout(timer);
     }
@@ -534,6 +647,7 @@ export class StreamBuilder {
     copy._startTime = this._startTime;
     copy._endTime = this._endTime;
     copy._clawbackEnabled = this._clawbackEnabled;
+    copy._memo = this._memo;
     return copy;
   }
 

@@ -395,3 +395,17 @@ function Activity({ streamId }) {
 events and so only covers the RPC retention window (about seven days); use the indexer for
 older history. `pageSize` is 1–200 (default 50); the query is disabled while `streamId` is
 `undefined`.
+
+## `useStreamSearch`
+
+Client-side search over streams you have already loaded; no indexer refetch.
+
+```tsx
+const { results, total } = useStreamSearch(streams, query, {
+  status: ['active', 'paused'], // optional, case-insensitive
+  fuzzy: true,                  // default; substring hits rank above fuzzy-only hits
+  limit: 50,                    // `total` still reports the pre-limit count
+});
+```
+
+Whitespace-separated terms must all match. By default it searches `id`, `address`, `sender`, `recipient`, `token`, `memo`, `note` and string/number metadata values; pass `fields` (e.g. `['sender', 'metadata.dept']`) to narrow it.

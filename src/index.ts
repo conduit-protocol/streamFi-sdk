@@ -1,6 +1,7 @@
 export { ConduitClient } from './client.js';
 export { StreamsModule, validateStreamParameters } from './streams.js';
 export { StreamBuilder, ConduitBatcher } from './builder.js';
+export type { SimulateOptions, SimulationResult } from './builder.js';
 export type {
   BatchOperation,
   BatchExecuteOptions,
@@ -184,7 +185,7 @@ export type {
 
 export { FactoryModule } from './factory.js';
 export type { FactoryStreamListResult, StreamAddressesOptions } from './factory.js';
-export { GovernorModule } from './governor.js';
+export { GovernorModule, ProposalState, parseProposalState, formatProposalState } from './governor.js';
 export type {
   StreamHistoryEntry,
   StreamHistoryPage,

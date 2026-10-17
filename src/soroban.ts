@@ -13,6 +13,7 @@ import {
   Contract,
   Address,
   Asset,
+  Memo,
   xdr,
   BASE_FEE,
 } from '@stellar/stellar-sdk';
@@ -296,6 +297,7 @@ export async function buildContractCallTx(
   method:      string,
   args:        xdr.ScVal[],
   fee:         string = BASE_FEE,
+  memo?:       Memo,
 ): Promise<ReturnType<TransactionBuilder['build']>> {
   const server  = createRpcServer(rpcUrl);
 
@@ -308,13 +310,12 @@ export async function buildContractCallTx(
 
   const contract = new Contract(contractId);
 
-  return new TransactionBuilder(account, {
+  const builder = new TransactionBuilder(account, {
     fee,
     networkPassphrase: passphrase,
-  })
-    .addOperation(contract.call(method, ...args))
-    .setTimeout(30)
-    .build();
+  }).addOperation(contract.call(method, ...args));
+  if (memo) builder.addMemo(memo);
+  return builder.setTimeout(30).build();
 }
 
 /**

@@ -262,6 +262,48 @@ export class GovernorModule {
   }
 }
 
+/**
+ * On-chain proposal state as returned by the governor contract (#860).
+ *
+ * Note: this is the contract's raw state enum. It is distinct from the coarser
+ * {@link GovernorProposal.status} string returned by `getProposals()`.
+ */
+export enum ProposalState {
+  Pending = 0,
+  Active = 1,
+  Defeated = 2,
+  Succeeded = 3,
+}
+
+const PROPOSAL_STATE_LABELS: Record<ProposalState, string> = {
+  [ProposalState.Pending]: 'Pending',
+  [ProposalState.Active]: 'Active',
+  [ProposalState.Defeated]: 'Defeated',
+  [ProposalState.Succeeded]: 'Succeeded',
+};
+
+/**
+ * Narrows a raw contract value (number, bigint, or numeric string) to a
+ * {@link ProposalState}. Returns `undefined` for anything that is not a known state.
+ */
+export function parseProposalState(value: unknown): ProposalState | undefined {
+  let n: number;
+  if (typeof value === 'number') n = value;
+  else if (typeof value === 'bigint') n = Number(value);
+  else if (typeof value === 'string' && value.trim() !== '') n = Number(value);
+  else return undefined;
+  return Number.isInteger(n) && n in PROPOSAL_STATE_LABELS ? (n as ProposalState) : undefined;
+}
+
+/**
+ * Human-readable label for a raw proposal state, suitable for UI badges.
+ * Unknown values render as `Unknown` rather than throwing.
+ */
+export function formatProposalState(state: number): string {
+  const parsed = parseProposalState(state);
+  return parsed === undefined ? 'Unknown' : PROPOSAL_STATE_LABELS[parsed];
+}
+
 export interface ExecuteProposalsOptions {
   /** Halt at the first failed proposal; later ones are reported as skipped. Default `false`. */
   stopOnError?: boolean;

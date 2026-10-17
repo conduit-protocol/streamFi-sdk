@@ -70,6 +70,12 @@ export { useStreamHistoryInfinite } from './hooks/useStreamHistoryInfinite.js';
 export type { UseStreamHistoryInfiniteResult } from './hooks/useStreamHistoryInfinite.js';
 export { useStreamCountdown } from './hooks/useStreamCountdown.js';
 export type { UseStreamCountdownResult } from './hooks/useStreamCountdown.js';
+export { useStreamSearch } from './hooks/useStreamSearch.js';
+export type {
+  SearchableStream,
+  UseStreamSearchOptions,
+  UseStreamSearchResult,
+} from './hooks/useStreamSearch.js';
 export { useTokenAllowance } from './hooks/useTokenAllowance.js';
 export type {
   ApproveTokenAllowanceFn,
