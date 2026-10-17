@@ -85,3 +85,9 @@ export type {
 } from './hooks/useTokenAllowance.js';
 export { useNetworkSwitcher } from './hooks/useNetworkSwitcher.js';
 export type { UseNetworkSwitcherResult } from './hooks/useNetworkSwitcher.js';
+export { useBatchCreateStreamValidation } from './hooks/useBatchCreateStreamValidation.js';
+export type {
+  CsvStreamRow,
+  StreamRowValidationError,
+  UseBatchCreateStreamValidationResult,
+} from './hooks/useBatchCreateStreamValidation.js';

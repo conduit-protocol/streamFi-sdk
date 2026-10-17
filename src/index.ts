@@ -151,6 +151,8 @@ export type {
   StreamDiff,
   Module36Metrics,
 } from './module36.js';
+/** Descriptive alias for {@link Module36} (#777). */
+export { Module36 as StreamSnapshotDiffer } from './module36.js';
 
 export { Module26 } from './module26.js';
 export type {
@@ -159,6 +161,8 @@ export type {
   PortfolioSummary,
   Module26Metrics,
 } from './module26.js';
+/** Descriptive alias for {@link Module26} (#777). */
+export { Module26 as PortfolioAggregator } from './module26.js';
 
 export { Module48 } from './module48.js';
 export type {
@@ -167,6 +171,8 @@ export type {
   Module48Result,
   Module48Metrics,
 } from './module48.js';
+/** Descriptive alias for {@link Module48} (#777). */
+export { Module48 as StreamBatchProcessor } from './module48.js';
 
 export { Module49 } from './module49.js';
 export type {
@@ -175,6 +181,8 @@ export type {
   Module49Result,
   Module49Metrics,
 } from './module49.js';
+/** Descriptive alias for {@link Module49} (#777). */
+export { Module49 as StreamAnalyticsEngine } from './module49.js';
 
 export { Module44 } from './module44.js';
 export type {
@@ -184,6 +192,8 @@ export type {
   StreamRiskAssessment,
   Module44Metrics,
 } from './module44.js';
+/** Descriptive alias for {@link Module44} (#777). */
+export { Module44 as StreamRiskAssessor } from './module44.js';
 
 export { FactoryModule } from './factory.js';
 export type { FactoryStreamListResult, StreamAddressesOptions } from './factory.js';

@@ -36,6 +36,16 @@
       "import": "./dist/esm/utils.js",
       "require": "./dist/cjs/utils.js",
       "types": "./dist/types/utils.d.ts"
+    },
+    "./dashboard": {
+      "import": "./dist/esm/dashboard/transaction-history.js",
+      "require": "./dist/cjs/dashboard/transaction-history.js",
+      "types": "./dist/types/dashboard/transaction-history.d.ts"
+    },
+    "./relayer": {
+      "import": "./dist/esm/relayer/WebSocketRelayer.js",
+      "require": "./dist/cjs/relayer/WebSocketRelayer.js",
+      "types": "./dist/types/relayer/WebSocketRelayer.d.ts"
     }
   },
   "files": [
