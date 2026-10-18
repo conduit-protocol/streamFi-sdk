@@ -5,6 +5,10 @@ All notable changes are documented here. Format based on [Keep a Changelog](http
 ## [Unreleased]
 
 ### Added
+- `@streamfi/react`: `useTopUpStream()` returns `projectNewEndTime(amount)`, the stream's end date after a top-up, computed from the stream's rate and end time (the top-up adds `amount / ratePerSecond`, rounded up to whole seconds). It returns `null` while the stream is loading, for open-ended streams, zero rates and non-positive amounts. The stream is refetched after each successful top-up (#990).
+- `@streamfi/react`: `useTokenAllowance()` returns `approveInfinite(expirationLedger)`, which approves `i128::MAX` so future streams need no re-approval. The expiration is passed explicitly because SEP-41 requires a valid expiration for a non-zero amount (#991).
+- `@streamfi/react`: `useStreamHistoryInfinite(streamId, pageSize, { filterEventTypes })` keeps only the requested categories from the loaded entries: `Deposit` (created and top-up events), `Withdraw` and `Cancel` (#992).
+- `@streamfi/react`: `useStreamSearch()` matches the optional `txHash` field (for example a stream's creation transaction hash), included in the default fields. Transaction hashes match by substring only, so fuzzy matching cannot hit almost every hash (#993).
 - `ProposalState` enum plus `parseProposalState()` / `formatProposalState()` exported from the package root, so UIs can render governor proposal badges without their own mapping table. Unknown values format as `Unknown` instead of throwing (#860).
 - `@streamfi/react`: `useStreamSearch(streams, query, { status, fields, fuzzy, limit })` — memoised client-side filtering by address, sender, recipient, memo/note and metadata, with multi-term AND matching and fuzzy ranking, no indexer refetch (#821).
 - `StreamBuilder.simulate(options)` — Soroban dry run of `create_stream` returning `minResourceFee`, CPU instructions and read/write bytes without signing or submitting; plus `StreamBuilder.buildTransaction(options)` for the unsigned envelope. `buildContractCallTx` takes an optional trailing `memo` (#820).
