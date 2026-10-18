@@ -45,21 +45,33 @@ function isSubsequence(needle: string, haystack: string): boolean {
   return i === needle.length;
 }
 
-function fieldValues<T extends SearchableStream>(stream: T, fields?: UseStreamSearchOptions<T>['fields']): string[] {
-  const out: string[] = [];
-  const push = (v: unknown) => {
+/**
+ * Fields holding hex transaction hashes. They match by substring only: hex
+ * digits are a–f plus 0–9, so a fuzzy subsequence match would hit almost any
+ * hash for a short query.
+ */
+const HASH_FIELDS = new Set<string>(['txHash']);
+
+interface FieldValue {
+  value: string;
+  hash: boolean;
+}
+
+function fieldValues<T extends SearchableStream>(stream: T, fields?: UseStreamSearchOptions<T>['fields']): FieldValue[] {
+  const out: FieldValue[] = [];
+  const push = (v: unknown, hash = false) => {
     if (v === undefined || v === null) return;
-    if (typeof v === 'string' || typeof v === 'number' || typeof v === 'bigint') out.push(String(v).toLowerCase());
+    if (typeof v === 'string' || typeof v === 'number' || typeof v === 'bigint') out.push({ value: String(v).toLowerCase(), hash });
   };
   if (!fields) {
-    for (const f of DEFAULT_FIELDS) push(stream[f]);
-    if (stream.metadata) Object.values(stream.metadata).forEach(push);
+    for (const f of DEFAULT_FIELDS) push(stream[f], HASH_FIELDS.has(f));
+    if (stream.metadata) Object.values(stream.metadata).forEach((v) => push(v));
     return out;
   }
   for (const f of fields) {
     const key = String(f);
     if (key.startsWith('metadata.')) push(stream.metadata?.[key.slice('metadata.'.length)]);
-    else push((stream as Record<string, unknown>)[key]);
+    else push((stream as Record<string, unknown>)[key], HASH_FIELDS.has(key));
   }
   return out;
 }
@@ -93,8 +105,8 @@ function fuzzyScore(term: string, value: string): number {
  * and metadata without refetching from the indexer.
  *
  * Whitespace-separated query terms must all match (AND). Each term matches a field by
- * substring, or, when `fuzzy` is on, by in-order subsequence. Substring hits rank above
- * fuzzy-only hits; input order is kept within a rank.
+ * substring, or, when `fuzzy` is on, by in-order subsequence. Transaction hashes match by
+ * substring only. Substring hits rank above fuzzy-only hits; input order is kept within a rank.
  *
  * @param streams - Already-loaded stream list to search
  * @param query - Whitespace-separated search terms (case-insensitive)
@@ -109,10 +121,8 @@ function fuzzyScore(term: string, value: string): number {
  * // Search all default fields
  * const { results, total } = useStreamSearch(streams, 'GALICE USDC');
  *
- * // Filter by status and search txHash
- * const withdraws = useStreamSearch(streams, '0x1234abc', {
- *   status: 'cancelled',
- * });
+ * // Find the stream created by a given transaction hash (substring match)
+ * const byTx = useStreamSearch(streams, '1f9a3c', { fields: ['txHash'] });
  *
  * // Restrict search to specific fields
  * const bySender = useStreamSearch(streams, 'GALICE', {
@@ -145,13 +155,16 @@ export function useStreamSearch<T extends SearchableStream>(
       let score = 0;
       let matched = true;
       for (const term of terms) {
-        const substringScore = values.reduce((best, value) => Math.min(best, scoreMatch(term, value)), Number.POSITIVE_INFINITY);
+        const substringScore = values.reduce((best, field) => Math.min(best, scoreMatch(term, field.value)), Number.POSITIVE_INFINITY);
         if (Number.isFinite(substringScore)) {
           score += substringScore;
           continue;
         }
         if (fuzzy) {
-          const fuzzyMatchScore = values.reduce((best, value) => Math.min(best, fuzzyScore(term, value)), Number.POSITIVE_INFINITY);
+          const fuzzyMatchScore = values.reduce(
+            (best, field) => (field.hash ? best : Math.min(best, fuzzyScore(term, field.value))),
+            Number.POSITIVE_INFINITY,
+          );
           if (Number.isFinite(fuzzyMatchScore)) {
             score += fuzzyMatchScore + 1000;
             continue;

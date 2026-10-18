@@ -9,7 +9,7 @@ export interface UseStreamHistoryInfiniteOptions {
   /** Optional ledger to start from when direction is `forward`. */
   startLedger?: number;
   /** Filter events by type: 'Deposit' (created or top_up), 'Withdraw', or 'Cancel'. */
-  filterEventTypes?: ('Deposit' | 'Withdraw' | 'Cancel')[];
+  filterEventTypes?: StreamHistoryEventTypeFilter[];
 }
 
 export interface UseStreamHistoryInfiniteResult {
@@ -24,6 +24,21 @@ export interface UseStreamHistoryInfiniteResult {
   error: Error | null;
   /** Re-fetch every loaded page from the start. */
   refetch: () => Promise<unknown>;
+}
+
+/** Event categories accepted by `filterEventTypes`. */
+export type StreamHistoryEventTypeFilter = 'Deposit' | 'Withdraw' | 'Cancel';
+
+/** Maps each filter category to the SDK history `kind`s it covers. */
+function mapEventTypeToKinds(eventType: StreamHistoryEventTypeFilter): StreamHistoryEntry['kind'][] {
+  switch (eventType) {
+    case 'Deposit':
+      return ['created', 'top_up'];
+    case 'Withdraw':
+      return ['withdraw'];
+    case 'Cancel':
+      return ['cancel'];
+  }
 }
 
 /**
@@ -57,20 +72,6 @@ export interface UseStreamHistoryInfiniteResult {
  * });
  * ```
  */
-/** Map event type filter to history entry kinds */
-function mapEventTypeToKinds(
-  eventType: 'Deposit' | 'Withdraw' | 'Cancel',
-): string[] {
-  switch (eventType) {
-    case 'Deposit':
-      return ['created', 'top_up'];
-    case 'Withdraw':
-      return ['withdraw'];
-    case 'Cancel':
-      return ['cancel'];
-  }
-}
-
 export function useStreamHistoryInfinite(
   streamId: string | bigint | undefined,
   pageSize = 50,
@@ -110,7 +111,7 @@ export function useStreamHistoryInfinite(
   const allowedKinds = useMemo(
     () => {
       if (!filterEventTypes || filterEventTypes.length === 0) return null;
-      const kinds = new Set<string>();
+      const kinds = new Set<StreamHistoryEntry['kind']>();
       for (const eventType of filterEventTypes) {
         for (const kind of mapEventTypeToKinds(eventType)) {
           kinds.add(kind);
