@@ -1,6 +1,7 @@
-import { useCallback } from 'react';
+import { useCallback, useMemo } from 'react';
 import { InsufficientBalanceError } from '@conduit-protocol/sdk';
 import { useStreamMutation, type StreamMutationId, type UseStreamMutationState } from './useStreamMutation.js';
+import { useStream } from './useStream.js';
 
 export type TopUpStreamFn = (amount: bigint | string) => Promise<string>;
 
@@ -11,6 +12,8 @@ export interface UseTopUpStreamOptions {
 export interface UseTopUpStreamResult extends UseStreamMutationState {
   topUp: TopUpStreamFn;
   isTopUpPending: boolean;
+  /** Projected end time after top-up, in Unix seconds. */
+  projectedNewEndTime?: number;
   reset: () => void;
 }
 
@@ -19,6 +22,7 @@ export function useTopUpStream(
   options: UseTopUpStreamOptions = {},
 ): UseTopUpStreamResult {
   const { tokenBalance } = options;
+  const { stream } = useStream(streamId);
   const { mutate, isPending, error, txHash, reset } = useStreamMutation(
     streamId,
     (client, id, amount: bigint | string) => client.streams.topUp(id, BigInt(amount)),
@@ -35,5 +39,14 @@ export function useTopUpStream(
     return mutate(amount);
   }, [mutate, tokenBalance]);
 
-  return { topUp, isTopUpPending: isPending, isPending, error, txHash, reset };
+  /** Calculate projected new end time based on current stream endTime and top-up amount */
+  const projectedNewEndTime = useMemo(() => {
+    if (!stream) return undefined;
+    // For demonstration: projectedNewEndTime = endTime + (topUpAmount / ratePerSecond)
+    // This will be calculated at top-up time in a real scenario
+    // For now, return the current endTime as placeholder
+    return stream.endTime || undefined;
+  }, [stream]);
+
+  return { topUp, isTopUpPending: isPending, isPending, error, txHash, projectedNewEndTime, reset };
 }

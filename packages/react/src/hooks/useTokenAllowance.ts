@@ -1,8 +1,15 @@
 import { useCallback, useEffect, useRef, useState } from 'react';
 import { useStreamFiClient } from '../context/useStreamFiClient.js';
 
+/** i128 max value for infinite allowance */
+const I128_MAX = 170141183460469231731687303715884105727n;
+
 export type ApproveTokenAllowanceFn = (
   amount: bigint | string,
+  expirationLedger: number,
+) => Promise<string>;
+
+export type ApproveInfiniteTokenAllowanceFn = (
   expirationLedger: number,
 ) => Promise<string>;
 
@@ -13,6 +20,7 @@ export interface UseTokenAllowanceResult {
   error: Error | null;
   txHash: string | null;
   approve: ApproveTokenAllowanceFn;
+  approveInfinite: ApproveInfiniteTokenAllowanceFn;
   checkAndApprove: (amount: bigint | string, expirationLedger?: number) => Promise<string | null>;
   refetch: () => void;
   reset: () => void;
@@ -125,6 +133,13 @@ export function useTokenAllowance(
     [client, isReady, ownerAddress, spenderAddress, tokenAddress],
   );
 
+  const approveInfinite = useCallback<ApproveInfiniteTokenAllowanceFn>(
+    async (expirationLedger) => {
+      return approve(I128_MAX, expirationLedger);
+    },
+    [approve],
+  );
+
   const checkAndApprove = useCallback(
     async (amount: bigint | string, expirationLedger = 0) => {
       const parsedAmount = BigInt(amount);
@@ -145,5 +160,5 @@ export function useTokenAllowance(
     setTxHash(null);
   }, []);
 
-  return { allowance, loading, isPending, error, txHash, approve, checkAndApprove, refetch, reset };
+  return { allowance, loading, isPending, error, txHash, approve, approveInfinite, checkAndApprove, refetch, reset };
 }

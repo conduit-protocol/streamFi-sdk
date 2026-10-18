@@ -12,6 +12,8 @@ export interface SearchableStream {
   status?: string;
   memo?: string;
   note?: string;
+  /** Transaction hash for the stream creation or event. */
+  txHash?: string;
   metadata?: Record<string, unknown>;
 }
 
@@ -32,7 +34,7 @@ export interface UseStreamSearchResult<T> {
   total: number;
 }
 
-const DEFAULT_FIELDS = ['id', 'address', 'sender', 'recipient', 'token', 'memo', 'note'] as const;
+const DEFAULT_FIELDS = ['id', 'address', 'sender', 'recipient', 'token', 'memo', 'note', 'txHash'] as const;
 
 /** True when every character of `needle` appears in `haystack` in order. */
 function isSubsequence(needle: string, haystack: string): boolean {
