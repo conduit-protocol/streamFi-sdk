@@ -24,7 +24,7 @@ export type { UsePauseStreamResult, PauseStreamFn } from './hooks/usePauseStream
 export { useResumeStream } from './hooks/useResumeStream.js';
 export type { UseResumeStreamResult, ResumeStreamFn } from './hooks/useResumeStream.js';
 export { useTopUpStream } from './hooks/useTopUpStream.js';
-export type { UseTopUpStreamOptions, UseTopUpStreamResult, TopUpStreamFn } from './hooks/useTopUpStream.js';
+export type { UseTopUpStreamOptions, UseTopUpStreamResult, TopUpStreamFn, ProjectNewEndTimeFn } from './hooks/useTopUpStream.js';
 export { useForceCancelStream } from './hooks/useForceCancelStream.js';
 export type { UseForceCancelStreamResult, ForceCancelStreamFn } from './hooks/useForceCancelStream.js';
 export { useTransferStreamRecipient } from './hooks/useTransferStreamRecipient.js';
@@ -76,7 +76,7 @@ export type { UseTransactionHistoryResult, UseTransactionHistoryOptions } from '
 export { useCircuitState } from './hooks/useCircuitState.js';
 export type { UseCircuitStateResult, UseCircuitStateOptions } from './hooks/useCircuitState.js';
 export { useStreamHistoryInfinite } from './hooks/useStreamHistoryInfinite.js';
-export type { UseStreamHistoryInfiniteOptions, UseStreamHistoryInfiniteResult } from './hooks/useStreamHistoryInfinite.js';
+export type { UseStreamHistoryInfiniteOptions, UseStreamHistoryInfiniteResult, StreamHistoryEventTypeFilter } from './hooks/useStreamHistoryInfinite.js';
 export { useStreamCountdown } from './hooks/useStreamCountdown.js';
 export type { UseStreamCountdownResult } from './hooks/useStreamCountdown.js';
 export { useStreamSearch } from './hooks/useStreamSearch.js';
@@ -88,6 +88,7 @@ export type {
 export { useTokenAllowance } from './hooks/useTokenAllowance.js';
 export type {
   ApproveTokenAllowanceFn,
+  ApproveInfiniteTokenAllowanceFn,
   UseTokenAllowanceResult,
 } from './hooks/useTokenAllowance.js';
 export { useNetworkSwitcher } from './hooks/useNetworkSwitcher.js';

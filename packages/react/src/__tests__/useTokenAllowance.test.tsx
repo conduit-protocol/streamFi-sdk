@@ -96,4 +96,18 @@ describe('useTokenAllowance', () => {
     expect(screen.getByTestId('pending')).toHaveTextContent('false');
     expect(screen.getByTestId('hash')).toHaveTextContent('');
   });
+
+  it('approveInfinite approves i128::MAX with the caller-supplied expiration ledger', async () => {
+    const I128_MAX = (1n << 127n) - 1n;
+    const { result } = renderHook(() => useTokenAllowance('CTOKEN', 'GOWNER', 'CSPENDER'));
+    await waitFor(() => expect(result.current.allowance).toBe(100n));
+
+    await act(async () => {
+      await result.current.approveInfinite(4_000_000);
+    });
+
+    expect(mockApprove).toHaveBeenCalledWith('CTOKEN', 'GOWNER', 'CSPENDER', I128_MAX, 4_000_000);
+    expect(result.current.allowance).toBe(I128_MAX);
+    expect(result.current.txHash).toBe('approve-hash');
+  });
 });
