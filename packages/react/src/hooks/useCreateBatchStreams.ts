@@ -8,7 +8,12 @@ export interface UseCreateBatchStreamsState {
   results: BatchCreateStreamResult[];
 }
 
-export type CreateBatchStreamsFn = (configs: StreamConfig[]) => Promise<BatchCreateStreamResult[]>;
+export type OnBatchProgress = (completed: number, total: number) => void;
+
+export type CreateBatchStreamsFn = (
+  configs: StreamConfig[],
+  onProgress?: OnBatchProgress,
+) => Promise<BatchCreateStreamResult[]>;
 
 export interface UseCreateBatchStreamsResult extends UseCreateBatchStreamsState {
   createBatchStreams: CreateBatchStreamsFn;
@@ -28,17 +33,31 @@ export function useCreateBatchStreams(): UseCreateBatchStreamsResult {
   }, []);
 
   const createBatchStreams = useCallback(
-    async (configs: StreamConfig[]): Promise<BatchCreateStreamResult[]> => {
+    async (configs: StreamConfig[], onProgress?: OnBatchProgress): Promise<BatchCreateStreamResult[]> => {
       if (!isReady || !client) {
         const err = new Error('ConduitClient is not connected. Wrap your component with <StreamFiProvider>.');
         setState({ loading: false, error: err, results: [] });
         throw err;
       }
 
+      const total = configs.length;
+      if (total === 0) {
+        setState({ loading: false, error: null, results: [] });
+        return [];
+      }
+
       setState({ loading: true, error: null, results: [] });
 
       try {
-        const results = await client.streams.createBatchStreams(configs);
+        const results: BatchCreateStreamResult[] = [];
+        const chunkSize = 10;
+        for (let index = 0; index < configs.length; index += chunkSize) {
+          const chunk = configs.slice(index, index + chunkSize);
+          const chunkResults = await client.streams.createBatchStreams(chunk);
+          results.push(...chunkResults);
+          onProgress?.(Math.min(index + chunk.length, total), total);
+        }
+
         setState({ loading: false, error: null, results });
         return results;
       } catch (err: unknown) {

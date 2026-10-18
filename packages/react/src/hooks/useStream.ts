@@ -1,4 +1,4 @@
-import { useState, useEffect, useCallback, useRef } from 'react';
+import { useState, useEffect, useCallback, useRef, type Dispatch, type SetStateAction } from 'react';
 import { useStreamFiClient } from '../context/useStreamFiClient.js';
 import type { StreamInfo } from '@conduit-protocol/sdk';
 
@@ -7,6 +7,7 @@ export interface UseStreamResult {
   loading: boolean;
   error: Error | null;
   refetch: () => void;
+  setStream: Dispatch<SetStateAction<StreamInfo | null>>;
 }
 
 export function useStream(streamId: bigint | string | null | undefined): UseStreamResult {
@@ -22,7 +23,7 @@ export function useStream(streamId: bigint | string | null | undefined): UseStre
   const fetch = useCallback(() => {
     const requestId = ++requestIdRef.current;
 
-    if (!isReady || !client || streamId == null) {
+    if (!isReady || !client || streamId == null || typeof client.streams?.get !== 'function') {
       setStream(null);
       setLoading(false);
       setError(null);
@@ -50,5 +51,5 @@ export function useStream(streamId: bigint | string | null | undefined): UseStre
     fetch();
   }, [fetch]);
 
-  return { stream, loading, error, refetch: fetch };
+  return { stream, loading, error, refetch: fetch, setStream };
 }

@@ -3,6 +3,7 @@ import { render, screen, waitFor } from '@testing-library/react';
 import {
   StreamFiProvider,
   useCancelStream,
+  useCreateBatchStreams,
   usePauseStream,
   useResumeStream,
   useTopUpStream,
@@ -14,8 +15,13 @@ const mockCancel = vi.fn();
 const mockPause = vi.fn();
 const mockResume = vi.fn();
 const mockTopUp = vi.fn();
+const mockCreateBatchStreams = vi.fn();
 
 vi.mock('@conduit-protocol/sdk', () => ({
+  SUPPORTED_NETWORKS: ['testnet'],
+  UnsupportedChainError: class UnsupportedChainError extends Error {},
+  clearServerCache: vi.fn(),
+  clearTokenDecimalsCache: vi.fn(),
   ConduitClient: vi.fn(function () {
     return {
       streams: {
@@ -24,6 +30,7 @@ vi.mock('@conduit-protocol/sdk', () => ({
         pause: mockPause,
         resume: mockResume,
         topUp: mockTopUp,
+        createBatchStreams: mockCreateBatchStreams,
       },
     };
   }),
@@ -59,6 +66,36 @@ describe('stream lifecycle hooks', () => {
     mockPause.mockReset().mockResolvedValue('pause-tx');
     mockResume.mockReset().mockResolvedValue('resume-tx');
     mockTopUp.mockReset().mockResolvedValue('top-up-tx');
+    mockCreateBatchStreams.mockReset().mockResolvedValue([
+      { index: 0, success: true, streamId: 1n, txHash: 'batch-tx-1' },
+      { index: 1, success: true, streamId: 2n, txHash: 'batch-tx-2' },
+    ]);
+  });
+
+  it('reports batch creation progress through the hook callback', async () => {
+    const onProgress = vi.fn();
+    const TestComponent = () => {
+      const batch = useCreateBatchStreams();
+      return (
+        <button
+          data-testid="batch-create"
+          onClick={() => batch.createBatchStreams([{ recipient: 'GRECIPIENT', token: 'native', depositAmount: '10' }], onProgress)}
+        >
+          create
+        </button>
+      );
+    };
+
+    render(
+      <StreamFiProvider config={{ network: 'testnet' as const }}>
+        <TestComponent />
+      </StreamFiProvider>,
+    );
+
+    screen.getByTestId('batch-create').click();
+
+    await waitFor(() => expect(mockCreateBatchStreams).toHaveBeenCalledTimes(1));
+    expect(onProgress).toHaveBeenCalledWith(1, 1);
   });
 
   it('wraps withdraw, cancel, pause, resume, and top up stream actions', async () => {
