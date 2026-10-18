@@ -234,7 +234,7 @@ export class ConduitClient {
 
     // Must precede module construction: modules may issue RPC calls at once.
     if (this.config.customFetch) {
-      registerCustomFetch(this.config.rpcUrl, this.config.customFetch);
+      registerCustomFetch(this.config.rpcUrl, this.config.customFetch, this.config.requestTimeoutMs);
     }
 
     // If a wallet is provided at construction time, validate its chain too.

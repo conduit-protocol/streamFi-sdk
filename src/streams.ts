@@ -56,6 +56,7 @@ import type { BatchTransactionContext } from './batch-tx.js';
 import { FactoryModule } from './factory.js';
 import { withSignatureTimeout } from './signer.js';
 import { mapWithConcurrency, DEFAULT_LIST_CONCURRENCY } from './map-with-concurrency.js';
+import { coalesceInFlight } from './coalesce-async.js';
 import {
   ConduitError,
   RateLimitError,
@@ -262,6 +263,8 @@ export class StreamsModule {
    * wallet extension / hardware device) on every read/mutating operation.
    */
   private _cachedCallerAddr: string | null = null;
+  /** In-flight `get()` calls keyed by stream ID, shared by concurrent callers (#925). */
+  private readonly _inFlightGets = new Map<bigint, Promise<StreamInfo>>();
 
   constructor(private readonly config: ConduitConfig) {
     this.rpcUrl     = config.rpcUrl ?? DEFAULT_RPC[config.network];
@@ -422,6 +425,13 @@ export class StreamsModule {
   async get(streamId: bigint | string, signal?: AbortSignal): Promise<StreamInfo> {
     const id   = BigInt(streamId);
     if (signal?.aborted) throw new DOMException('Aborted', 'AbortError');
+    // A caller-supplied signal must only abort its own request, so signalled
+    // calls bypass the shared in-flight entry.
+    if (signal) return this._fetchInfo(id, signal);
+    return coalesceInFlight(this._inFlightGets, id, () => this._fetchInfo(id));
+  }
+
+  private async _fetchInfo(id: bigint, signal?: AbortSignal): Promise<StreamInfo> {
     const addr = await this._resolveAddr(id);
     const caller = await this._resolveCallerAddress();
     const tx   = await buildContractCallTx(this.rpcUrl, this.passphrase, caller, addr, 'info', []);

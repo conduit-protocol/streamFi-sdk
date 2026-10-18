@@ -39,3 +39,27 @@ export async function coalesceAsync<K, V>(
 
   return promise;
 }
+
+/**
+ * Like {@link coalesceAsync}, but only shares the promise while it is in
+ * flight (#925): the entry is evicted as soon as it settles, success or
+ * failure, so later calls always fetch fresh data. Used to collapse
+ * concurrent identical reads (e.g. several components calling
+ * `streams.get(id)` during the same render) into one network request.
+ */
+export function coalesceInFlight<K, V>(
+  inFlight: Map<K, Promise<V>>,
+  key: K,
+  fn: () => Promise<V>,
+): Promise<V> {
+  const existing = inFlight.get(key);
+  if (existing) return existing;
+
+  const promise = fn();
+  inFlight.set(key, promise);
+  const evict = () => {
+    if (inFlight.get(key) === promise) inFlight.delete(key);
+  };
+  promise.then(evict, evict);
+  return promise;
+}

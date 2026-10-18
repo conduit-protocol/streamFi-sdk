@@ -1,4 +1,4 @@
-import { StrKey } from '@stellar/stellar-sdk';
+import { StrKey, Networks } from '@stellar/stellar-sdk';
 
 /** Stellar networks supported by public explorer links. */
 export type NetworkType = 'mainnet' | 'testnet' | 'futurenet';
@@ -35,6 +35,54 @@ export const EXPLORER_URLS: Record<
     account: 'https://stellar.expert/explorer/futurenet/account/',
   },
 };
+
+/** Connection details and official contract deployments for one Stellar network. */
+export interface NetworkConfig {
+  /** Network passphrase used when building and signing transactions. */
+  networkPassphrase: string;
+  /** Public Soroban RPC endpoint. */
+  rpcUrl: string;
+  /** Horizon endpoint (used by the fee estimator). */
+  horizonUrl: string;
+  /**
+   * Official DripFactory contract ID, or `null` when no official deployment
+   * has been published for this network yet — pass `factoryAddress`
+   * explicitly in that case.
+   */
+  factoryAddress: string | null;
+  /** Official vault contract ID, or `null` when not yet deployed. */
+  vaultAddress: string | null;
+}
+
+/**
+ * Official network configurations (#927). Use these instead of copying RPC
+ * URLs, passphrases and contract IDs out of the docs:
+ *
+ *   const { rpcUrl, factoryAddress } = NETWORK_CONFIGS.testnet;
+ */
+export const NETWORK_CONFIGS: Readonly<Record<NetworkType, Readonly<NetworkConfig>>> = Object.freeze({
+  mainnet: Object.freeze({
+    networkPassphrase: Networks.PUBLIC,
+    rpcUrl: 'https://soroban-mainnet.stellar.org',
+    horizonUrl: 'https://horizon.stellar.org',
+    factoryAddress: null,
+    vaultAddress: null,
+  }),
+  testnet: Object.freeze({
+    networkPassphrase: Networks.TESTNET,
+    rpcUrl: 'https://soroban-testnet.stellar.org',
+    horizonUrl: 'https://horizon-testnet.stellar.org',
+    factoryAddress: null,
+    vaultAddress: null,
+  }),
+  futurenet: Object.freeze({
+    networkPassphrase: Networks.FUTURENET,
+    rpcUrl: 'https://rpc-futurenet.stellar.org',
+    horizonUrl: 'https://horizon-futurenet.stellar.org',
+    factoryAddress: null,
+    vaultAddress: null,
+  }),
+});
 
 /**
  * A syntactically valid Stellar G-address with no known keypair. Used only

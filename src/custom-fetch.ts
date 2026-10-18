@@ -15,7 +15,15 @@
 
 import { SorobanRpc } from '@stellar/stellar-sdk';
 
-const registry = new Map<string, typeof fetch>();
+/** Default per-request timeout for custom-fetch RPC calls (#926). */
+export const DEFAULT_REQUEST_TIMEOUT_MS = 15_000;
+
+interface Registration {
+  fetch: typeof fetch;
+  timeoutMs: number;
+}
+
+const registry = new Map<string, Registration>();
 let installed = false;
 
 /** Minimal slice of the axios request config the adapter reads. */
@@ -45,25 +53,36 @@ function headerRecord(config: RequestConfig): Record<string, string> {
 
 async function fetchAdapter(config: RequestConfig): Promise<unknown> {
   const url = config.url ?? '';
-  const customFetch = registry.get(stripTrailingSlash(url));
-  if (!customFetch) throw new Error(`No custom fetch registered for ${url}`);
+  const registration = registry.get(stripTrailingSlash(url));
+  if (!registration) throw new Error(`No custom fetch registered for ${url}`);
 
-  const signals: AbortSignal[] = [];
-  if (config.signal) signals.push(config.signal);
-  if (config.timeout && config.timeout > 0 && typeof AbortSignal.timeout === 'function') {
-    signals.push(AbortSignal.timeout(config.timeout));
-  }
+  // An explicit axios timeout wins; otherwise fall back to the registered
+  // default so a server that never closes the connection cannot hang us.
+  const timeoutMs = config.timeout && config.timeout > 0 ? config.timeout : registration.timeoutMs;
+  const controller = new AbortController();
+  const timer = timeoutMs > 0
+    ? setTimeout(() => controller.abort(new Error(`Request timed out after ${timeoutMs}ms`)), timeoutMs)
+    : undefined;
+  const onCallerAbort = () => controller.abort(config.signal?.reason);
+  if (config.signal?.aborted) onCallerAbort();
+  else config.signal?.addEventListener('abort', onCallerAbort, { once: true });
 
   const init: RequestInit = {
     method: (config.method ?? 'post').toUpperCase(),
     headers: headerRecord(config),
+    signal: controller.signal,
   };
   if (config.data !== undefined) init.body = typeof config.data === 'string' ? config.data : JSON.stringify(config.data);
-  if (signals.length === 1) init.signal = signals[0]!;
-  else if (signals.length > 1 && typeof AbortSignal.any === 'function') init.signal = AbortSignal.any(signals);
 
-  const res = await customFetch(url, init);
-  const text = await res.text();
+  let res: Response;
+  let text: string;
+  try {
+    res = await registration.fetch(url, init);
+    text = await res.text();
+  } finally {
+    if (timer !== undefined) clearTimeout(timer);
+    config.signal?.removeEventListener('abort', onCallerAbort);
+  }
   const response = {
     // axios's transformResponse parses JSON from a string body.
     data: text,
@@ -99,13 +118,24 @@ function install(): void {
   });
 }
 
-/** Route Soroban RPC requests for `rpcUrl` through `customFetch`. */
-export function registerCustomFetch(rpcUrl: string, customFetch: typeof fetch): void {
+/**
+ * Route Soroban RPC requests for `rpcUrl` through `customFetch`. Each request
+ * is aborted after `timeoutMs` (default {@link DEFAULT_REQUEST_TIMEOUT_MS});
+ * pass `0` to disable the timeout.
+ */
+export function registerCustomFetch(
+  rpcUrl: string,
+  customFetch: typeof fetch,
+  timeoutMs: number = DEFAULT_REQUEST_TIMEOUT_MS,
+): void {
   if (typeof customFetch !== 'function') {
     throw new TypeError('customFetch must be a function');
   }
   install();
-  registry.set(stripTrailingSlash(rpcUrl), customFetch);
+  if (!Number.isFinite(timeoutMs) || timeoutMs < 0) {
+    throw new RangeError('timeoutMs must be a non-negative finite number');
+  }
+  registry.set(stripTrailingSlash(rpcUrl), { fetch: customFetch, timeoutMs });
 }
 
 /** Remove a registration made by {@link registerCustomFetch}. Mainly for tests. */

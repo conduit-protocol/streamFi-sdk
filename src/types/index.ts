@@ -77,6 +77,12 @@ export interface ConduitConfig {
    * Indexer (GraphQL) traffic is configured separately on `GraphQLIndexer`.
    */
   customFetch?: typeof fetch;
+  /**
+   * Timeout in milliseconds for each Soroban RPC request sent through
+   * `customFetch`; the request is aborted via `AbortController` once it
+   * elapses. Defaults to 15000. Set to `0` to disable.
+   */
+  requestTimeoutMs?: number;
 }
 
 export interface StreamInfo {
