@@ -5,6 +5,7 @@ All notable changes are documented here. Format based on [Keep a Changelog](http
 ## [Unreleased]
 
 ### Added
+- `@streamfi/react` stream lifecycle hooks: `useCreateBatchStreams().estimateTotalBatchCost(configs)` sums batch deposits into stroops before submission; `useCancelStream().estimatedRefund` exposes the sender's unstreamed balance (`null` when unknown); `usePauseStream().isPausing` is true only while the pause transaction is pending; and `useResumeStream().resume()` rejects without submitting when the loaded stream is active or cancelled.
 - `ProposalState` enum plus `parseProposalState()` / `formatProposalState()` exported from the package root, so UIs can render governor proposal badges without their own mapping table. Unknown values format as `Unknown` instead of throwing (#860).
 - `@streamfi/react`: `useStreamSearch(streams, query, { status, fields, fuzzy, limit })` — memoised client-side filtering by address, sender, recipient, memo/note and metadata, with multi-term AND matching and fuzzy ranking, no indexer refetch (#821).
 - `StreamBuilder.simulate(options)` — Soroban dry run of `create_stream` returning `minResourceFee`, CPU instructions and read/write bytes without signing or submitting; plus `StreamBuilder.buildTransaction(options)` for the unsigned envelope. `buildContractCallTx` takes an optional trailing `memo` (#820).

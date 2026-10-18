@@ -324,6 +324,46 @@ interface UseStreamCountdownResult {
 
 ---
 
+## Stream lifecycle helpers
+
+Four lifecycle hooks expose state that lets a UI preview or label an action
+before the user commits to it.
+
+```tsx
+import { useCancelStream, useCreateBatchStreams, usePauseStream, useResumeStream } from '@streamfi/react';
+
+function StreamControls({ streamId }) {
+  const { estimatedRefund, cancel } = useCancelStream(streamId);
+  const { isPausing, pause } = usePauseStream(streamId);
+  const { resume } = useResumeStream(streamId);
+  const { estimateTotalBatchCost } = useCreateBatchStreams();
+
+  return (
+    <div>
+      <p>Refund if cancelled: {estimatedRefund === null ? 'Unknown' : estimatedRefund.toString()}</p>
+      <button onClick={() => pause().catch(() => {})} disabled={isPausing}>
+        {isPausing ? 'Pausing Stream...' : 'Pause'}
+      </button>
+      <button onClick={() => resume().catch(() => {})}>Resume</button>
+      <button onClick={() => cancel().catch(() => {})}>Cancel</button>
+      <p>Batch total: {estimateTotalBatchCost(batchConfigs).toString()} stroops</p>
+    </div>
+  );
+}
+```
+
+- `useCancelStream(streamId).estimatedRefund` is the sender's unstreamed balance
+  in stroops, or `null` until the stream loads and for open-ended streams.
+- `usePauseStream(streamId).isPausing` is `true` only while the pause
+  transaction is in flight.
+- `useResumeStream(streamId).resume()` rejects without contacting the wallet
+  when the loaded stream is active or cancelled. Streams that have not loaded
+  yet are not pre-checked.
+- `useCreateBatchStreams().estimateTotalBatchCost(configs)` returns the sum of
+  every config's `depositAmount` in stroops. It is pure and makes no network call.
+
+---
+
 ## Error Handling
 
 Each hook exposes an `error` field that captures:
