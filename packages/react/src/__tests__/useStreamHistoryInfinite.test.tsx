@@ -8,6 +8,16 @@ const mockGetHistory = vi.fn();
 vi.mock('@conduit-protocol/sdk', () => ({
   SUPPORTED_NETWORKS: ['testnet', 'mainnet', 'local'],
   UnsupportedChainError: class extends Error {},
+  InsufficientBalanceError: class extends Error {
+    constructor(currentBalance: bigint, requiredBalance: bigint, detail?: string) {
+      super(detail ?? `Insufficient balance: ${currentBalance} < ${requiredBalance}`);
+      this.name = 'InsufficientBalanceError';
+      this.currentBalance = currentBalance;
+      this.requiredBalance = requiredBalance;
+    }
+    currentBalance: bigint;
+    requiredBalance: bigint;
+  },
   clearServerCache: vi.fn(),
   clearTokenDecimalsCache: vi.fn(),
   ConduitClient: vi.fn(function () {
@@ -17,8 +27,8 @@ vi.mock('@conduit-protocol/sdk', () => ({
 
 const entry = (id: string) => ({ id, kind: 'withdraw', ledger: 1, timestamp: '', txHash: id, event: {} });
 
-function History({ id, pageSize }: { id: string | undefined; pageSize?: number }) {
-  const h = useStreamHistoryInfinite(id, pageSize);
+function History({ id, pageSize, direction, startLedger }: { id: string | undefined; pageSize?: number; direction?: 'forward' | 'backward'; startLedger?: number }) {
+  const h = useStreamHistoryInfinite(id, pageSize, { direction, startLedger });
   if (h.error) return <div data-testid="error">{h.error.message}</div>;
   return (
     <div>
@@ -60,6 +70,22 @@ describe('useStreamHistoryInfinite', () => {
     await waitFor(() => expect(screen.getByTestId('ids')).toHaveTextContent('a,b,c'));
     expect(mockGetHistory).toHaveBeenNthCalledWith(2, '7', { limit: 2, cursor: 'c1' });
     expect(screen.getByTestId('more')).toHaveTextContent('false');
+  });
+
+  it('supports forward pagination from the earliest ledger', async () => {
+    mockGetHistory
+      .mockResolvedValueOnce({ entries: [entry('a'), entry('b')], nextCursor: 'c1' })
+      .mockResolvedValueOnce({ entries: [entry('c')], nextCursor: undefined });
+
+    renderHistory(<History id="7" pageSize={2} direction="forward" startLedger={100} />);
+
+    await waitFor(() => expect(screen.getByTestId('ids')).toHaveTextContent('a,b'));
+    expect(mockGetHistory).toHaveBeenNthCalledWith(1, '7', { limit: 2, startLedger: 100 });
+
+    fireEvent.click(screen.getByText('more'));
+
+    await waitFor(() => expect(screen.getByTestId('ids')).toHaveTextContent('a,b,c'));
+    expect(mockGetHistory).toHaveBeenNthCalledWith(2, '7', { limit: 2, cursor: 'c1' });
   });
 
   it('does not fetch until a stream id is provided', async () => {

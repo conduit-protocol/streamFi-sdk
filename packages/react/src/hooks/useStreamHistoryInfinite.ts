@@ -3,6 +3,13 @@ import { useInfiniteQuery } from '@tanstack/react-query';
 import type { StreamHistoryEntry, StreamHistoryPage } from '@conduit-protocol/sdk';
 import { useStreamFiClient } from '../context/useStreamFiClient.js';
 
+export interface UseStreamHistoryInfiniteOptions {
+  /** Start by walking forward from the oldest ledger, or backward from the newest. */
+  direction?: 'forward' | 'backward';
+  /** Optional ledger to start from when direction is `forward`. */
+  startLedger?: number;
+}
+
 export interface UseStreamHistoryInfiniteResult {
   /** All loaded entries across pages, oldest first. */
   entries: StreamHistoryEntry[];
@@ -32,24 +39,34 @@ export interface UseStreamHistoryInfiniteResult {
 export function useStreamHistoryInfinite(
   streamId: string | bigint | undefined,
   pageSize = 50,
+  options: UseStreamHistoryInfiniteOptions = {},
 ): UseStreamHistoryInfiniteResult {
   const { client, isReady, network } = useStreamFiClient();
   const id = streamId === undefined ? undefined : String(streamId);
+  const { direction = 'backward', startLedger } = options;
 
   const query = useInfiniteQuery<
     StreamHistoryPage,
     Error,
-    { pages: StreamHistoryPage[]; pageParams: (string | undefined)[] },
+    { pages: StreamHistoryPage[]; pageParams: (string | number | undefined)[] },
     readonly unknown[],
-    string | undefined
+    string | number | undefined
   >({
-    queryKey: ['streamfi', 'streamHistory', network, id, pageSize],
-    queryFn: ({ pageParam }) =>
-      client!.streams.getHistory(id!, {
-        limit: pageSize,
-        ...(pageParam !== undefined && { cursor: pageParam }),
-      }),
-    initialPageParam: undefined,
+    queryKey: ['streamfi', 'streamHistory', network, id, pageSize, direction, startLedger],
+    queryFn: ({ pageParam }) => {
+      const params: { limit: number; cursor?: string; startLedger?: number } = { limit: pageSize };
+      if (pageParam !== undefined) {
+        if (typeof pageParam === 'number') {
+          params.startLedger = pageParam;
+        } else {
+          params.cursor = pageParam;
+        }
+      } else if (direction === 'forward' && startLedger !== undefined) {
+        params.startLedger = startLedger;
+      }
+      return client!.streams.getHistory(id!, params);
+    },
+    initialPageParam: direction === 'forward' ? (startLedger ?? undefined) : undefined,
     getNextPageParam: (lastPage) => lastPage.nextCursor,
     enabled: isReady && !!client && id !== undefined,
   });

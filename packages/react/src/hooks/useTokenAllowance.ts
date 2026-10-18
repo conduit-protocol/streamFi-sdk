@@ -13,6 +13,7 @@ export interface UseTokenAllowanceResult {
   error: Error | null;
   txHash: string | null;
   approve: ApproveTokenAllowanceFn;
+  checkAndApprove: (amount: bigint | string, expirationLedger?: number) => Promise<string | null>;
   refetch: () => void;
   reset: () => void;
 }
@@ -124,6 +125,17 @@ export function useTokenAllowance(
     [client, isReady, ownerAddress, spenderAddress, tokenAddress],
   );
 
+  const checkAndApprove = useCallback(
+    async (amount: bigint | string, expirationLedger = 0) => {
+      const parsedAmount = BigInt(amount);
+      if (allowance !== null && allowance >= parsedAmount) {
+        return null;
+      }
+      return approve(parsedAmount, expirationLedger);
+    },
+    [allowance, approve],
+  );
+
   const reset = useCallback(() => {
     ++requestIdRef.current;
     setAllowance(null);
@@ -133,5 +145,5 @@ export function useTokenAllowance(
     setTxHash(null);
   }, []);
 
-  return { allowance, loading, isPending, error, txHash, approve, refetch, reset };
+  return { allowance, loading, isPending, error, txHash, approve, checkAndApprove, refetch, reset };
 }

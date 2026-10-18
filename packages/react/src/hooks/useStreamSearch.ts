@@ -71,6 +71,19 @@ function fieldValues<T extends SearchableStream>(stream: T, fields?: UseStreamSe
  * field by substring, or, when `fuzzy` is on, by in-order subsequence.
  * Substring hits rank above fuzzy-only hits; input order is kept within a rank.
  */
+function scoreMatch(term: string, value: string): number {
+  const normalized = value.toLowerCase();
+  const idx = normalized.indexOf(term);
+  if (idx >= 0) {
+    return idx + term.length * 0.01;
+  }
+  return Number.POSITIVE_INFINITY;
+}
+
+function fuzzyScore(term: string, value: string): number {
+  return isSubsequence(term, value) ? term.length : Number.POSITIVE_INFINITY;
+}
+
 export function useStreamSearch<T extends SearchableStream>(
   streams: readonly T[],
   query: string,
@@ -96,10 +109,17 @@ export function useStreamSearch<T extends SearchableStream>(
       let score = 0;
       let matched = true;
       for (const term of terms) {
-        if (values.some((v) => v.includes(term))) continue;
-        if (fuzzy && values.some((v) => isSubsequence(term, v))) {
-          score += 1;
+        const substringScore = values.reduce((best, value) => Math.min(best, scoreMatch(term, value)), Number.POSITIVE_INFINITY);
+        if (Number.isFinite(substringScore)) {
+          score += substringScore;
           continue;
+        }
+        if (fuzzy) {
+          const fuzzyMatchScore = values.reduce((best, value) => Math.min(best, fuzzyScore(term, value)), Number.POSITIVE_INFINITY);
+          if (Number.isFinite(fuzzyMatchScore)) {
+            score += fuzzyMatchScore + 1000;
+            continue;
+          }
         }
         matched = false;
         break;
@@ -107,7 +127,6 @@ export function useStreamSearch<T extends SearchableStream>(
       if (matched) scored.push({ stream, score });
     }
 
-    // Array#sort is stable, so equal scores keep input order.
     scored.sort((a, b) => a.score - b.score);
     const all = scored.map((s) => s.stream);
     return { results: limit !== undefined ? all.slice(0, limit) : all, total: all.length };

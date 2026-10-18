@@ -1,5 +1,6 @@
 import { beforeEach, describe, expect, it, vi } from 'vitest';
 import { fireEvent, render, screen, waitFor } from '@testing-library/react';
+import { act, renderHook } from '@testing-library/react';
 import { useTokenAllowance } from '../hooks/useTokenAllowance.js';
 
 const mockAllowance = vi.fn();
@@ -64,6 +65,24 @@ describe('useTokenAllowance', () => {
     });
     expect(mockApprove).toHaveBeenCalledWith('CTOKEN', 'GOWNER', 'CSPENDER', 250n, 12345);
     expect(screen.getByTestId('pending')).toHaveTextContent('false');
+  });
+
+  it('checks and approves only when the current allowance is insufficient', async () => {
+    const { result } = renderHook(() => useTokenAllowance('CTOKEN', 'GOWNER', 'CSPENDER'));
+
+    await waitFor(() => expect(result.current.allowance).toBe(100n));
+
+    await act(async () => {
+      const hash = await result.current.checkAndApprove(50n);
+      expect(hash).toBeNull();
+    });
+    expect(mockApprove).not.toHaveBeenCalled();
+
+    await act(async () => {
+      const hash = await result.current.checkAndApprove(150n);
+      expect(hash).toBe('approve-hash');
+    });
+    expect(mockApprove).toHaveBeenCalledWith('CTOKEN', 'GOWNER', 'CSPENDER', 150n, 0);
   });
 
   it('surfaces approval errors', async () => {
