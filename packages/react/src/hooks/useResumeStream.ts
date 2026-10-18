@@ -16,6 +16,17 @@ export interface UseResumeStreamResult extends UseStreamMutationState {
   reset: () => void;
 }
 
+/**
+ * Rejects resume when the loaded snapshot shows the stream cannot be resumed,
+ * so no transaction is submitted. Only a known state is checked: an unloaded
+ * or partial snapshot is passed through and the contract decides.
+ */
+function assertResumable(stream: StreamInfo | null): void {
+  if (stream && (stream.cancelled || stream.paused === false)) {
+    throw new Error('Stream is not paused and cannot be resumed.');
+  }
+}
+
 export function useResumeStream(streamId: StreamMutationId): UseResumeStreamResult {
   const { stream, setStream } = useStream(streamId) as UseStreamResult;
   const mutation = useStreamMutation(streamId, async (client, id) => {
@@ -27,6 +38,7 @@ export function useResumeStream(streamId: StreamMutationId): UseResumeStreamResu
   });
 
   const resume = useCallback<ResumeStreamFn>(async () => {
+    assertResumable(stream);
     const previous = stream;
     if (stream) {
       setStream((current) => current ? { ...current, paused: false, pausedAt: 0 } : current);

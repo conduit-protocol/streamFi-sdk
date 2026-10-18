@@ -7,6 +7,8 @@ export type PauseStreamFn = () => Promise<string>;
 export interface UsePauseStreamResult extends UseStreamMutationState {
   mutate: PauseStreamFn;
   pause: PauseStreamFn;
+  /** True only while the pause transaction is in flight; lets UIs show "Pausing Stream...". */
+  isPausing: boolean;
   reset: () => void;
 }
 
@@ -28,5 +30,5 @@ export function usePauseStream(streamId: StreamMutationId): UsePauseStreamResult
     }
   }, [mutation, setStream, stream]);
 
-  return { ...mutation, mutate: pause, pause };
+  return { ...mutation, mutate: pause, pause, isPausing: mutation.isPending };
 }

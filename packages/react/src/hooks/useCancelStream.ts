@@ -25,6 +25,8 @@ export interface UseCancelStreamResult extends UseStreamMutationState {
   isConfirming: boolean;
   isCancelling: boolean;
   settlement: CancelSettlement | null;
+  /** Unstreamed balance the sender would get back if cancelled now; null when unknown (e.g. open-ended streams). */
+  estimatedRefund: bigint | null;
   reset: () => void;
 }
 
@@ -105,6 +107,7 @@ export function useCancelStream(streamId: StreamMutationId): UseCancelStreamResu
     isConfirming,
     isCancelling: mutation.isPending,
     settlement,
+    estimatedRefund: settlement?.senderRefundAmount ?? null,
     reset,
   };
 }

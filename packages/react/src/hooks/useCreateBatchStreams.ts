@@ -1,6 +1,6 @@
 import { useState, useCallback } from 'react';
 import { useStreamFiClient } from '../context/useStreamFiClient.js';
-import type { StreamConfig, BatchCreateStreamResult } from '@conduit-protocol/sdk';
+import { toStroops, type StreamConfig, type BatchCreateStreamResult } from '@conduit-protocol/sdk';
 
 export interface UseCreateBatchStreamsState {
   loading: boolean;
@@ -15,10 +15,24 @@ export type CreateBatchStreamsFn = (
   onProgress?: OnBatchProgress,
 ) => Promise<BatchCreateStreamResult[]>;
 
+export type EstimateTotalBatchCostFn = (configs: StreamConfig[]) => bigint;
+
 export interface UseCreateBatchStreamsResult extends UseCreateBatchStreamsState {
   createBatchStreams: CreateBatchStreamsFn;
+  /** Total deposit across all configs, in stroops. Pure: does not touch the network or hook state. */
+  estimateTotalBatchCost: EstimateTotalBatchCostFn;
   reset: () => void;
 }
+
+/**
+ * Sums the deposit of every config in a batch, in stroops, so a UI can show
+ * the treasury balance needed before submitting.
+ *
+ * @example
+ * estimateTotalBatchCost([{ depositAmount: '10' }, { depositAmount: '2.5' }]) // 125_000_000n
+ */
+export const estimateTotalBatchCost: EstimateTotalBatchCostFn = (configs) =>
+  configs.reduce((total, config) => total + toStroops(config.depositAmount), 0n);
 
 export function useCreateBatchStreams(): UseCreateBatchStreamsResult {
   const { client, isReady } = useStreamFiClient();
@@ -69,5 +83,5 @@ export function useCreateBatchStreams(): UseCreateBatchStreamsResult {
     [client, isReady],
   );
 
-  return { ...state, createBatchStreams, reset };
+  return { ...state, createBatchStreams, estimateTotalBatchCost, reset };
 }
