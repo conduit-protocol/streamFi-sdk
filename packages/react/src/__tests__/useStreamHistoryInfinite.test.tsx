@@ -25,10 +25,22 @@ vi.mock('@conduit-protocol/sdk', () => ({
   }),
 }));
 
-const entry = (id: string) => ({ id, kind: 'withdraw', ledger: 1, timestamp: '', txHash: id, event: {} });
+const entry = (id: string, kind = 'withdraw') => ({ id, kind, ledger: 1, timestamp: '', txHash: id, event: {} });
 
-function History({ id, pageSize, direction, startLedger }: { id: string | undefined; pageSize?: number; direction?: 'forward' | 'backward'; startLedger?: number }) {
-  const h = useStreamHistoryInfinite(id, pageSize, { direction, startLedger });
+function History({
+  id,
+  pageSize,
+  direction,
+  startLedger,
+  filterEventTypes,
+}: {
+  id: string | undefined;
+  pageSize?: number;
+  direction?: 'forward' | 'backward';
+  startLedger?: number;
+  filterEventTypes?: ('Deposit' | 'Withdraw' | 'Cancel')[];
+}) {
+  const h = useStreamHistoryInfinite(id, pageSize, { direction, startLedger, filterEventTypes });
   if (h.error) return <div data-testid="error">{h.error.message}</div>;
   return (
     <div>
@@ -98,5 +110,18 @@ describe('useStreamHistoryInfinite', () => {
     mockGetHistory.mockRejectedValue(new Error('rpc down'));
     renderHistory(<History id="7" />);
     await waitFor(() => expect(screen.getByTestId('error')).toHaveTextContent('rpc down'));
+  });
+
+  it('filters loaded entries by event type and keeps the requested page size', async () => {
+    mockGetHistory.mockResolvedValueOnce({
+      entries: [entry('a', 'withdraw'), entry('b', 'top_up'), entry('c', 'created'), entry('d', 'cancel')],
+      nextCursor: undefined,
+    });
+
+    renderHistory(<History id="7" filterEventTypes={['Deposit', 'Cancel']} />);
+
+    // 'Deposit' covers created and top_up; 'Cancel' covers cancel; withdrawals are dropped.
+    await waitFor(() => expect(screen.getByTestId('ids')).toHaveTextContent('b,c,d'));
+    expect(mockGetHistory).toHaveBeenCalledWith('7', { limit: 50 });
   });
 });
