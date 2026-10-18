@@ -17,7 +17,7 @@ export { useWithdrawStream } from './hooks/useWithdrawStream.js';
 export type { UseWithdrawStreamResult, WithdrawStreamFn } from './hooks/useWithdrawStream.js';
 export { useCancelStream } from './hooks/useCancelStream.js';
 export type { UseCancelStreamResult, CancelStreamFn, CancelSettlement } from './hooks/useCancelStream.js';
-export { CancelStreamConfirmation } from './components/CancelStreamConfirmation.js';
+export { CancelStreamConfirmation, CancelStreamConfirmationModal } from './components/CancelStreamConfirmation.js';
 export type { CancelStreamConfirmationProps } from './components/CancelStreamConfirmation.js';
 export { usePauseStream } from './hooks/usePauseStream.js';
 export type { UsePauseStreamResult, PauseStreamFn } from './hooks/usePauseStream.js';
@@ -30,7 +30,7 @@ export type { UseForceCancelStreamResult, ForceCancelStreamFn } from './hooks/us
 export { useTransferStreamRecipient } from './hooks/useTransferStreamRecipient.js';
 export type { UseTransferStreamRecipientResult, TransferRecipientFn } from './hooks/useTransferStreamRecipient.js';
 export { useClawbackStream } from './hooks/useClawbackStream.js';
-export type { UseClawbackStreamResult, ClawbackStreamFn } from './hooks/useClawbackStream.js';
+export type { UseClawbackStreamResult, UseClawbackStreamOptions, ClawbackStreamFn } from './hooks/useClawbackStream.js';
 export { useClawbackStreamMutation, useStreamClawbackMutation } from './hooks/useClawbackStreamMutation.js';
 export type { UseClawbackStreamMutationResult, ClawbackMutationOptions, ClawbackStatus } from './hooks/useClawbackStreamMutation.js';
 export { useBatchWithdraw } from './hooks/useBatchWithdraw.js';
@@ -60,14 +60,21 @@ export { useStreamsBySender } from './hooks/useStreamsBySender.js';
 export type { UseStreamsBySenderResult } from './hooks/useStreamsBySender.js';
 export { useStreamsByRecipient } from './hooks/useStreamsByRecipient.js';
 export type { UseStreamsByRecipientResult } from './hooks/useStreamsByRecipient.js';
-export { useGovernorConfig } from './hooks/useGovernorConfig.js';
+export { useGovernorConfig, formatLedgerDuration } from './hooks/useGovernorConfig.js';
 export type { UseGovernorConfigResult, GovernorConfig } from './hooks/useGovernorConfig.js';
-export { useGovernorProposals } from './hooks/useGovernorProposals.js';
-export type { UseGovernorProposalsResult, GovernorProposal } from './hooks/useGovernorProposals.js';
+export { useGovernorProposals, sortProposals } from './hooks/useGovernorProposals.js';
+export type {
+  UseGovernorProposalsResult,
+  GovernorProposal,
+  ProposalStatus,
+  ProposalSortBy,
+  ProposalSortDirection,
+  UseGovernorProposalsOptions,
+} from './hooks/useGovernorProposals.js';
 export { useTransactionHistory } from './hooks/useTransactionHistory.js';
 export type { UseTransactionHistoryResult, UseTransactionHistoryOptions } from './hooks/useTransactionHistory.js';
 export { useCircuitState } from './hooks/useCircuitState.js';
-export type { UseCircuitStateResult } from './hooks/useCircuitState.js';
+export type { UseCircuitStateResult, UseCircuitStateOptions } from './hooks/useCircuitState.js';
 export { useStreamHistoryInfinite } from './hooks/useStreamHistoryInfinite.js';
 export type { UseStreamHistoryInfiniteOptions, UseStreamHistoryInfiniteResult } from './hooks/useStreamHistoryInfinite.js';
 export { useStreamCountdown } from './hooks/useStreamCountdown.js';
@@ -84,7 +91,7 @@ export type {
   UseTokenAllowanceResult,
 } from './hooks/useTokenAllowance.js';
 export { useNetworkSwitcher } from './hooks/useNetworkSwitcher.js';
-export type { UseNetworkSwitcherResult } from './hooks/useNetworkSwitcher.js';
+export type { UseNetworkSwitcherResult, UseNetworkSwitcherOptions } from './hooks/useNetworkSwitcher.js';
 export { useBatchCreateStreamValidation } from './hooks/useBatchCreateStreamValidation.js';
 export type {
   CsvStreamRow,
