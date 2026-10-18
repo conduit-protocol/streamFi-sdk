@@ -33,6 +33,21 @@ export interface StreamFiProviderProps {
   config?: ConduitConfig;
   defaultNetwork?: Network;
   children: ReactNode;
+  /**
+   * Custom HTTP headers forwarded on every Soroban RPC request (#998).
+   * Use this to pass API keys required by commercial RPC providers such as
+   * QuickNode (`x-api-key`) or Blockdaemon (`Authorization`).
+   */
+  rpcHeaders?: Record<string, string>;
+}
+
+/** Wraps the global fetch so that every outbound RPC call carries `headers`. */
+function makeHeaderFetch(
+  headers: Record<string, string>,
+  base: typeof fetch = globalThis.fetch,
+): typeof fetch {
+  return (input, init) =>
+    base(input, { ...init, headers: { ...(init?.headers as Record<string, string>), ...headers } });
 }
 
 function checkVersionMismatch() {
@@ -70,7 +85,11 @@ export function StreamFiProvider({
   config,
   defaultNetwork,
   children,
+  rpcHeaders,
 }: StreamFiProviderProps) {
+  const customFetch = rpcHeaders && Object.keys(rpcHeaders).length > 0
+    ? makeHeaderFetch(rpcHeaders)
+    : undefined;
   const [currentConfig, setCurrentConfig] = useState<ConduitConfig | undefined>(
     () => config ?? (defaultNetwork ? { network: defaultNetwork } : undefined),
   );
@@ -85,7 +104,7 @@ export function StreamFiProvider({
       config ?? (defaultNetwork ? { network: defaultNetwork } : undefined);
     if (initialConfig) {
       try {
-        return { client: new ConduitClient(initialConfig), error: null };
+        return { client: new ConduitClient({ ...initialConfig, ...(customFetch ? { customFetch } : {}) }), error: null };
       } catch (err: unknown) {
         return {
           client: null,
@@ -103,7 +122,7 @@ export function StreamFiProvider({
 
   const connect = useCallback((cfg: ConduitConfig) => {
     try {
-      const newClient = new ConduitClient(cfg);
+      const newClient = new ConduitClient({ ...cfg, ...(customFetch ? { customFetch } : {}) });
       setCurrentConfig(cfg);
       setCurrentNetwork(cfg.network);
       setState({ client: newClient, error: null });
@@ -164,7 +183,7 @@ export function StreamFiProvider({
       setCurrentConfig(nextConfig);
 
       try {
-        const newClient = new ConduitClient(nextConfig);
+        const newClient = new ConduitClient({ ...nextConfig, ...(customFetch ? { customFetch } : {}) });
         setState({ client: newClient, error: null });
       } catch (err: unknown) {
         setState({

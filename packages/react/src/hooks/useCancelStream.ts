@@ -8,6 +8,10 @@ export interface CancelSettlement {
   recipientPayout: string;
   senderRefundAmount: bigint;
   recipientPayoutAmount: bigint;
+  /** Protocol penalty fee deducted when the stream is cancelled early (#999). */
+  cancellationFee?: string;
+  /** Raw stroop amount of the cancellation fee; undefined means no fee applies. */
+  cancellationFeeAmount?: bigint;
 }
 
 export type CancelStreamFn = () => Promise<void>;

@@ -26,6 +26,11 @@ export function CancelStreamConfirmation({
         <dt>Recipient payout</dt>
         <dd>{settlement?.recipientPayout ?? 'Calculating…'}</dd>
       </dl>
+      {settlement?.cancellationFeeAmount != null && settlement.cancellationFeeAmount > 0n && (
+        <p role="alert">
+          ⚠️ Cancellation Fee: {settlement.cancellationFee ?? settlement.cancellationFeeAmount.toString()} token — early cancellation penalty applies.
+        </p>
+      )}
       <button type="button" onClick={onCancel}>Keep stream</button>
       <button type="button" onClick={onConfirm} disabled={!settlement}>Confirm cancellation</button>
     </div>
