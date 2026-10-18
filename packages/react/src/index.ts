@@ -60,14 +60,21 @@ export { useStreamsBySender } from './hooks/useStreamsBySender.js';
 export type { UseStreamsBySenderResult } from './hooks/useStreamsBySender.js';
 export { useStreamsByRecipient } from './hooks/useStreamsByRecipient.js';
 export type { UseStreamsByRecipientResult } from './hooks/useStreamsByRecipient.js';
-export { useGovernorConfig } from './hooks/useGovernorConfig.js';
+export { useGovernorConfig, formatLedgerDuration } from './hooks/useGovernorConfig.js';
 export type { UseGovernorConfigResult, GovernorConfig } from './hooks/useGovernorConfig.js';
-export { useGovernorProposals } from './hooks/useGovernorProposals.js';
-export type { UseGovernorProposalsResult, GovernorProposal } from './hooks/useGovernorProposals.js';
+export { useGovernorProposals, sortProposals } from './hooks/useGovernorProposals.js';
+export type {
+  UseGovernorProposalsResult,
+  GovernorProposal,
+  ProposalStatus,
+  ProposalSortBy,
+  ProposalSortDirection,
+  UseGovernorProposalsOptions,
+} from './hooks/useGovernorProposals.js';
 export { useTransactionHistory } from './hooks/useTransactionHistory.js';
 export type { UseTransactionHistoryResult, UseTransactionHistoryOptions } from './hooks/useTransactionHistory.js';
 export { useCircuitState } from './hooks/useCircuitState.js';
-export type { UseCircuitStateResult } from './hooks/useCircuitState.js';
+export type { UseCircuitStateResult, UseCircuitStateOptions } from './hooks/useCircuitState.js';
 export { useStreamHistoryInfinite } from './hooks/useStreamHistoryInfinite.js';
 export type { UseStreamHistoryInfiniteResult } from './hooks/useStreamHistoryInfinite.js';
 export { useStreamCountdown } from './hooks/useStreamCountdown.js';
@@ -84,7 +91,7 @@ export type {
   UseTokenAllowanceResult,
 } from './hooks/useTokenAllowance.js';
 export { useNetworkSwitcher } from './hooks/useNetworkSwitcher.js';
-export type { UseNetworkSwitcherResult } from './hooks/useNetworkSwitcher.js';
+export type { UseNetworkSwitcherResult, UseNetworkSwitcherOptions } from './hooks/useNetworkSwitcher.js';
 export { useBatchCreateStreamValidation } from './hooks/useBatchCreateStreamValidation.js';
 export type {
   CsvStreamRow,
