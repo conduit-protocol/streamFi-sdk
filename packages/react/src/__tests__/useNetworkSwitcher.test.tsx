@@ -38,6 +38,42 @@ function TestSwitcher() {
   );
 }
 
+function TestPromptSwitcher({ onResult }: { onResult?: (res: any) => void }) {
+  const { network, promptSwitchNetwork } = useNetworkSwitcher();
+
+  return (
+    <div>
+      <div data-testid="prompt-network">{network ?? 'none'}</div>
+      <button
+        data-testid="prompt-switch-mainnet"
+        onClick={async () => {
+          try {
+            const res = await promptSwitchNetwork('mainnet');
+            onResult?.({ success: res });
+          } catch (err: any) {
+            onResult?.({ error: err });
+          }
+        }}
+      >
+        Prompt Switch Mainnet
+      </button>
+      <button
+        data-testid="prompt-switch-invalid"
+        onClick={async () => {
+          try {
+            const res = await promptSwitchNetwork('invalid-chain');
+            onResult?.({ success: res });
+          } catch (err: any) {
+            onResult?.({ error: err });
+          }
+        }}
+      >
+        Prompt Switch Invalid
+      </button>
+    </div>
+  );
+}
+
 describe('useNetworkSwitcher', () => {
   it('throws error when used outside StreamFiProvider', () => {
     expect(() => render(<TestSwitcher />)).toThrow(
@@ -72,5 +108,48 @@ describe('useNetworkSwitcher', () => {
     });
 
     expect(screen.getByTestId('network')).toHaveTextContent('mainnet');
+  });
+
+  it('prompts network switch and calls wallet rpc if available', async () => {
+    const mockSwitch = vi.fn().mockResolvedValue(true);
+    (window as any).freighter = {
+      switchNetwork: mockSwitch,
+    };
+
+    const handleResult = vi.fn();
+    render(
+      <StreamFiProvider config={{ network: 'testnet' }}>
+        <TestPromptSwitcher onResult={handleResult} />
+      </StreamFiProvider>,
+    );
+
+    expect(screen.getByTestId('prompt-network')).toHaveTextContent('testnet');
+
+    await act(async () => {
+      screen.getByTestId('prompt-switch-mainnet').click();
+    });
+
+    expect(mockSwitch).toHaveBeenCalledWith('mainnet');
+    expect(screen.getByTestId('prompt-network')).toHaveTextContent('mainnet');
+    expect(handleResult).toHaveBeenCalledWith({ success: true });
+
+    delete (window as any).freighter;
+  });
+
+  it('rejects promptSwitchNetwork with unsupported network', async () => {
+    const handleResult = vi.fn();
+    render(
+      <StreamFiProvider config={{ network: 'testnet' }}>
+        <TestPromptSwitcher onResult={handleResult} />
+      </StreamFiProvider>,
+    );
+
+    await act(async () => {
+      screen.getByTestId('prompt-switch-invalid').click();
+    });
+
+    expect(handleResult).toHaveBeenCalled();
+    const result = handleResult.mock.calls[0][0];
+    expect(result.error).toBeDefined();
   });
 });

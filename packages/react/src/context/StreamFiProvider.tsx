@@ -14,6 +14,8 @@ import {
   clearTokenDecimalsCache,
 } from "@conduit-protocol/sdk";
 import type { ConduitConfig, Network } from "@conduit-protocol/sdk";
+// QueryClient is an optional peer dep — import type only to avoid hard runtime dep.
+import type { QueryClient } from "@tanstack/react-query";
 
 export interface StreamFiContextValue {
   client: ConduitClient | null;
@@ -25,6 +27,8 @@ export interface StreamFiContextValue {
   setNetwork: (network: Network) => void;
   isSupportedNetwork: (network: string) => network is Network;
   availableNetworks: readonly Network[];
+  /** The QueryClient passed via props, if any (#944). Hooks can read this to share the app's cache. */
+  queryClient: QueryClient | undefined;
 }
 
 export const StreamFiContext = createContext<StreamFiContextValue | null>(null);
@@ -34,20 +38,11 @@ export interface StreamFiProviderProps {
   defaultNetwork?: Network;
   children: ReactNode;
   /**
-   * Custom HTTP headers forwarded on every Soroban RPC request (#998).
-   * Use this to pass API keys required by commercial RPC providers such as
-   * QuickNode (`x-api-key`) or Blockdaemon (`Authorization`).
+   * An existing TanStack QueryClient from the host application. When provided,
+   * the SDK shares the app's cache instead of maintaining its own, preventing
+   * duplicate cache entries and conflicting invalidations (#944).
    */
-  rpcHeaders?: Record<string, string>;
-}
-
-/** Wraps the global fetch so that every outbound RPC call carries `headers`. */
-function makeHeaderFetch(
-  headers: Record<string, string>,
-  base: typeof fetch = globalThis.fetch,
-): typeof fetch {
-  return (input, init) =>
-    base(input, { ...init, headers: { ...(init?.headers as Record<string, string>), ...headers } });
+  queryClient?: QueryClient;
 }
 
 function checkVersionMismatch() {
@@ -85,7 +80,7 @@ export function StreamFiProvider({
   config,
   defaultNetwork,
   children,
-  rpcHeaders,
+  queryClient,
 }: StreamFiProviderProps) {
   const customFetch = rpcHeaders && Object.keys(rpcHeaders).length > 0
     ? makeHeaderFetch(rpcHeaders)
@@ -206,6 +201,7 @@ export function StreamFiProvider({
       setNetwork,
       isSupportedNetwork,
       availableNetworks,
+      queryClient,
     }),
     [
       state.client,
@@ -216,6 +212,7 @@ export function StreamFiProvider({
       setNetwork,
       isSupportedNetwork,
       availableNetworks,
+      queryClient,
     ],
   );
 

@@ -348,6 +348,9 @@ function parseGovernorConfig(val: xdr.ScVal): GovernorConfig {
     maxRatePerSecond:   m['max_rate_per_second'] ? scValToI128(m['max_rate_per_second']) : 0n,
     ...(m['fee_recipient'] ? { feeRecipient: Address.fromScVal(m['fee_recipient']).toString() } : {}),
     ...(m['factory_address'] ? { factoryAddress: Address.fromScVal(m['factory_address']).toString() } : {}),
+    ...(m['voting_delay'] ? { votingDelay: Number(scValToU64(m['voting_delay'])) } : {}),
+    ...(m['voting_period'] ? { votingPeriod: Number(scValToU64(m['voting_period'])) } : {}),
+    ...(m['proposal_threshold'] ? { proposalThreshold: scValToI128(m['proposal_threshold']) } : {}),
   };
 }
 

@@ -1,4 +1,4 @@
-import { useCallback, useState } from 'react';
+import { useCallback } from 'react';
 import { isValidAddress } from '@conduit-protocol/sdk/utils';
 import { useStreamMutation, type StreamMutationId, type UseStreamMutationState } from './useStreamMutation.js';
 
@@ -21,12 +21,11 @@ export interface UseTransferStreamRecipientResult extends UseStreamMutationState
 }
 
 /**
- * Transfer the beneficiary address on an active stream (#947, #1001).
+ * Transfer the beneficiary address on an active stream (#947).
  *
- * Exposes both a direct `transferRecipient` path and a two-step
- * `initiateTransfer` / `confirmTransfer` path. Use the two-step path for
- * UI flows where the recipient address is typed by hand — re-entering it
- * guards against typos in an irreversible on-chain operation.
+ * Validates `newRecipient` as a Stellar G... or C... address before
+ * submitting, so compromised-key rotation flows fail fast with a clear
+ * error instead of surfacing an on-chain rejection.
  */
 export function useTransferStreamRecipient(streamId: StreamMutationId): UseTransferStreamRecipientResult {
   const { mutate, isPending, error, txHash, reset: mutateReset } = useStreamMutation(

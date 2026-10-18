@@ -193,6 +193,9 @@ export interface GovernorConfig {
   maxDurationSeconds:  number;
   maxRatePerSecond:    bigint;
   factoryAddress?:     string;
+  votingDelay?:        number;
+  votingPeriod?:       number;
+  proposalThreshold?:  bigint;
 }
 
 // ── Events ──────────────────────────────────────────────────────────────────
