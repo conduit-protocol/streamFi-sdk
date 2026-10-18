@@ -88,6 +88,15 @@ describe('Issue #986 - useCreateBatchStreams.estimateTotalBatchCost', () => {
     expect(total).toBe(125_000_000n);
   });
 
+  it('handles fractional deposit amounts', () => {
+    const { result } = renderHook(() => useCreateBatchStreams(), { wrapper });
+
+    expect(result.current.estimateTotalBatchCost([
+      { recipient: 'GALICE', token: 'native', depositAmount: '0.5' },
+      { recipient: 'GBOB', token: 'native', depositAmount: '1' },
+    ])).toBe(15_000_000n);
+  });
+
   it('returns 0n for an empty batch', () => {
     const { result } = renderHook(() => useCreateBatchStreams(), { wrapper });
 
@@ -124,6 +133,33 @@ describe('Issue #987 - useCancelStream.estimatedRefund', () => {
     const { result } = renderHook(() => useCancelStream(7n), { wrapper });
 
     await waitFor(() => expect(result.current.estimatedRefund).toBe(500n));
+  });
+
+  it('reflects accrued time: refund is total minus what has already streamed', async () => {
+    const start = 1_700_000_000;
+    const now = vi.spyOn(Date, 'now').mockReturnValue((start + 50) * 1000);
+    try {
+      // 100s deposit at 5 stroops/s = 500 total; 50s elapsed accrued 250, so 250 is refundable.
+      mockGet.mockResolvedValue(makeStream({ ratePerSecond: 5n, startTime: start, endTime: start + 100 }));
+      const { result } = renderHook(() => useCancelStream(7n), { wrapper });
+
+      await waitFor(() => expect(result.current.estimatedRefund).toBe(250n));
+    } finally {
+      now.mockRestore();
+    }
+  });
+
+  it('is 0n once the stream has fully ended', async () => {
+    const start = 1_700_000_000;
+    const now = vi.spyOn(Date, 'now').mockReturnValue((start + 200) * 1000);
+    try {
+      mockGet.mockResolvedValue(makeStream({ ratePerSecond: 5n, startTime: start, endTime: start + 100 }));
+      const { result } = renderHook(() => useCancelStream(7n), { wrapper });
+
+      await waitFor(() => expect(result.current.estimatedRefund).toBe(0n));
+    } finally {
+      now.mockRestore();
+    }
   });
 
   it('is null for open-ended streams because the funded balance is unknown', async () => {
