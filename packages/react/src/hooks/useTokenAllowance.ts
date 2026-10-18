@@ -30,7 +30,30 @@ export interface UseTokenAllowanceResult {
  * Read and update a spender's SEP-41 token allowance.
  *
  * The connected wallet or signer must own `ownerAddress` before `approve`
- * can submit a transaction.
+ * or `approveInfinite` can submit a transaction.
+ *
+ * @param tokenAddress - SEP-41 token contract address
+ * @param ownerAddress - Account that owns the tokens
+ * @param spenderAddress - Account allowed to spend the tokens
+ * @returns Hook state with approve, approveInfinite, checkAndApprove, and allowance
+ *
+ * @example
+ * ```typescript
+ * const { approve, approveInfinite, allowance } = useTokenAllowance(
+ *   tokenAddress,
+ *   ownerAddress,
+ *   spenderAddress,
+ * );
+ *
+ * // Set a specific allowance
+ * await approve(1000000n, ledgerExpirationTime);
+ *
+ * // Set infinite allowance (i128::MAX)
+ * await approveInfinite(ledgerExpirationTime);
+ *
+ * // Check and approve only if needed
+ * const hash = await checkAndApprove(500000n, ledgerExpirationTime);
+ * ```
  */
 export function useTokenAllowance(
   tokenAddress: string | null | undefined,

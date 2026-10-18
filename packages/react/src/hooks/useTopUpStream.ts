@@ -17,6 +17,27 @@ export interface UseTopUpStreamResult extends UseStreamMutationState {
   reset: () => void;
 }
 
+/**
+ * Deposit additional tokens into a stream.
+ *
+ * Validates the top-up amount against the available token balance if provided.
+ * Fetches stream info to calculate the projected new end time based on the
+ * stream's rate and current end time.
+ *
+ * @param streamId - The stream ID to top up.
+ * @param options.tokenBalance - Optional: current owner balance to validate against.
+ * @returns Hook state with topUp function and projectedNewEndTime.
+ *
+ * @example
+ * ```typescript
+ * const { topUp, projectedNewEndTime, isTopUpPending } = useTopUpStream(streamId, {
+ *   tokenBalance: 500000000n, // 500 USDC in stroops
+ * });
+ *
+ * await topUp(100000000n); // Top up with 100 USDC
+ * console.log('New end time:', new Date(projectedNewEndTime! * 1000));
+ * ```
+ */
 export function useTopUpStream(
   streamId: StreamMutationId,
   options: UseTopUpStreamOptions = {},

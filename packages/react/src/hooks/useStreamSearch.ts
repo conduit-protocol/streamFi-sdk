@@ -86,6 +86,40 @@ function fuzzyScore(term: string, value: string): number {
   return isSubsequence(term, value) ? term.length : Number.POSITIVE_INFINITY;
 }
 
+/**
+ * Client-side search over an already-loaded stream list (#821).
+ *
+ * Matches the query against sender, recipient, contract address, memo, note, transaction hash,
+ * and metadata without refetching from the indexer.
+ *
+ * Whitespace-separated query terms must all match (AND). Each term matches a field by
+ * substring, or, when `fuzzy` is on, by in-order subsequence. Substring hits rank above
+ * fuzzy-only hits; input order is kept within a rank.
+ *
+ * @param streams - Already-loaded stream list to search
+ * @param query - Whitespace-separated search terms (case-insensitive)
+ * @param options.status - Optional status filter(s)
+ * @param options.fields - Optional fields to search; default: id, address, sender, recipient, token, memo, note, txHash
+ * @param options.fuzzy - Allow in-order gaps between query characters (default: true)
+ * @param options.limit - Maximum results to return
+ * @returns Search results and total count before limit is applied
+ *
+ * @example
+ * ```typescript
+ * // Search all default fields
+ * const { results, total } = useStreamSearch(streams, 'GALICE USDC');
+ *
+ * // Filter by status and search txHash
+ * const withdraws = useStreamSearch(streams, '0x1234abc', {
+ *   status: 'cancelled',
+ * });
+ *
+ * // Restrict search to specific fields
+ * const bySender = useStreamSearch(streams, 'GALICE', {
+ *   fields: ['sender'],
+ * });
+ * ```
+ */
 export function useStreamSearch<T extends SearchableStream>(
   streams: readonly T[],
   query: string,

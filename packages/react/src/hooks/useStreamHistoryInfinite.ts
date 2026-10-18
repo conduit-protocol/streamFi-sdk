@@ -37,6 +37,25 @@ export interface UseStreamHistoryInfiniteResult {
  *
  * @param streamId - Stream to load; the query is disabled while `undefined`.
  * @param pageSize - Events per request, 1–200. Default 50.
+ * @param options.direction - Walk forward from oldest ledger or backward from newest. Default 'backward'.
+ * @param options.startLedger - Optional ledger to start from when direction is 'forward'.
+ * @param options.filterEventTypes - Optional filter by event type(s): 'Deposit' (created or top_up), 'Withdraw', or 'Cancel'.
+ *
+ * @example
+ * ```typescript
+ * // Load all events
+ * const { entries, fetchNextPage, hasNextPage } = useStreamHistoryInfinite(streamId);
+ *
+ * // Load only withdrawals
+ * const withdrawals = useStreamHistoryInfinite(streamId, 50, {
+ *   filterEventTypes: ['Withdraw'],
+ * });
+ *
+ * // Load deposits and withdrawals, exclude cancels
+ * const activity = useStreamHistoryInfinite(streamId, 50, {
+ *   filterEventTypes: ['Deposit', 'Withdraw'],
+ * });
+ * ```
  */
 /** Map event type filter to history entry kinds */
 function mapEventTypeToKinds(
