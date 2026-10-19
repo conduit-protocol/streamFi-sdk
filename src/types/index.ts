@@ -1,6 +1,6 @@
-import type { Signer } from '../signer.js';
+import type { Signer } from "../signer.js";
 
-export type Network = 'mainnet' | 'testnet' | 'local';
+export type Network = "mainnet" | "testnet" | "local";
 
 /**
  * Enumerates the possible lifecycle states of a stream.
@@ -11,25 +11,39 @@ export type Network = 'mainnet' | 'testnet' | 'local';
  * - `ENDED`    — stream reached its natural end time.
  */
 export enum StreamState {
-  ACTIVE    = 'ACTIVE',
-  PAUSED    = 'PAUSED',
-  CANCELLED = 'CANCELLED',
-  ENDED     = 'ENDED',
+  ACTIVE = "ACTIVE",
+  PAUSED = "PAUSED",
+  CANCELLED = "CANCELLED",
+  ENDED = "ENDED",
 }
 
 export interface ConduitConfig {
   /** Network to connect to */
   network: Network;
   /** Signing keypair — required for mutating operations */
-  keypair?: import('@stellar/stellar-sdk').Keypair;
+  keypair?: import("@stellar/stellar-sdk").Keypair;
   /** Custom wallet adapter (e.g. WalletConnectAdapter) for browser/mobile wallet signing */
-  wallet?: import('../adapters/types.js').WalletAdapter;
+  wallet?: import("../adapters/types.js").WalletAdapter;
   /** Custom signer plugin (KMS/HSM). Takes precedence over keypair when set. */
   signer?: Signer;
   /** Signing behaviour for wallet adapters and custom signers (e.g. `signatureTimeoutMs`). */
-  signerOptions?: import('../signer.js').SignerOptions;
+  signerOptions?: import("../signer.js").SignerOptions;
   /** Override default Soroban RPC URL */
   rpcUrl?: string;
+  /**
+   * Array of Soroban RPC URLs for fallback failover. When provided, takes
+   * precedence over `rpcUrl`. Endpoints are tried in order, with automatic
+   * failover to the next URL after `rpcUrlFailureThresholdConsecutive`
+   * consecutive timeouts on the current endpoint. Default behavior: round-robin
+   * with fallback on repeated failures.
+   */
+  rpcUrls?: string[];
+  /**
+   * Number of consecutive timeouts before failing over to the next RPC URL
+   * in the `rpcUrls` fallback list. Default 3. Only used when `rpcUrls` is
+   * configured.
+   */
+  rpcUrlFailureThresholdConsecutive?: number;
   /** Override deployed DripFactory contract ID */
   factoryAddress?: string;
   /** Override deployed DripGovernor contract ID */
@@ -86,25 +100,25 @@ export interface ConduitConfig {
 }
 
 export interface StreamInfo {
-  id:              bigint;
+  id: bigint;
   /** DripStream contract address */
-  address:         string;
-  sender:          string;
-  recipient:       string;
+  address: string;
+  sender: string;
+  recipient: string;
   /** Token contract address or 'native' */
-  token:           string;
+  token: string;
   /** Tokens released per second, in stroops */
-  ratePerSecond:   bigint;
+  ratePerSecond: bigint;
   /** Unix timestamp */
-  startTime:       number;
+  startTime: number;
   /** Unix timestamp; 0 = open-ended */
-  endTime:         number;
+  endTime: number;
   /** Total withdrawn by recipient so far, in stroops */
-  withdrawn:       bigint;
-  paused:          boolean;
+  withdrawn: bigint;
+  paused: boolean;
   /** Timestamp when stream was last paused; 0 if not paused */
-  pausedAt:        number;
-  cancelled:       boolean;
+  pausedAt: number;
+  cancelled: boolean;
   clawbackEnabled: boolean;
 }
 
@@ -141,31 +155,31 @@ export interface ValidationResult {
 }
 
 export interface CreateStreamResult {
-  streamId:      bigint;
+  streamId: bigint;
   streamAddress: string;
-  txHash:        string;
+  txHash: string;
 }
 
 export interface ListStreamsParams {
-  sender?:    string;
+  sender?: string;
   recipient?: string;
-  offset?:    number;
-  limit?:     number;
+  offset?: number;
+  limit?: number;
   /** Opaque pagination cursor from a previous page's `nextCursor`. Takes precedence over `offset` if both are given. */
-  cursor?:    string;
+  cursor?: string;
 }
 
 export interface PaginatedStreams {
   /** The stream info results for this page */
-  streams:    StreamInfo[];
+  streams: StreamInfo[];
   /** Whether there are more results after this page */
   hasNextPage: boolean;
   /** Number of filtered stream IDs seen through the end of this page */
-  totalCount:  bigint;
+  totalCount: bigint;
   /** The offset used for this page */
-  offset:      number;
+  offset: number;
   /** The limit used for this page */
-  limit:       number;
+  limit: number;
   /** Opaque cursor to pass as `cursor` to fetch the next page. Present only when `hasNextPage` is true. */
   nextCursor?: string;
 }
@@ -183,33 +197,53 @@ export interface BatchGetStreamsOptions extends GetStreamInfosOptions {
 }
 
 export interface GetStreamInfosFailure {
-  id:    bigint;
+  id: bigint;
   error: string;
 }
 
 export interface GetStreamInfosResult {
-  results:  StreamInfo[];
+  results: StreamInfo[];
   failures: GetStreamInfosFailure[];
 }
 
 export interface GovernorConfig {
-  feeBps:              number;
-  feeRecipient?:       string;
-  minDurationSeconds:  number;
-  maxDurationSeconds:  number;
-  maxRatePerSecond:    bigint;
-  factoryAddress?:     string;
-  votingDelay?:        number;
-  votingPeriod?:       number;
-  proposalThreshold?:  bigint;
+  feeBps: number;
+  feeRecipient?: string;
+  minDurationSeconds: number;
+  maxDurationSeconds: number;
+  maxRatePerSecond: bigint;
+  factoryAddress?: string;
+  votingDelay?: number;
+  votingPeriod?: number;
+  proposalThreshold?: bigint;
 }
 
 // ── Events ──────────────────────────────────────────────────────────────────
 
-export interface WithdrawEvent  { amount: bigint; recipient: string; totalWithdrawn: bigint; remaining: bigint; sequence?: bigint; }
-export interface CancelEvent    { refundAmount: bigint; withdrawnSoFar: bigint; sender: string; sequence?: bigint; }
-export interface PauseEvent     { pausedAt: number; withdrawable: bigint; sender: string; sequence?: bigint; }
-export interface ResumeEvent    { resumedAt: number; sender: string; sequence?: bigint; }
+export interface WithdrawEvent {
+  amount: bigint;
+  recipient: string;
+  totalWithdrawn: bigint;
+  remaining: bigint;
+  sequence?: bigint;
+}
+export interface CancelEvent {
+  refundAmount: bigint;
+  withdrawnSoFar: bigint;
+  sender: string;
+  sequence?: bigint;
+}
+export interface PauseEvent {
+  pausedAt: number;
+  withdrawable: bigint;
+  sender: string;
+  sequence?: bigint;
+}
+export interface ResumeEvent {
+  resumedAt: number;
+  sender: string;
+  sequence?: bigint;
+}
 /** Published when the sender tops up a stream (`topped_up` topic). */
 export interface StreamTopUpEvent {
   /** Amount added to the stream's deposit. */
@@ -297,47 +331,47 @@ export interface EventGap {
 
 /** Maps each handler-facing event name to its decoded payload type. */
 export interface EventPayloadMap {
-  withdraw:          WithdrawEvent;
-  cancel:            CancelEvent;
-  pause:             PauseEvent;
-  resume:            ResumeEvent;
-  topUp:             StreamTopUpEvent;
-  clawback:          StreamClawbackedEvent;
-  created:           CreatedEvent;
-  forceCancel:       ForceCancelEvent;
+  withdraw: WithdrawEvent;
+  cancel: CancelEvent;
+  pause: PauseEvent;
+  resume: ResumeEvent;
+  topUp: StreamTopUpEvent;
+  clawback: StreamClawbackedEvent;
+  created: CreatedEvent;
+  forceCancel: ForceCancelEvent;
   recipientTransfer: RecipientTransferEvent;
-  operatorSet:       OperatorSetEvent;
-  operatorRevoke:    OperatorRevokedEvent;
+  operatorSet: OperatorSetEvent;
+  operatorRevoke: OperatorRevokedEvent;
 }
 
 /** Union of every decoded stream event payload. */
 export type StreamEventPayload = EventPayloadMap[keyof EventPayloadMap];
 
 export interface StreamEventHandlers {
-  onWithdraw?: (e: WithdrawEvent)  => void;
-  onCancel?:   (e: CancelEvent)    => void;
-  onPause?:    (e: PauseEvent)     => void;
-  onResume?:   (e: ResumeEvent)    => void;
-  onTopUp?:    (e: StreamTopUpEvent) => void;
+  onWithdraw?: (e: WithdrawEvent) => void;
+  onCancel?: (e: CancelEvent) => void;
+  onPause?: (e: PauseEvent) => void;
+  onResume?: (e: ResumeEvent) => void;
+  onTopUp?: (e: StreamTopUpEvent) => void;
   onClawback?: (e: StreamClawbackedEvent) => void;
   /** Called when the factory deploys a new stream. Optional — most subscribers attach after a stream already exists. */
-  onCreated?:            (e: CreatedEvent)             => void;
+  onCreated?: (e: CreatedEvent) => void;
   /** Called when the recipient force-cancels a paused stream. */
-  onForceCancel?:        (e: ForceCancelEvent)         => void;
+  onForceCancel?: (e: ForceCancelEvent) => void;
   /** Called when the recipient role is transferred to a new address — the current subscriber may have just lost the stream. */
-  onRecipientTransfer?:  (e: RecipientTransferEvent)   => void;
+  onRecipientTransfer?: (e: RecipientTransferEvent) => void;
   /** Called when an operator is delegated on the stream. */
-  onOperatorSet?:        (e: OperatorSetEvent)         => void;
+  onOperatorSet?: (e: OperatorSetEvent) => void;
   /** Called when a delegated operator is revoked. */
-  onOperatorRevoke?:     (e: OperatorRevokedEvent)     => void;
+  onOperatorRevoke?: (e: OperatorRevokedEvent) => void;
   /**
    * Called when an event polling request fails. Polling continues
    * afterward — unless this failure reaches `maxConsecutiveFailures`, in
    * which case this is the last call before the subscription stops.
    */
-  onError?:    (error: Error)      => void;
+  onError?: (error: Error) => void;
   /** Called when a non-contiguous event sequence is observed (missed events across a poll gap or reconnect). */
-  onGap?:      (gap: EventGap)     => void;
+  onGap?: (gap: EventGap) => void;
   /** Polling interval in ms; default 5000 */
   pollInterval?: number;
   /**
@@ -396,24 +430,27 @@ export interface FeeEstimate {
 }
 
 export type StreamOperationType =
-  | 'create'
-  | 'withdraw'
-  | 'cancel'
-  | 'pause'
-  | 'resume'
-  | 'topUp'
-  | 'transferRecipient'
-  | 'batchWithdraw';
+  | "create"
+  | "withdraw"
+  | "cancel"
+  | "pause"
+  | "resume"
+  | "topUp"
+  | "transferRecipient"
+  | "batchWithdraw";
 
 export type StreamOperation =
   | StreamOperationType
-  | { type: 'create'; params?: CreateStreamParams }
-  | { type: 'withdraw'; streamId?: bigint | string; amount?: bigint }
-  | { type: 'cancel'; streamId?: bigint | string }
-  | { type: 'pause'; streamId?: bigint | string }
-  | { type: 'resume'; streamId?: bigint | string }
-  | { type: 'topUp'; streamId?: bigint | string; amount?: bigint }
-  | { type: 'transferRecipient'; streamId?: bigint | string; newRecipient?: string }
-  | { type: 'batchWithdraw'; items?: BatchWithdrawItem[] }
+  | { type: "create"; params?: CreateStreamParams }
+  | { type: "withdraw"; streamId?: bigint | string; amount?: bigint }
+  | { type: "cancel"; streamId?: bigint | string }
+  | { type: "pause"; streamId?: bigint | string }
+  | { type: "resume"; streamId?: bigint | string }
+  | { type: "topUp"; streamId?: bigint | string; amount?: bigint }
+  | {
+      type: "transferRecipient";
+      streamId?: bigint | string;
+      newRecipient?: string;
+    }
+  | { type: "batchWithdraw"; items?: BatchWithdrawItem[] }
   | { type: string; [key: string]: unknown };
-

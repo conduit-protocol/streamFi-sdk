@@ -16,13 +16,19 @@ import {
   Memo,
   xdr,
   BASE_FEE,
-} from '@stellar/stellar-sdk';
-import type { Network } from './types/index.js';
-import type { Signer } from './signer.js';
-import { RateLimitError, StreamFiNetworkError, InsufficientBalanceError, ConfirmationTimeoutError, CircuitOpenError } from './errors.js';
-import { withRetry } from './with-retry.js';
-import { coalesceAsync } from './coalesce-async.js';
-import { recordSuccess, recordFailure } from './rpc-circuit-state.js';
+} from "@stellar/stellar-sdk";
+import type { Network } from "./types/index.js";
+import type { Signer } from "./signer.js";
+import {
+  RateLimitError,
+  StreamFiNetworkError,
+  InsufficientBalanceError,
+  ConfirmationTimeoutError,
+  CircuitOpenError,
+} from "./errors.js";
+import { withRetry } from "./with-retry.js";
+import { coalesceAsync } from "./coalesce-async.js";
+import { recordSuccess, recordFailure } from "./rpc-circuit-state.js";
 
 // ── RPC Server cache ─────────────────────────────────────────────────────────
 // Reusing SorobanRpc.Server instances avoids creating a new HTTP agent per
@@ -40,7 +46,7 @@ export function getServer(rpcUrl: string): SorobanRpc.Server {
   let server = _serverCache.get(rpcUrl);
   if (!server) {
     server = new SorobanRpc.Server(rpcUrl, {
-      allowHttp: rpcUrl.startsWith('http://'),
+      allowHttp: rpcUrl.startsWith("http://"),
     });
     _serverCache.set(rpcUrl, server);
   }
@@ -56,6 +62,129 @@ export function clearServerCache(): void {
   _proxiedServerCache.clear();
 }
 
+// ── RPC URL fallback state ──────────────────────────────────────────────────
+// Tracks consecutive timeouts per endpoint to enable failover to backups.
+
+interface EndpointState {
+  consecutiveTimeouts: number;
+}
+
+const _endpointStates = new Map<string, EndpointState>();
+
+function getEndpointState(url: string): EndpointState {
+  let state = _endpointStates.get(url);
+  if (!state) {
+    state = { consecutiveTimeouts: 0 };
+    _endpointStates.set(url, state);
+  }
+  return state;
+}
+
+export function recordRpcTimeout(url: string): void {
+  const state = getEndpointState(url);
+  state.consecutiveTimeouts++;
+}
+
+export function recordRpcSuccess(url: string): void {
+  const state = getEndpointState(url);
+  state.consecutiveTimeouts = 0;
+}
+
+export function getConsecutiveTimeouts(url: string): number {
+  return getEndpointState(url).consecutiveTimeouts;
+}
+
+export function clearRpcEndpointStates(): void {
+  _endpointStates.clear();
+}
+
+// ── Ledger info cache ───────────────────────────────────────────────────────
+// Caches the latest ledger sequence and timestamp to avoid repeated RPC calls
+// when converting between timestamps and ledger sequences. The cache is
+// automatically refreshed after the average block time interval.
+
+export interface LedgerInfo {
+  sequence: number;
+  timestamp: number; // Unix timestamp in seconds
+  closedAt: string;
+}
+
+interface CachedLedgerInfo extends LedgerInfo {
+  cachedAt: number;
+}
+
+const _ledgerInfoCache = new Map<string, CachedLedgerInfo>();
+const DEFAULT_LEDGER_CACHE_TTL_MS = 5000; // 5 seconds (avg ~3-4 blocks)
+
+/**
+ * Query the latest ledger info (sequence number and timestamp) with automatic
+ * caching. Results are cached per `rpcUrl` for {@link DEFAULT_LEDGER_CACHE_TTL_MS}
+ * milliseconds to avoid repeated RPC queries.
+ *
+ * @param rpcUrl - The Soroban RPC URL
+ * @returns Promise resolving to current ledger sequence and timestamp
+ * @throws {RateLimitError} if rate limited by RPC
+ * @throws {StreamFiNetworkError} if network error occurs
+ *
+ * @example
+ * ```ts
+ * const ledger = await getLatestLedgerInfo('https://soroban-testnet.stellar.org');
+ * console.log(`Current ledger: ${ledger.sequence}, time: ${ledger.timestamp}`);
+ * ```
+ */
+export async function getLatestLedgerInfo(rpcUrl: string): Promise<LedgerInfo> {
+  const now = Date.now();
+  const cached = _ledgerInfoCache.get(rpcUrl);
+
+  // Return cached result if still fresh
+  if (cached && now - cached.cachedAt < DEFAULT_LEDGER_CACHE_TTL_MS) {
+    return {
+      sequence: cached.sequence,
+      timestamp: cached.timestamp,
+      closedAt: cached.closedAt,
+    };
+  }
+
+  const server = createRpcServer(rpcUrl);
+
+  let ledger;
+  try {
+    ledger = await catchNetworkError(
+      "getLatestLedger",
+      server.getLatestLedger(),
+    );
+  } catch (err) {
+    throw RateLimitError.fromRpcError(err) ?? err;
+  }
+
+  const info: CachedLedgerInfo = {
+    sequence: ledger.sequence,
+    timestamp: Math.floor(new Date(ledger.closedAt).getTime() / 1000),
+    closedAt: ledger.closedAt,
+    cachedAt: now,
+  };
+
+  _ledgerInfoCache.set(rpcUrl, info);
+
+  return {
+    sequence: info.sequence,
+    timestamp: info.timestamp,
+    closedAt: info.closedAt,
+  };
+}
+
+/**
+ * Clear the ledger info cache. Useful in tests or when you need a fresh
+ * ledger query without waiting for TTL expiration.
+ */
+export function clearLedgerInfoCache(rpcUrl?: string): void {
+  if (rpcUrl) {
+    _ledgerInfoCache.delete(rpcUrl);
+  } else {
+    _ledgerInfoCache.clear();
+  }
+}
+
 // ── Proxied server cache ─────────────────────────────────────────────────────
 // createRpcServer wraps the raw server in a Proxy with retry logic. Creating a
 // new Proxy on every call allocates closures and the proxy trap object,
@@ -66,15 +195,15 @@ export function clearServerCache(): void {
 const _proxiedServerCache = new Map<string, SorobanRpc.Server>();
 
 export const DEFAULT_RPC: Record<Network, string> = {
-  mainnet: 'https://soroban-mainnet.stellar.org',
-  testnet: 'https://soroban-testnet.stellar.org',
-  local:   'http://localhost:8000/soroban/rpc',
+  mainnet: "https://soroban-mainnet.stellar.org",
+  testnet: "https://soroban-testnet.stellar.org",
+  local: "http://localhost:8000/soroban/rpc",
 };
 
 export const NETWORK_PASSPHRASE: Record<Network, string> = {
   mainnet: Networks.PUBLIC,
   testnet: Networks.TESTNET,
-  local:   Networks.STANDALONE,
+  local: Networks.STANDALONE,
 };
 
 export interface ConfirmationPollingOptions {
@@ -91,9 +220,12 @@ export interface ConfirmationPollingOptions {
 export const DEFAULT_CONFIRMATION_POLL_INTERVAL_MS = 1000;
 export const DEFAULT_CONFIRMATION_MAX_ATTEMPTS = 30;
 
-function normalizePollingOptions(options: ConfirmationPollingOptions = {}): Required<ConfirmationPollingOptions> {
+function normalizePollingOptions(
+  options: ConfirmationPollingOptions = {},
+): Required<ConfirmationPollingOptions> {
   return {
-    pollIntervalMs: options.pollIntervalMs ?? DEFAULT_CONFIRMATION_POLL_INTERVAL_MS,
+    pollIntervalMs:
+      options.pollIntervalMs ?? DEFAULT_CONFIRMATION_POLL_INTERVAL_MS,
     maxAttempts: options.maxAttempts ?? DEFAULT_CONFIRMATION_MAX_ATTEMPTS,
     strict: options.strict ?? false,
   };
@@ -101,10 +233,10 @@ function normalizePollingOptions(options: ConfirmationPollingOptions = {}): Requ
 
 /** What happened when a submitted transaction was polled for confirmation. */
 export type ConfirmationPollOutcome =
-  | { kind: 'success'; returnValue: xdr.ScVal | undefined }
-  | { kind: 'failed' }
-  | { kind: 'timeout'; attempts: number }
-  | { kind: 'poll-error'; error: unknown; attempt: number };
+  | { kind: "success"; returnValue: xdr.ScVal | undefined }
+  | { kind: "failed" }
+  | { kind: "timeout"; attempts: number }
+  | { kind: "poll-error"; error: unknown; attempt: number };
 
 /**
  * The single poll-until-confirmed loop shared by {@link waitForConfirmation},
@@ -121,28 +253,35 @@ export type ConfirmationPollOutcome =
 export async function pollForConfirmation(
   server: SorobanRpc.Server,
   hash: string,
-  options: { pollIntervalMs: number; maxAttempts: number; signal?: AbortSignal | undefined },
+  options: {
+    pollIntervalMs: number;
+    maxAttempts: number;
+    signal?: AbortSignal | undefined;
+  },
 ): Promise<ConfirmationPollOutcome> {
   const { pollIntervalMs, maxAttempts, signal } = options;
   for (let i = 0; i < maxAttempts; i++) {
-    if (signal?.aborted) throw new DOMException('Aborted', 'AbortError');
+    if (signal?.aborted) throw new DOMException("Aborted", "AbortError");
     await sleep(pollIntervalMs);
-    if (signal?.aborted) throw new DOMException('Aborted', 'AbortError');
+    if (signal?.aborted) throw new DOMException("Aborted", "AbortError");
 
     let status;
     try {
-      status = await catchNetworkError('getTransaction', server.getTransaction(hash));
+      status = await catchNetworkError(
+        "getTransaction",
+        server.getTransaction(hash),
+      );
     } catch (error) {
-      return { kind: 'poll-error', error, attempt: i + 1 };
+      return { kind: "poll-error", error, attempt: i + 1 };
     }
     if (status.status === SorobanRpc.Api.GetTransactionStatus.SUCCESS) {
-      return { kind: 'success', returnValue: status.returnValue };
+      return { kind: "success", returnValue: status.returnValue };
     }
     if (status.status === SorobanRpc.Api.GetTransactionStatus.FAILED) {
-      return { kind: 'failed' };
+      return { kind: "failed" };
     }
   }
-  return { kind: 'timeout', attempts: maxAttempts };
+  return { kind: "timeout", attempts: maxAttempts };
 }
 
 export interface WaitForConfirmationOptions {
@@ -201,17 +340,20 @@ export async function waitForConfirmation(
   });
 
   switch (outcome.kind) {
-    case 'success':
+    case "success":
       return { hash: txHash, returnValue: outcome.returnValue };
-    case 'failed':
+    case "failed":
       throw new Error(`Transaction failed: ${txHash}`);
-    case 'timeout':
-      throw new ConfirmationTimeoutError(txHash, outcome.attempts, outcome.attempts * pollIntervalMs);
-    case 'poll-error':
+    case "timeout":
+      throw new ConfirmationTimeoutError(
+        txHash,
+        outcome.attempts,
+        outcome.attempts * pollIntervalMs,
+      );
+    case "poll-error":
       throw RateLimitError.fromRpcError(outcome.error) ?? outcome.error;
   }
 }
-
 
 /**
  * Creates a SorobanRpc.Server instance wrapped with an exponential backoff retry mechanism.
@@ -226,18 +368,32 @@ export function createRpcServer(rpcUrl: string): SorobanRpc.Server {
 
   const server = getServer(rpcUrl);
 
-  const EXCLUDED_METHODS = ['constructor'];
+  const EXCLUDED_METHODS = ["constructor"];
 
   const proxied = new Proxy(server, {
     get(target, propKey, receiver) {
       const origMethod = Reflect.get(target, propKey, receiver) as unknown;
-      if (typeof origMethod === 'function' && typeof propKey === 'string' && !EXCLUDED_METHODS.includes(propKey)) {
+      if (
+        typeof origMethod === "function" &&
+        typeof propKey === "string" &&
+        !EXCLUDED_METHODS.includes(propKey)
+      ) {
         return async function (...args: unknown[]) {
           return withRetry(
-            () => (origMethod as (...a: unknown[]) => Promise<unknown>).apply(target, args),
-            { maxRetries: 3, baseDelayMs: 500, backoffFactor: 2, circuitScope: rpcUrl },
+            () =>
+              (origMethod as (...a: unknown[]) => Promise<unknown>).apply(
+                target,
+                args,
+              ),
+            {
+              maxRetries: 3,
+              baseDelayMs: 500,
+              backoffFactor: 2,
+              circuitScope: rpcUrl,
+            },
           )
             .then((result) => {
+              recordRpcSuccess(rpcUrl);
               recordSuccess(rpcUrl);
               return result;
             })
@@ -247,6 +403,7 @@ export function createRpcServer(rpcUrl: string): SorobanRpc.Server {
               // record one (that would keep resetting the cooldown and the
               // circuit would never move to 'half-open').
               if (!(err instanceof CircuitOpenError)) {
+                recordRpcTimeout(rpcUrl);
                 recordFailure(rpcUrl);
               }
               throw err;
@@ -254,7 +411,7 @@ export function createRpcServer(rpcUrl: string): SorobanRpc.Server {
         };
       }
       return Reflect.get(target, propKey, receiver);
-    }
+    },
   });
 
   _proxiedServerCache.set(rpcUrl, proxied);
@@ -272,7 +429,10 @@ export function createRpcServer(rpcUrl: string): SorobanRpc.Server {
  * poll attempts, and the caller sees a misleading "Transaction timed out"
  * instead of "fee too low" (see #509).
  */
-export function resolveFee(config: { fee?: string; feeMultiplier?: number }): string {
+export function resolveFee(config: {
+  fee?: string;
+  feeMultiplier?: number;
+}): string {
   if (config.fee !== undefined) return config.fee;
   if (config.feeMultiplier !== undefined) {
     return (BigInt(BASE_FEE) * BigInt(config.feeMultiplier)).toString();
@@ -290,20 +450,20 @@ export function resolveFee(config: { fee?: string; feeMultiplier?: number }): st
  * result of {@link resolveFee} to honour `ConduitConfig.fee`/`feeMultiplier`.
  */
 export async function buildContractCallTx(
-  rpcUrl:      string,
-  passphrase:  string,
-  caller:      string,
-  contractId:  string,
-  method:      string,
-  args:        xdr.ScVal[],
-  fee:         string = BASE_FEE,
-  memo?:       Memo,
-): Promise<ReturnType<TransactionBuilder['build']>> {
-  const server  = createRpcServer(rpcUrl);
+  rpcUrl: string,
+  passphrase: string,
+  caller: string,
+  contractId: string,
+  method: string,
+  args: xdr.ScVal[],
+  fee: string = BASE_FEE,
+  memo?: Memo,
+): Promise<ReturnType<TransactionBuilder["build"]>> {
+  const server = createRpcServer(rpcUrl);
 
   let account;
   try {
-    account = await catchNetworkError('getAccount', server.getAccount(caller));
+    account = await catchNetworkError("getAccount", server.getAccount(caller));
   } catch (err) {
     throw RateLimitError.fromRpcError(err) ?? err;
   }
@@ -323,10 +483,10 @@ export async function buildContractCallTx(
  * Returns the transaction hash on success.
  */
 export async function invokeContract(
-  rpcUrl:     string,
+  rpcUrl: string,
   passphrase: string,
-  signer:     Signer,
-  tx:         ReturnType<TransactionBuilder['build']>,
+  signer: Signer,
+  tx: ReturnType<TransactionBuilder["build"]>,
   pollingOptions: ConfirmationPollingOptions = {},
 ): Promise<string> {
   const server = createRpcServer(rpcUrl);
@@ -335,7 +495,10 @@ export async function invokeContract(
   // Simulate
   let simResult;
   try {
-    simResult = await catchNetworkError('simulateTransaction (invoke)', server.simulateTransaction(tx));
+    simResult = await catchNetworkError(
+      "simulateTransaction (invoke)",
+      server.simulateTransaction(tx),
+    );
   } catch (err) {
     throw RateLimitError.fromRpcError(err) ?? err;
   }
@@ -354,23 +517,28 @@ export async function invokeContract(
   // Submit
   let sent;
   try {
-    sent = await catchNetworkError('sendTransaction', server.sendTransaction(signed));
+    sent = await catchNetworkError(
+      "sendTransaction",
+      server.sendTransaction(signed),
+    );
   } catch (err) {
     throw RateLimitError.fromRpcError(err) ?? err;
   }
-  if (sent.status === 'ERROR') {
-    throw new Error(`Transaction rejected: ${JSON.stringify(sent.errorResult)}`);
+  if (sent.status === "ERROR") {
+    throw new Error(
+      `Transaction rejected: ${JSON.stringify(sent.errorResult)}`,
+    );
   }
 
   // Poll for confirmation
   const hash = sent.hash;
   const outcome = await pollForConfirmation(server, hash, polling);
   switch (outcome.kind) {
-    case 'success':
+    case "success":
       return hash;
-    case 'failed':
+    case "failed":
       throw new Error(`Transaction failed: ${hash}`);
-    case 'poll-error':
+    case "poll-error":
       if (polling.strict) {
         throw new ConfirmationTimeoutError(
           hash,
@@ -381,7 +549,7 @@ export async function invokeContract(
       // Transaction was already submitted; return the hash as pending.
       // Polling failures don't indicate submission failure.
       return hash;
-    case 'timeout':
+    case "timeout":
       if (polling.strict) {
         throw new ConfirmationTimeoutError(
           hash,
@@ -398,15 +566,18 @@ export async function invokeContract(
  * Simulate a read-only call and return the result XDR.
  */
 export async function simulateReadOnly(
-  rpcUrl:     string,
+  rpcUrl: string,
   passphrase: string,
-  tx:         ReturnType<TransactionBuilder['build']>,
+  tx: ReturnType<TransactionBuilder["build"]>,
 ): Promise<xdr.ScVal> {
   const server = createRpcServer(rpcUrl);
 
   let result;
   try {
-    result = await catchNetworkError('simulateTransaction (readonly)', server.simulateTransaction(tx));
+    result = await catchNetworkError(
+      "simulateTransaction (readonly)",
+      server.simulateTransaction(tx),
+    );
   } catch (err) {
     throw RateLimitError.fromRpcError(err) ?? err;
   }
@@ -415,7 +586,7 @@ export async function simulateReadOnly(
     throw new Error(`Simulation error: ${result.error}`);
   }
   if (!result.result) {
-    throw new Error('Simulation returned no result');
+    throw new Error("Simulation returned no result");
   }
   return xdr.ScVal.fromXDR(result.result.retval.toXDR());
 }
@@ -443,10 +614,10 @@ let _tokenDecimalsMisses = 0;
  * simulation is required).
  */
 export async function getTokenDecimals(
-  rpcUrl:     string,
+  rpcUrl: string,
   passphrase: string,
   callerAddr: string,
-  tokenId:    string,
+  tokenId: string,
 ): Promise<number> {
   const cacheKey = `${rpcUrl}:${tokenId}`;
   const cached = _tokenDecimalsCache.get(cacheKey);
@@ -460,7 +631,14 @@ export async function getTokenDecimals(
   // callers share one in-flight simulation, and failures are evicted so a
   // later call can retry.
   return coalesceAsync(_tokenDecimalsCache, cacheKey, async () => {
-    const tx  = await buildContractCallTx(rpcUrl, passphrase, callerAddr, tokenId, 'decimals', []);
+    const tx = await buildContractCallTx(
+      rpcUrl,
+      passphrase,
+      callerAddr,
+      tokenId,
+      "decimals",
+      [],
+    );
     const val = await simulateReadOnly(rpcUrl, passphrase, tx);
     return scValToU32(val);
   });
@@ -481,7 +659,11 @@ export function clearTokenDecimalsCache(resetMetrics = false): void {
  * Cache performance metrics for the module-level token decimals cache.
  * Follows the same shape as FactoryModule.getCacheMetrics().
  */
-export function getTokenDecimalsCacheMetrics(): { hits: number; misses: number; size: number } {
+export function getTokenDecimalsCacheMetrics(): {
+  hits: number;
+  misses: number;
+  size: number;
+} {
   return {
     hits: _tokenDecimalsHits,
     misses: _tokenDecimalsMisses,
@@ -500,8 +682,8 @@ export function resetTokenDecimalsCacheMetrics(): void {
 /** Convert an ScVal i128 to bigint */
 export function scValToI128(val: xdr.ScVal): bigint {
   const i128 = val.i128();
-  const hi   = BigInt(i128.hi().toString());
-  const lo   = BigInt(i128.lo().toString());
+  const hi = BigInt(i128.hi().toString());
+  const lo = BigInt(i128.lo().toString());
   // hi is signed high 64 bits, lo is unsigned low 64 bits
   return (hi << 64n) | lo;
 }
@@ -519,8 +701,10 @@ export function scValToU64(val: xdr.ScVal): bigint {
  * exception to find out their assumption about the response shape was wrong.
  */
 export function scValToU32(val: xdr.ScVal): number {
-  if (val.switch().name !== 'scvU32') {
-    throw new Error(`Expected a u32 ScVal, got "${val.switch().name}" instead.`);
+  if (val.switch().name !== "scvU32") {
+    throw new Error(
+      `Expected a u32 ScVal, got "${val.switch().name}" instead.`,
+    );
   }
   return val.u32();
 }
@@ -534,12 +718,14 @@ export function scValToU32(val: xdr.ScVal): number {
  * stellar-sdk (#577).
  */
 export function u64ToScVal(val: bigint | number): xdr.ScVal {
-  if (typeof val === 'number' && !Number.isInteger(val)) {
+  if (typeof val === "number" && !Number.isInteger(val)) {
     throw new RangeError(`u64ToScVal: expected an integer, got ${val}`);
   }
-  const asBigInt = typeof val === 'bigint' ? val : BigInt(val);
+  const asBigInt = typeof val === "bigint" ? val : BigInt(val);
   if (asBigInt < 0n) {
-    throw new RangeError(`u64ToScVal: expected a non-negative value, got ${val}`);
+    throw new RangeError(
+      `u64ToScVal: expected a non-negative value, got ${val}`,
+    );
   }
   return xdr.ScVal.scvU64(xdr.Uint64.fromString(asBigInt.toString()));
 }
@@ -550,7 +736,7 @@ export function boolToScVal(val: boolean): xdr.ScVal {
 }
 
 function sleep(ms: number): Promise<void> {
-  return new Promise(r => setTimeout(r, ms));
+  return new Promise((r) => setTimeout(r, ms));
 }
 
 // ── Network error helpers ─────────────────────────────────────────────────────
@@ -572,10 +758,10 @@ const NETWORK_ERROR_CODE_PATTERN =
  * 'connect')` is not misclassified as a network outage.
  */
 const NETWORK_TYPE_ERROR_MESSAGES = new Set([
-  'fetch failed',    // Node.js undici
-  'Failed to fetch', // Chromium fetch
-  'Network Error',   // axios (browser)
-  'Load failed',     // Safari fetch
+  "fetch failed", // Node.js undici
+  "Failed to fetch", // Chromium fetch
+  "Network Error", // axios (browser)
+  "Load failed", // Safari fetch
 ]);
 
 /**
@@ -586,8 +772,12 @@ const NETWORK_TYPE_ERROR_MESSAGES = new Set([
  */
 function hasNetworkErrorCode(cause: unknown): boolean {
   let current: unknown = cause;
-  for (let depth = 0; depth < 5 && current !== null && typeof current === 'object'; depth++) {
-    if ('code' in current) {
+  for (
+    let depth = 0;
+    depth < 5 && current !== null && typeof current === "object";
+    depth++
+  ) {
+    if ("code" in current) {
       const code = String((current as { code: unknown }).code);
       if (NETWORK_ERROR_CODE_PATTERN.test(code)) return true;
     }
@@ -607,19 +797,34 @@ function hasNetworkErrorCode(cause: unknown): boolean {
  * the simulate/assemble/sign pipeline is re-thrown as-is so it isn't masked
  * as a network outage. See #457.
  */
-export function catchNetworkError<T>(label: string, promise: Promise<T>): Promise<T> {
+export function catchNetworkError<T>(
+  label: string,
+  promise: Promise<T>,
+): Promise<T> {
   return promise.catch((cause: unknown) => {
-    if (cause instanceof StreamFiNetworkError || cause instanceof InsufficientBalanceError) {
+    if (
+      cause instanceof StreamFiNetworkError ||
+      cause instanceof InsufficientBalanceError
+    ) {
       throw cause;
     }
     if (cause instanceof TypeError) {
       const message = (cause as Error).message ?? String(cause);
-      if (NETWORK_TYPE_ERROR_MESSAGES.has(message) || hasNetworkErrorCode(cause)) {
-        throw new StreamFiNetworkError(`Network error during ${label}: ${(cause as Error).message}`, cause);
+      if (
+        NETWORK_TYPE_ERROR_MESSAGES.has(message) ||
+        hasNetworkErrorCode(cause)
+      ) {
+        throw new StreamFiNetworkError(
+          `Network error during ${label}: ${(cause as Error).message}`,
+          cause,
+        );
       }
     } else if (hasNetworkErrorCode(cause)) {
       const message = cause instanceof Error ? cause.message : String(cause);
-      throw new StreamFiNetworkError(`Network error during ${label}: ${message}`, cause);
+      throw new StreamFiNetworkError(
+        `Network error during ${label}: ${message}`,
+        cause,
+      );
     }
     // Re-throw non-network errors as-is
     throw cause;
@@ -645,7 +850,11 @@ export async function queryXlmBalance(
 ): Promise<bigint> {
   const nativeContractId = Asset.native().contractId(passphrase);
   const tx = await buildContractCallTx(
-    rpcUrl, passphrase, accountId, nativeContractId, 'balance',
+    rpcUrl,
+    passphrase,
+    accountId,
+    nativeContractId,
+    "balance",
     [new Address(accountId).toScVal()],
   );
   const val = await simulateReadOnly(rpcUrl, passphrase, tx);
@@ -679,8 +888,11 @@ export const CREATE_RESOURCE_FEE_ESTIMATE = 30_000_000n;
  * field, so we fall back to {@link DEFAULT_RESOURCE_FEE_ESTIMATE} rather
  * than an inflated upper bound.
  */
-export function estimateRequiredFee(simResult: unknown, fallbackStroops = DEFAULT_RESOURCE_FEE_ESTIMATE): bigint {
-  if (simResult && typeof simResult === 'object') {
+export function estimateRequiredFee(
+  simResult: unknown,
+  fallbackStroops = DEFAULT_RESOURCE_FEE_ESTIMATE,
+): bigint {
+  if (simResult && typeof simResult === "object") {
     const r = simResult as { minResourceFee?: unknown; fee?: unknown };
     const fromMin = toPositiveBigIntOrNull(r.minResourceFee);
     if (fromMin !== null) return fromMin;
@@ -701,12 +913,12 @@ function toPositiveBigIntOrNull(value: unknown): bigint | null {
   if (value === undefined || value === null) return null;
   try {
     let n: bigint;
-    if (typeof value === 'bigint') {
+    if (typeof value === "bigint") {
       n = value;
-    } else if (typeof value === 'number') {
+    } else if (typeof value === "number") {
       if (!Number.isFinite(value)) return null;
       n = BigInt(Math.trunc(value));
-    } else if (typeof value === 'string') {
+    } else if (typeof value === "string") {
       n = BigInt(value.trim());
     } else {
       return null;

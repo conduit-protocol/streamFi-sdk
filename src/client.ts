@@ -16,7 +16,7 @@ import type {
 import type { WalletAdapter } from "./adapters/types.js";
 import { DEFAULT_RPC, getServer } from "./soroban.js";
 import { registerCustomFetch } from "./custom-fetch.js";
-import { SorobanRpc } from '@stellar/stellar-sdk';
+import { SorobanRpc } from "@stellar/stellar-sdk";
 import { StreamsModule } from "./streams.js";
 import { FactoryModule } from "./factory.js";
 import { GovernorModule } from "./governor.js";
@@ -210,6 +210,9 @@ export class ConduitClient {
   private readonly config: Required<Pick<ConduitConfig, "network" | "rpcUrl">> &
     ConduitConfig;
 
+  private rpcUrlIndex: number = 0;
+  private rpcUrls: string[] = [];
+
   /**
    * Initializes a new ConduitClient instance.
    *
@@ -227,14 +230,25 @@ export class ConduitClient {
       throw new UnsupportedChainError(config.network);
     }
 
+    const rpcUrl =
+      config.rpcUrls?.[0] ?? config.rpcUrl ?? DEFAULT_RPC[config.network];
+    this.rpcUrls = config.rpcUrls ?? [
+      config.rpcUrl ?? DEFAULT_RPC[config.network],
+    ];
+    this.rpcUrlIndex = 0;
+
     this.config = {
       ...config,
-      rpcUrl: config.rpcUrl ?? DEFAULT_RPC[config.network],
+      rpcUrl,
     };
 
     // Must precede module construction: modules may issue RPC calls at once.
     if (this.config.customFetch) {
-      registerCustomFetch(this.config.rpcUrl, this.config.customFetch, this.config.requestTimeoutMs);
+      registerCustomFetch(
+        this.config.rpcUrl,
+        this.config.customFetch,
+        this.config.requestTimeoutMs,
+      );
     }
 
     // If a wallet is provided at construction time, validate its chain too.
@@ -268,14 +282,16 @@ export class ConduitClient {
     const unique = [...new Set(streamIds.map((id) => BigInt(id)))];
 
     const results: StreamInfo[] = [];
-    const failures: GetStreamInfosResult['failures'] = [];
+    const failures: GetStreamInfosResult["failures"] = [];
     for (let i = 0; i < unique.length; i += chunkSize) {
       if (i > 0 && chunkDelayMs > 0) {
         await new Promise((resolve) => setTimeout(resolve, chunkDelayMs));
       }
       const chunk = await this.streams.getStreamInfos(
         unique.slice(i, i + chunkSize),
-        options.maxConcurrency === undefined ? {} : { maxConcurrency: options.maxConcurrency },
+        options.maxConcurrency === undefined
+          ? {}
+          : { maxConcurrency: options.maxConcurrency },
       );
       results.push(...chunk.results);
       failures.push(...chunk.failures);
@@ -433,6 +449,36 @@ export class ConduitClient {
    */
   clearAddressCache(): void {
     this.streams.clearAddressCache();
+  }
+
+  /**
+   * Attempt failover to the next RPC endpoint if consecutive timeouts exceed
+   * the threshold. Called internally when an RPC timeout is detected.
+   * @internal
+   */
+  private tryFailoverRpc(): void {
+    const threshold = this.config.rpcUrlFailureThresholdConsecutive ?? 3;
+    const { getConsecutiveTimeouts } = require("./soroban.js");
+
+    const timeouts = getConsecutiveTimeouts(this.config.rpcUrl);
+    if (timeouts >= threshold && this.rpcUrls.length > 1) {
+      this.rpcUrlIndex = (this.rpcUrlIndex + 1) % this.rpcUrls.length;
+      const newUrl = this.rpcUrls[this.rpcUrlIndex];
+      this.config.rpcUrl = newUrl;
+
+      // Reconstruct modules with new RPC URL
+      this.streams = new StreamsModule(this.config);
+      this.governor = new GovernorModule(this.config);
+      this.tokens = new TokenModule(this.config);
+    }
+  }
+
+  /**
+   * Get the current active RPC URL. Useful for monitoring which endpoint is
+   * currently in use when fallback is configured.
+   */
+  getCurrentRpcUrl(): string {
+    return this.config.rpcUrl;
   }
 
   /**

@@ -16,7 +16,11 @@
  * ```
  */
 
-import type { GraphQLQueryOptions, GraphQLSubscriptionOptions, IndexerSubscription } from './indexer.js';
+import type {
+  GraphQLQueryOptions,
+  GraphQLSubscriptionOptions,
+  IndexerSubscription,
+} from "./indexer.js";
 
 /** Preset response map: query string → resolved data. */
 export type MockQueryMap = Record<string, unknown>;
@@ -51,21 +55,23 @@ export class MockGraphQLIndexer {
 
   async query(options: GraphQLQueryOptions): Promise<unknown> {
     if (this._destroyed) {
-      throw new Error('MockGraphQLIndexer has been destroyed');
+      throw new Error("MockGraphQLIndexer has been destroyed");
     }
     const q = options.query.trim();
     if (q in this.queries) {
       return this.queries[q];
     }
     if (this.strict) {
-      throw new Error(`MockGraphQLIndexer: no preset response for query "${q}"`);
+      throw new Error(
+        `MockGraphQLIndexer: no preset response for query "${q}"`,
+      );
     }
     return undefined;
   }
 
   subscribe(options: GraphQLSubscriptionOptions): IndexerSubscription {
     if (this._destroyed) {
-      throw new Error('MockGraphQLIndexer has been destroyed');
+      throw new Error("MockGraphQLIndexer has been destroyed");
     }
     const q = options.query.trim();
     const events = this.subscriptions[q] ?? [];
@@ -112,6 +118,8 @@ export class MockGraphQLIndexer {
  * });
  * ```
  */
-export function createMockIndexer(options?: MockIndexerOptions): MockGraphQLIndexer {
+export function createMockIndexer(
+  options?: MockIndexerOptions,
+): MockGraphQLIndexer {
   return new MockGraphQLIndexer(options);
 }
