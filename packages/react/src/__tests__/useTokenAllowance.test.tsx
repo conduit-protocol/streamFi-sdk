@@ -1,5 +1,6 @@
 import { beforeEach, describe, expect, it, vi } from 'vitest';
 import { fireEvent, render, screen, waitFor } from '@testing-library/react';
+import { act, renderHook } from '@testing-library/react';
 import { useTokenAllowance } from '../hooks/useTokenAllowance.js';
 
 const mockAllowance = vi.fn();
@@ -66,6 +67,24 @@ describe('useTokenAllowance', () => {
     expect(screen.getByTestId('pending')).toHaveTextContent('false');
   });
 
+  it('checks and approves only when the current allowance is insufficient', async () => {
+    const { result } = renderHook(() => useTokenAllowance('CTOKEN', 'GOWNER', 'CSPENDER'));
+
+    await waitFor(() => expect(result.current.allowance).toBe(100n));
+
+    await act(async () => {
+      const hash = await result.current.checkAndApprove(50n);
+      expect(hash).toBeNull();
+    });
+    expect(mockApprove).not.toHaveBeenCalled();
+
+    await act(async () => {
+      const hash = await result.current.checkAndApprove(150n);
+      expect(hash).toBe('approve-hash');
+    });
+    expect(mockApprove).toHaveBeenCalledWith('CTOKEN', 'GOWNER', 'CSPENDER', 150n, 0);
+  });
+
   it('surfaces approval errors', async () => {
     mockApprove.mockRejectedValue(new Error('approval rejected'));
     render(<TokenAllowance />);
@@ -76,5 +95,19 @@ describe('useTokenAllowance', () => {
     await waitFor(() => expect(screen.getByTestId('error')).toHaveTextContent('approval rejected'));
     expect(screen.getByTestId('pending')).toHaveTextContent('false');
     expect(screen.getByTestId('hash')).toHaveTextContent('');
+  });
+
+  it('approveInfinite approves i128::MAX with the caller-supplied expiration ledger', async () => {
+    const I128_MAX = (1n << 127n) - 1n;
+    const { result } = renderHook(() => useTokenAllowance('CTOKEN', 'GOWNER', 'CSPENDER'));
+    await waitFor(() => expect(result.current.allowance).toBe(100n));
+
+    await act(async () => {
+      await result.current.approveInfinite(4_000_000);
+    });
+
+    expect(mockApprove).toHaveBeenCalledWith('CTOKEN', 'GOWNER', 'CSPENDER', I128_MAX, 4_000_000);
+    expect(result.current.allowance).toBe(I128_MAX);
+    expect(result.current.txHash).toBe('approve-hash');
   });
 });

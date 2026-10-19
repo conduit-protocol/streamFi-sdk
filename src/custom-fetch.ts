@@ -51,21 +51,95 @@ function headerRecord(config: RequestConfig): Record<string, string> {
   return out;
 }
 
+/** Gateway statuses retried for idempotent requests (#980). Other 5xx responses are not. */
+const RETRYABLE_GATEWAY_STATUSES = new Set([502, 503, 504]);
+/** Retries after the first attempt, so an idempotent call makes at most 4 requests. */
+const GATEWAY_MAX_RETRIES = 3;
+/** Wait before retry `n` is `GATEWAY_BASE_DELAY_MS * 2 ** n`: 250, 500, then 1000 ms. */
+const GATEWAY_BASE_DELAY_MS = 250;
+
+/**
+ * Soroban RPC is JSON-RPC over POST, so the HTTP method cannot tell a read from
+ * a write. These JSON-RPC methods only read chain state or simulate. Leave
+ * `sendTransaction` out: replaying it could submit the same transaction twice.
+ */
+const IDEMPOTENT_RPC_METHODS = new Set([
+  'getHealth',
+  'getNetwork',
+  'getVersionInfo',
+  'getLatestLedger',
+  'getLedgers',
+  'getLedgerEntries',
+  'getTransaction',
+  'getTransactions',
+  'getEvents',
+  'getFeeStats',
+  'simulateTransaction',
+]);
+
+function isIdempotentRequest(config: RequestConfig): boolean {
+  if ((config.method ?? 'post').toUpperCase() === 'GET') return true;
+
+  let body: unknown = config.data;
+  if (typeof body === 'string') {
+    try {
+      body = JSON.parse(body);
+    } catch {
+      return false;
+    }
+  }
+  if (typeof body !== 'object' || body === null || Array.isArray(body)) return false;
+  const method = (body as { method?: unknown }).method;
+  return typeof method === 'string' && IDEMPOTENT_RPC_METHODS.has(method);
+}
+
+function sleep(ms: number, signal?: AbortSignal): Promise<void> {
+  return new Promise((resolve, reject) => {
+    const onAbort = () => {
+      clearTimeout(timer);
+      reject(new Error('RPC request aborted during gateway retry backoff'));
+    };
+    const timer = setTimeout(() => {
+      signal?.removeEventListener('abort', onAbort);
+      resolve();
+    }, ms);
+    signal?.addEventListener('abort', onAbort, { once: true });
+  });
+}
+
+/**
+ * Re-runs `send` after a 502/503/504 response, with exponential backoff, up to
+ * {@link GATEWAY_MAX_RETRIES} times. Any other error, and any abort, is thrown
+ * through unchanged so callers see the same error shape as before.
+ */
+async function retryGatewayErrors(send: () => Promise<unknown>, signal?: AbortSignal): Promise<unknown> {
+  for (let attempt = 0; ; attempt += 1) {
+    try {
+      return await send();
+    } catch (err) {
+      const status = (err as { response?: { status?: unknown } } | null)?.response?.status;
+      const retryable = typeof status === 'number' && RETRYABLE_GATEWAY_STATUSES.has(status);
+      if (!retryable || attempt >= GATEWAY_MAX_RETRIES || signal?.aborted) throw err;
+      await sleep(GATEWAY_BASE_DELAY_MS * 2 ** attempt, signal);
+    }
+  }
+}
+
 async function fetchAdapter(config: RequestConfig): Promise<unknown> {
   const url = config.url ?? '';
   const registration = registry.get(stripTrailingSlash(url));
   if (!registration) throw new Error(`No custom fetch registered for ${url}`);
 
-  // An explicit axios timeout wins; otherwise fall back to the registered
-  // default so a server that never closes the connection cannot hang us.
-  const timeoutMs = config.timeout && config.timeout > 0 ? config.timeout : registration.timeoutMs;
-  const controller = new AbortController();
-  const timer = timeoutMs > 0
-    ? setTimeout(() => controller.abort(new Error(`Request timed out after ${timeoutMs}ms`)), timeoutMs)
-    : undefined;
-  const onCallerAbort = () => controller.abort(config.signal?.reason);
-  if (config.signal?.aborted) onCallerAbort();
-  else config.signal?.addEventListener('abort', onCallerAbort, { once: true });
+  const send = () => sendOnce(config, url, customFetch);
+  return isIdempotentRequest(config) ? retryGatewayErrors(send, config.signal) : send();
+}
+
+async function sendOnce(config: RequestConfig, url: string, customFetch: typeof fetch): Promise<unknown> {
+  const signals: AbortSignal[] = [];
+  if (config.signal) signals.push(config.signal);
+  if (config.timeout && config.timeout > 0 && typeof AbortSignal.timeout === 'function') {
+    signals.push(AbortSignal.timeout(config.timeout));
+  }
 
   const init: RequestInit = {
     method: (config.method ?? 'post').toUpperCase(),

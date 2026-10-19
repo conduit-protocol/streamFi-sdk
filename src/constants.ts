@@ -85,6 +85,56 @@ export const NETWORK_CONFIGS: Readonly<Record<NetworkType, Readonly<NetworkConfi
 });
 
 /**
+ * Networks that have RPC presets but no explorer links, such as the public
+ * Futurenet and a local standalone container (#981).
+ */
+export type RpcNetworkId = 'futurenet' | 'standalone';
+
+/** RPC endpoint and passphrase for a network, ready to pass to a client. */
+export interface RpcNetworkConfig {
+  rpcUrl: string;
+  networkPassphrase: string;
+}
+
+/**
+ * Soroban RPC endpoint and network passphrase per network. The standalone
+ * entry matches the `local` preset in `soroban.ts`.
+ */
+export const NETWORK_CONFIG: Record<RpcNetworkId, RpcNetworkConfig> = {
+  futurenet: {
+    rpcUrl: 'https://rpc-futurenet.stellar.org',
+    networkPassphrase: 'Test SDF Future Network ; October 2022',
+  },
+  standalone: {
+    rpcUrl: 'http://localhost:8000/soroban/rpc',
+    networkPassphrase: 'Standalone Network ; February 2017',
+  },
+};
+
+/** Contract roles that the SDK can address by ID. */
+export type ContractRole = 'factory' | 'governor';
+
+/**
+ * Deployed contract IDs per network. Each ID is derived from the deployer's
+ * address and salt, so the SDK publishes none for `futurenet` or `standalone`.
+ * An entry stays `null` until a deployment is recorded here, and callers must
+ * pass their own addresses (`factoryAddress`, `governorAddress`) until then.
+ */
+export const CONTRACT_IDS: Record<RpcNetworkId, Record<ContractRole, string | null>> = {
+  futurenet: { factory: null, governor: null },
+  standalone: { factory: null, governor: null },
+};
+
+/**
+ * Returns the published contract ID for `role` on `network`, or `null` when
+ * none has been published. A `null` result means the caller must supply the
+ * address explicitly.
+ */
+export function getContractId(network: RpcNetworkId, role: ContractRole): string | null {
+  return CONTRACT_IDS[network][role];
+}
+
+/**
  * A syntactically valid Stellar G-address with no known keypair. Used only
  * as the transaction source for read-only simulation calls when no real
  * keypair is configured — Soroban's simulateTransaction doesn't require the

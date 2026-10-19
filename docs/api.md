@@ -71,6 +71,21 @@ const transactionUrl = `${EXPLORER_URLS.testnet.transaction}${txHash}`;
 const contractUrl = `${EXPLORER_URLS.mainnet.contract}${contractId}`;
 ```
 
+## RPC network presets and contract IDs
+
+`NETWORK_CONFIG` gives the Soroban RPC URL and network passphrase for
+`futurenet` and `standalone` (a local container on `http://localhost:8000`).
+`CONTRACT_IDS` lists the deployed `factory` and `governor` IDs per network.
+The SDK publishes no IDs for these two networks because each ID depends on the
+deployer, so every entry is `null` until a deployment is recorded. Use
+`getContractId(network, role)` to check, and pass your own addresses through
+`factoryAddress` or `governorAddress` when it returns `null`:
+
+```typescript
+const { rpcUrl, networkPassphrase } = NETWORK_CONFIG.standalone;
+const factory = getContractId('standalone', 'factory') ?? myLocalFactoryAddress;
+```
+
 ---
 
 ## `client.streams`

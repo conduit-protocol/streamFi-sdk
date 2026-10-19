@@ -118,9 +118,11 @@ export {
   MIN_STREAM_DURATION_SECONDS,
   NETWORK_NAMES,
   EXPLORER_URLS,
-  NETWORK_CONFIGS,
+  NETWORK_CONFIG,
+  CONTRACT_IDS,
+  getContractId,
 } from './constants.js';
-export type { NetworkType, NetworkConfig } from './constants.js';
+export type { NetworkType, RpcNetworkId, RpcNetworkConfig, ContractRole } from './constants.js';
 
 export { TokenModule } from './token.js';
 

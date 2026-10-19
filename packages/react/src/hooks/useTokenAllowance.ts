@@ -1,8 +1,15 @@
 import { useCallback, useEffect, useRef, useState } from 'react';
 import { useStreamFiClient } from '../context/useStreamFiClient.js';
 
+/** i128 max value for infinite allowance */
+const I128_MAX = 170141183460469231731687303715884105727n;
+
 export type ApproveTokenAllowanceFn = (
   amount: bigint | string,
+  expirationLedger: number,
+) => Promise<string>;
+
+export type ApproveInfiniteTokenAllowanceFn = (
   expirationLedger: number,
 ) => Promise<string>;
 
@@ -13,6 +20,8 @@ export interface UseTokenAllowanceResult {
   error: Error | null;
   txHash: string | null;
   approve: ApproveTokenAllowanceFn;
+  approveInfinite: ApproveInfiniteTokenAllowanceFn;
+  checkAndApprove: (amount: bigint | string, expirationLedger?: number) => Promise<string | null>;
   refetch: () => void;
   reset: () => void;
 }
@@ -21,7 +30,30 @@ export interface UseTokenAllowanceResult {
  * Read and update a spender's SEP-41 token allowance.
  *
  * The connected wallet or signer must own `ownerAddress` before `approve`
- * can submit a transaction.
+ * or `approveInfinite` can submit a transaction.
+ *
+ * @param tokenAddress - SEP-41 token contract address
+ * @param ownerAddress - Account that owns the tokens
+ * @param spenderAddress - Account allowed to spend the tokens
+ * @returns Hook state with approve, approveInfinite, checkAndApprove, and allowance
+ *
+ * @example
+ * ```typescript
+ * const { approve, approveInfinite, allowance } = useTokenAllowance(
+ *   tokenAddress,
+ *   ownerAddress,
+ *   spenderAddress,
+ * );
+ *
+ * // Set a specific allowance
+ * await approve(1000000n, ledgerExpirationTime);
+ *
+ * // Set infinite allowance (i128::MAX)
+ * await approveInfinite(ledgerExpirationTime);
+ *
+ * // Check and approve only if needed
+ * const hash = await checkAndApprove(500000n, ledgerExpirationTime);
+ * ```
  */
 export function useTokenAllowance(
   tokenAddress: string | null | undefined,
@@ -124,6 +156,24 @@ export function useTokenAllowance(
     [client, isReady, ownerAddress, spenderAddress, tokenAddress],
   );
 
+  const approveInfinite = useCallback<ApproveInfiniteTokenAllowanceFn>(
+    async (expirationLedger) => {
+      return approve(I128_MAX, expirationLedger);
+    },
+    [approve],
+  );
+
+  const checkAndApprove = useCallback(
+    async (amount: bigint | string, expirationLedger = 0) => {
+      const parsedAmount = BigInt(amount);
+      if (allowance !== null && allowance >= parsedAmount) {
+        return null;
+      }
+      return approve(parsedAmount, expirationLedger);
+    },
+    [allowance, approve],
+  );
+
   const reset = useCallback(() => {
     ++requestIdRef.current;
     setAllowance(null);
@@ -133,5 +183,5 @@ export function useTokenAllowance(
     setTxHash(null);
   }, []);
 
-  return { allowance, loading, isPending, error, txHash, approve, refetch, reset };
+  return { allowance, loading, isPending, error, txHash, approve, approveInfinite, checkAndApprove, refetch, reset };
 }
