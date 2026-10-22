@@ -1,9 +1,30 @@
 import { Transaction, Networks } from '@stellar/stellar-sdk';
 import type { WalletAdapter, SignTransactionOptions } from './types.js';
-import { AlbedoCancelError } from '../errors.js';
+import { AlbedoCancelError, AlbedoInvalidSignatureError } from '../errors.js';
 
 /** Albedo intent error code for "rejected by the user" (includes closing the popup). */
 const ALBEDO_USER_REJECTED_CODE = -4;
+
+/** Byte length of a well-formed Ed25519 signature. */
+const ED25519_SIGNATURE_LENGTH = 64;
+
+/**
+ * Asserts every decorated signature on `tx` is a well-formed 64-byte Ed25519
+ * signature. The Albedo iframe has been observed returning a signed envelope
+ * whose signature was not validated for length before being handed back to
+ * the caller; left unchecked, it fails on-chain submission with a less
+ * specific `bad_auth` error far from where the real problem is (#971).
+ *
+ * @throws {AlbedoInvalidSignatureError} if any signature is not 64 bytes.
+ */
+function assertValidSignatureLength(tx: Transaction): void {
+  for (const decoratedSig of tx.signatures) {
+    const sigBytes = decoratedSig.signature();
+    if (sigBytes.length !== ED25519_SIGNATURE_LENGTH) {
+      throw new AlbedoInvalidSignatureError(sigBytes.length);
+    }
+  }
+}
 
 /**
  * True when an Albedo intent rejection means the user closed the popup or
@@ -224,10 +245,13 @@ export class AlbedoWalletAdapter implements WalletAdapter {
       throw new Error('Albedo signing did not return valid signed XDR.');
     }
 
+    const signedTx = new Transaction(signedXdr, passphrase);
+    assertValidSignatureLength(signedTx);
+
     if (typeof tx === 'string') {
       return signedXdr;
     }
 
-    return new Transaction(signedXdr, passphrase);
+    return signedTx;
   }
 }

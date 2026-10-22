@@ -64,6 +64,25 @@ export interface WalletConnectAdapterOptions {
    * Not called for a local {@link WalletConnectAdapter.disconnect}.
    */
   onDisconnect?: (event: WalletConnectDisconnectEvent) => void;
+  /**
+   * Called with the pairing URI to render as a QR code whenever the client
+   * emits `display_uri` — including with a fresh URI after an automatic
+   * pairing refresh (#972).
+   */
+  onDisplayUri?: (uri: string) => void;
+  /**
+   * Called each time an expired pairing automatically triggers a fresh
+   * pairing attempt during `connect()` (#972), so the UI can show that a new
+   * QR code is on its way.
+   */
+  onPairingExpire?: () => void;
+  /**
+   * Number of times `connect()` automatically re-pairs (minting a fresh URI)
+   * after the current pairing expires before the wallet approves it, instead
+   * of requiring the caller to reload the page for a new QR code (#972).
+   * Default 1. Set 0 to disable auto-refresh and reject immediately.
+   */
+  maxPairingRetries?: number;
 }
 
 /** Payload passed to `onDisconnect` (#918). */
@@ -85,6 +104,9 @@ export class WalletConnectAdapter implements WalletAdapter {
   private session: WalletConnectSession | null;
   private readonly connectTimeoutMs: number;
   private readonly onSessionChange: ((change: WalletConnectSessionChange) => void) | undefined;
+  private readonly onDisplayUri: ((uri: string) => void) | undefined;
+  private readonly onPairingExpire: (() => void) | undefined;
+  private readonly maxPairingRetries: number;
   private readonly disconnectListeners = new Set<(event: WalletConnectDisconnectEvent) => void>();
   /** Removes the listeners attached by attachSessionListeners(), if any. */
   private detachListeners: (() => void) | null = null;
@@ -111,6 +133,9 @@ export class WalletConnectAdapter implements WalletAdapter {
     this.session   = (options.session as WalletConnectSession) ?? null;
     this.connectTimeoutMs = options.connectTimeoutMs ?? 30000;
     this.onSessionChange = options.onSessionChange;
+    this.onDisplayUri = options.onDisplayUri;
+    this.onPairingExpire = options.onPairingExpire;
+    this.maxPairingRetries = options.maxPairingRetries ?? 1;
     if (options.onDisconnect) this.disconnectListeners.add(options.onDisconnect);
     if (this.session) this.attachSessionListeners();
   }
@@ -284,8 +309,44 @@ export class WalletConnectAdapter implements WalletAdapter {
     }
 
     if (this.client && typeof this.client.connect === 'function') {
+      this.session = await this._connectWithPairingRefresh(this.maxPairingRetries);
+    }
+
+    const pubKey = this.getPublicKeyFromSession();
+    if (!pubKey) {
+      throw new Error('Failed to establish WalletConnect session or obtain public key.');
+    }
+
+    this.attachSessionListeners();
+
+    return pubKey;
+  }
+
+  /**
+   * Runs the connect handshake once, mints a fresh pairing (and URI) and
+   * retries automatically if the current pairing expires before the wallet
+   * approves it (#972) — up to `retriesRemaining` times — instead of leaving
+   * the caller stuck on a dead QR code until `connectTimeoutMs` elapses.
+   */
+  private async _connectWithPairingRefresh(retriesRemaining: number): Promise<WalletConnectSession | null> {
+    const client = this.client;
+    if (!client || typeof client.connect !== 'function') return null;
+
+    const hasEmitter = typeof client.on === 'function';
+    const onUri = (uri: unknown) => {
+      if (typeof uri === 'string') this._notifyDisplayUri(uri);
+    };
+    let pairingExpired = false;
+    const onExpire = () => { pairingExpired = true; };
+
+    if (hasEmitter) {
+      client.on!('display_uri', onUri);
+      client.on!('pairing_expire', onExpire);
+    }
+
+    try {
       const connectResult = await this._withTimeout(
-        this.client.connect({
+        client.connect({
           requiredNamespaces: {
             stellar: {
               methods: ['stellar_signTransaction', 'stellar_signXdr', 'soroban_signTransaction'],
@@ -298,23 +359,35 @@ export class WalletConnectAdapter implements WalletAdapter {
       );
 
       if (connectResult.session) {
-        this.session = connectResult.session;
-      } else if (connectResult.approval) {
-        this.session = await this._withTimeout(
-          connectResult.approval(),
-          'WalletConnect approval()'
-        );
+        return connectResult.session;
+      }
+      if (!connectResult.approval) {
+        return null;
+      }
+
+      try {
+        return await this._withTimeout(connectResult.approval(), 'WalletConnect approval()');
+      } catch (err) {
+        if (pairingExpired && retriesRemaining > 0) {
+          this.onPairingExpire?.();
+          return this._connectWithPairingRefresh(retriesRemaining - 1);
+        }
+        throw err;
+      }
+    } finally {
+      if (hasEmitter) {
+        client.off?.('display_uri', onUri);
+        client.off?.('pairing_expire', onExpire);
       }
     }
+  }
 
-    const pubKey = this.getPublicKeyFromSession();
-    if (!pubKey) {
-      throw new Error('Failed to establish WalletConnect session or obtain public key.');
+  private _notifyDisplayUri(uri: string): void {
+    try {
+      this.onDisplayUri?.(uri);
+    } catch (handlerError) {
+      console.warn('[conduit-sdk] WalletConnect onDisplayUri handler error:', handlerError);
     }
-
-    this.attachSessionListeners();
-
-    return pubKey;
   }
 
   /**

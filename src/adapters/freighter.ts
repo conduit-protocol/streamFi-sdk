@@ -1,6 +1,25 @@
 import { Transaction } from '@stellar/stellar-sdk';
 import type { WalletAdapter, SignTransactionOptions } from './types.js';
-import { NetworkMismatchError } from '../errors.js';
+import { NetworkMismatchError, WalletTimeoutError } from '../errors.js';
+
+/** Default time (ms) to wait for Freighter to resolve a `signTransaction` call before rejecting with {@link WalletTimeoutError}. */
+export const DEFAULT_FREIGHTER_SIGN_TIMEOUT_MS = 60_000;
+
+/**
+ * Races `pending` against a timer so a Freighter popup the user ignores or
+ * closes without responding cannot leave `signTransaction`'s caller hanging
+ * indefinitely (#970). Set `timeoutMs` to `0` or `Infinity` to disable.
+ */
+function withWalletTimeout<T>(pending: Promise<T>, timeoutMs: number): Promise<T> {
+  if (!Number.isFinite(timeoutMs) || timeoutMs <= 0) return pending;
+  return new Promise<T>((resolve, reject) => {
+    const timer = setTimeout(() => reject(new WalletTimeoutError('freighter', timeoutMs)), timeoutMs);
+    pending.then(
+      (value) => { clearTimeout(timer); resolve(value); },
+      (err) => { clearTimeout(timer); reject(err); },
+    );
+  });
+}
 
 export interface FreighterNetworkDetails {
   network?: string;
@@ -37,6 +56,13 @@ export interface FreighterWalletAdapterOptions {
    * Default Stellar network passphrase.
    */
   networkPassphrase?: string;
+  /**
+   * Max time (ms) to wait for Freighter's `signTransaction` to resolve
+   * before rejecting with {@link WalletTimeoutError} — e.g. the user left
+   * the popup open without approving or closing it (#970). Default 60000.
+   * Set to `0` or `Infinity` to wait indefinitely.
+   */
+  signTimeoutMs?: number;
 }
 
 /**
@@ -47,11 +73,13 @@ export class FreighterWalletAdapter implements WalletAdapter {
   private freighterClient: FreighterApi | null;
   private pubKey: string | null;
   public networkPassphrase: string | undefined;
+  private readonly signTimeoutMs: number;
 
   constructor(options: FreighterWalletAdapterOptions = {}) {
     this.freighterClient = (options.freighter as FreighterApi) ?? null;
     this.pubKey = options.publicKey ?? null;
     this.networkPassphrase = options.networkPassphrase;
+    this.signTimeoutMs = options.signTimeoutMs ?? DEFAULT_FREIGHTER_SIGN_TIMEOUT_MS;
   }
 
   private getClient(): FreighterApi {
@@ -208,10 +236,13 @@ export class FreighterWalletAdapter implements WalletAdapter {
     }
 
     const accountToSign = opts?.accountToSign ?? this.pubKey;
-    const signResult = await client.signTransaction(xdrString, {
-      networkPassphrase: passphrase,
-      ...(accountToSign ? { accountToSign } : {}),
-    });
+    const signResult = await withWalletTimeout(
+      client.signTransaction(xdrString, {
+        networkPassphrase: passphrase,
+        ...(accountToSign ? { accountToSign } : {}),
+      }),
+      this.signTimeoutMs,
+    );
 
     let signedXdr: string | undefined;
     if (typeof signResult === 'string') {

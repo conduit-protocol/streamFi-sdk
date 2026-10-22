@@ -8,6 +8,7 @@ import {
   Account,
 } from '@stellar/stellar-sdk';
 import { FreighterWalletAdapter, type FreighterApi } from '../adapters/freighter.js';
+import { WalletTimeoutError } from '../errors.js';
 
 describe('FreighterWalletAdapter (#805)', () => {
   const dummyKeypair = Keypair.random();
@@ -117,5 +118,41 @@ describe('FreighterWalletAdapter (#805)', () => {
     });
 
     await expect(adapter.signTransaction('fake-xdr')).rejects.toThrow('User rejected signing request');
+  });
+
+  it('rejects with WalletTimeoutError if signTransaction never resolves (#970)', async () => {
+    const mockClient: FreighterApi = {
+      signTransaction: vi.fn(() => new Promise(() => {})), // simulates an ignored/open popup
+    };
+
+    const adapter = new FreighterWalletAdapter({
+      freighter: mockClient,
+      publicKey: dummyPubKey,
+      networkPassphrase: Networks.TESTNET,
+      signTimeoutMs: 50,
+    });
+
+    await expect(adapter.signTransaction('fake-xdr')).rejects.toThrow(WalletTimeoutError);
+  });
+
+  it('does not time out when the wallet responds before signTimeoutMs elapses', async () => {
+    const tx = createTestTx();
+    const originalXdr = tx.toXDR();
+    tx.sign(dummyKeypair);
+    const expectedSignedXdr = tx.toXDR();
+
+    const mockClient: FreighterApi = {
+      signTransaction: vi.fn().mockResolvedValue(expectedSignedXdr),
+    };
+
+    const adapter = new FreighterWalletAdapter({
+      freighter: mockClient,
+      publicKey: dummyPubKey,
+      networkPassphrase: Networks.TESTNET,
+      signTimeoutMs: 50,
+    });
+
+    const result = await adapter.signTransaction(originalXdr);
+    expect(result).toBe(expectedSignedXdr);
   });
 });
