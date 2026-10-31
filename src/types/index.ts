@@ -70,6 +70,55 @@ export function asAccountId(value: string): AccountId {
 }
 
 /**
+ * Branded type for a content-addressed metadata URI attached to a stream
+ * (e.g. an `ipfs://<cid>` URI or IPFS gateway URL) describing off-chain
+ * attachments such as invoices. Prevents passing an arbitrary string where a
+ * validated metadata URI is expected (#969).
+ */
+export type StreamMetadataURI = string & { readonly __brand: unique symbol };
+
+/**
+ * Type guard to check if a value is a valid StreamMetadataURI (non-empty string).
+ */
+export function isStreamMetadataURI(value: unknown): value is StreamMetadataURI {
+  return typeof value === "string" && value.length > 0;
+}
+
+/**
+ * Helper to cast a string to a StreamMetadataURI. Use only when you are certain the value is a valid metadata URI.
+ */
+export function asStreamMetadataURI(value: string): StreamMetadataURI {
+  return value as StreamMetadataURI;
+}
+
+/**
+ * Invoice details attached to a stream as off-chain metadata (#969).
+ */
+export interface StreamInvoiceMetadata {
+  /** Human-readable invoice number assigned by the sender's billing system. */
+  invoiceNumber: string;
+  /** VAT/tax identifier of the invoicing party, when applicable. */
+  vatId?: string;
+  /** CID of the pinned invoice document or attachment on IPFS. */
+  ipfsCid: string;
+}
+
+/**
+ * JSON payload pinned to IPFS describing a stream's invoice metadata (#969).
+ * `uri` is the resulting content-addressed location once the payload above
+ * has been pinned, so a reader can confirm the fetched JSON matches where it
+ * was retrieved from.
+ */
+export interface IPFSInvoicePayload {
+  /** Stream this invoice is attached to. */
+  streamId: bigint;
+  /** The invoice details themselves. */
+  invoice: StreamInvoiceMetadata;
+  /** Content-addressed URI this payload is (or will be) pinned at. */
+  uri?: StreamMetadataURI;
+}
+
+/**
  * Enumerates the possible lifecycle states of a stream.
  *
  * - `ACTIVE`   — stream is live and funds are flowing.

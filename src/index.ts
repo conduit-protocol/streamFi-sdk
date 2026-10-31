@@ -123,6 +123,8 @@ export {
   UserCancelledError,
   AlbedoCancelError,
   NetworkMismatchError,
+  WalletTimeoutError,
+  AlbedoInvalidSignatureError,
   isRecoverableError,
   IndexerMaxPagesExceededError,
   isConduitError,

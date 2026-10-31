@@ -6,8 +6,10 @@ import {
   Networks,
   BASE_FEE,
   Account,
+  xdr,
 } from '@stellar/stellar-sdk';
 import { AlbedoWalletAdapter, type AlbedoApi } from '../adapters/albedo.js';
+import { AlbedoInvalidSignatureError } from '../errors.js';
 
 describe('AlbedoWalletAdapter (#805)', () => {
   const dummyKeypair = Keypair.random();
@@ -105,5 +107,32 @@ describe('AlbedoWalletAdapter (#805)', () => {
     const result = await adapter.signTransaction(tx, { networkPassphrase: Networks.TESTNET });
     expect(result).toBeInstanceOf(Transaction);
     expect((result as Transaction).toXDR()).toBe(signedXdr);
+  });
+
+  it('rejects with AlbedoInvalidSignatureError when the returned signature is not 64 bytes (#971)', async () => {
+    const tx = createTestTx();
+
+    // Simulate a malformed response from the Albedo iframe: a "signed"
+    // envelope whose decorated signature is truncated to 10 bytes instead
+    // of a well-formed 64-byte Ed25519 signature.
+    const envelope = tx.toEnvelope();
+    const malformedSig = new xdr.DecoratedSignature({
+      hint: Buffer.alloc(4, 0),
+      signature: Buffer.alloc(10, 1),
+    });
+    envelope.v1().signatures([malformedSig]);
+    const malformedXdr = envelope.toXDR('base64');
+
+    const mockClient: AlbedoApi = {
+      tx: vi.fn().mockResolvedValue({ signed_envelope_xdr: malformedXdr }),
+    };
+
+    const adapter = new AlbedoWalletAdapter({
+      albedo: mockClient,
+      publicKey: dummyPubKey,
+      networkPassphrase: Networks.TESTNET,
+    });
+
+    await expect(adapter.signTransaction(tx)).rejects.toThrow(AlbedoInvalidSignatureError);
   });
 });

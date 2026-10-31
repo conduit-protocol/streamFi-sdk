@@ -1055,6 +1055,51 @@ export class NetworkMismatchError extends Error {
   }
 }
 
+/**
+ * Thrown when a browser-extension wallet adapter's `signTransaction` call
+ * does not resolve within its configured timeout — e.g. the user left the
+ * Freighter popup open without approving or closing it, which would
+ * otherwise hang the caller's promise indefinitely (#970).
+ */
+export class WalletTimeoutError extends Error {
+  /** The wallet that failed to respond in time, e.g. `'freighter'`. */
+  readonly wallet: string;
+  /** The timeout window in milliseconds that was exceeded. */
+  readonly timeoutMs: number;
+
+  constructor(wallet: string, timeoutMs: number) {
+    super(
+      `${wallet} signTransaction timed out after ${timeoutMs}ms without a response. ` +
+        'The wallet popup may have been left open — close it and retry.',
+    );
+    this.name = 'WalletTimeoutError';
+    this.wallet = wallet;
+    this.timeoutMs = timeoutMs;
+    Object.setPrototypeOf(this, new.target.prototype);
+  }
+}
+
+/**
+ * Thrown when the Albedo iframe returns a signed transaction whose
+ * decorated signature is not a well-formed 64-byte Ed25519 signature.
+ * Catches a malformed signature before it is submitted on-chain, where it
+ * would otherwise fail with a less specific `bad_auth` error (#971).
+ */
+export class AlbedoInvalidSignatureError extends Error {
+  /** The actual signature length Albedo returned, in bytes. */
+  readonly actualLength: number;
+
+  constructor(actualLength: number) {
+    super(
+      `Albedo returned a malformed signature: expected 64 bytes (Ed25519), got ${actualLength}. ` +
+        'The transaction was not returned to the caller.',
+    );
+    this.name = 'AlbedoInvalidSignatureError';
+    this.actualLength = actualLength;
+    Object.setPrototypeOf(this, new.target.prototype);
+  }
+}
+
 // ── Horizon transaction submission errors (#975) ──────────────────────────────
 
 /**

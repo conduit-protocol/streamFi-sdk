@@ -20,6 +20,7 @@ export {
 } from './walletconnect.js';
 export {
   FreighterWalletAdapter,
+  DEFAULT_FREIGHTER_SIGN_TIMEOUT_MS,
   type FreighterWalletAdapterOptions,
   type FreighterApi,
   type FreighterNetworkDetails,
