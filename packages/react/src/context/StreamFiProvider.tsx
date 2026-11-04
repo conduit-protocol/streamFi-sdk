@@ -16,6 +16,8 @@ import {
 import type { ConduitConfig, Network } from "@conduit-protocol/sdk";
 // QueryClient is an optional peer dep — import type only to avoid hard runtime dep.
 import type { QueryClient } from "@tanstack/react-query";
+import { makeHeaderFetch } from "../utils/makeHeaderFetch.js";
+import type { RpcHeaders } from "../types/rpc-headers.js";
 
 export interface StreamFiContextValue {
   client: ConduitClient | null;
@@ -43,6 +45,12 @@ export interface StreamFiProviderProps {
    * duplicate cache entries and conflicting invalidations (#944).
    */
   queryClient?: QueryClient;
+  /**
+   * Headers attached to every Soroban RPC request made by the client this
+   * provider creates. Useful for RPC gateways that authenticate or trace by
+   * header. An empty object is ignored, and a header set per request wins.
+   */
+  rpcHeaders?: RpcHeaders;
 }
 
 function checkVersionMismatch() {
@@ -81,10 +89,17 @@ export function StreamFiProvider({
   defaultNetwork,
   children,
   queryClient,
+  rpcHeaders,
 }: StreamFiProviderProps) {
-  const customFetch = rpcHeaders && Object.keys(rpcHeaders).length > 0
-    ? makeHeaderFetch(rpcHeaders)
-    : undefined;
+  // Memoised so a fresh wrapper is not registered per render; `registerCustomFetch`
+  // is keyed by `rpcUrl` and would otherwise be overwritten constantly.
+  const customFetch = useMemo(
+    () =>
+      rpcHeaders && Object.keys(rpcHeaders).length > 0
+        ? makeHeaderFetch(rpcHeaders)
+        : undefined,
+    [rpcHeaders],
+  );
   const [currentConfig, setCurrentConfig] = useState<ConduitConfig | undefined>(
     () => config ?? (defaultNetwork ? { network: defaultNetwork } : undefined),
   );

@@ -41,10 +41,13 @@ export function useStreamsByRecipient(
 
       client.factory
         .streamsByRecipient(address, pageOffset, limit)
-        .then((ids) => {
+        .then((result) => {
           if (requestId.current !== id) return;
+          // The SDK returns { ids, hasMore }; its `hasMore` accounts for the
+          // clamped limit, so prefer it over re-deriving from `ids.length`.
+          const ids = result.ids;
           setStreamIds((prev) => (append ? [...prev, ...ids] : ids));
-          setHasMore(ids.length === limit);
+          setHasMore(result.hasMore);
           setIsLoading(false);
         })
         .catch((err: unknown) => {

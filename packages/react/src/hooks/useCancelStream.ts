@@ -14,7 +14,13 @@ export interface CancelSettlement {
   cancellationFeeAmount?: bigint;
 }
 
-export type CancelStreamFn = () => Promise<string>;
+/**
+ * Opens the two-step cancel flow. Resolves once the confirmation prompt has
+ * been opened (or, against a minimal client without `streams.get`, once the
+ * mutation has settled) — it does not return a transaction hash. The hash
+ * comes from {@link UseCancelStreamResult.confirmCancel}.
+ */
+export type CancelStreamFn = () => Promise<void>;
 
 export interface UseCancelStreamResult extends UseStreamMutationState {
   /** Opens the in-app confirmation flow; does not contact the wallet. */

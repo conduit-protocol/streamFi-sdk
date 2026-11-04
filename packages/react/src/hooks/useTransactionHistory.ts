@@ -13,7 +13,9 @@ import {
   selectVisibleTransactions,
   selectTotalPages,
   selectViewStatus,
-} from '../../../../src/dashboard/transaction-history.js';
+// Import through the published subpath (see `exports["./dashboard"]`) rather
+// than the SDK source tree, which sits outside this package's `rootDir`.
+} from '@conduit-protocol/sdk/dashboard';
 
 export interface UseTransactionHistoryOptions {
   /** Wallet address used to derive transaction direction. */
@@ -63,7 +65,9 @@ export function useTransactionHistory(
       dispatch({
         type: 'LOAD_SUCCESS',
         payload: transactions,
-        walletAddress,
+        // Spread rather than passing `walletAddress: undefined`, which
+        // `exactOptionalPropertyTypes` rejects on an optional field.
+        ...(walletAddress !== undefined ? { walletAddress } : {}),
       });
     }
   }
@@ -99,7 +103,11 @@ export function useTransactionHistory(
 
   const loadSuccess = useCallback(
     (data: unknown) =>
-      dispatch({ type: 'LOAD_SUCCESS', payload: data, walletAddress }),
+      dispatch({
+        type: 'LOAD_SUCCESS',
+        payload: data,
+        ...(walletAddress !== undefined ? { walletAddress } : {}),
+      }),
     [walletAddress],
   );
 

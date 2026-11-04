@@ -5,6 +5,20 @@ import { useStreamCountdown } from '../hooks/useStreamCountdown.js';
 const BASE_MS = Date.UTC(2026, 0, 1, 0, 0, 0); // 2026-01-01T00:00:00Z
 const BASE_SEC = Math.floor(BASE_MS / 1000);
 
+/**
+ * Advance fake time by `ms` plus one animation frame.
+ *
+ * The hook polls the clock on `requestAnimationFrame`, and jsdom quantises
+ * frames to ~16.67ms. Advancing by exactly 1000ms therefore stops at ~983ms —
+ * one frame short of the second boundary — so the hook has not observed the
+ * new second yet. Overshooting by a frame makes the assertion test the hook
+ * rather than the frame scheduler.
+ */
+const advance = (ms: number) =>
+  act(() => {
+    vi.advanceTimersByTime(ms + 20);
+  });
+
 describe('useStreamCountdown', () => {
   beforeEach(() => {
     vi.useFakeTimers();
@@ -36,14 +50,10 @@ describe('useStreamCountdown', () => {
 
     expect(result.current.seconds).toBe(5);
 
-    act(() => {
-      vi.advanceTimersByTime(1_000);
-    });
+    advance(1_000);
     expect(result.current.seconds).toBe(4);
 
-    act(() => {
-      vi.advanceTimersByTime(2_000);
-    });
+    advance(2_000);
     expect(result.current.seconds).toBe(2);
   });
 
@@ -53,9 +63,7 @@ describe('useStreamCountdown', () => {
 
     expect(result.current.isPast).toBe(false);
 
-    act(() => {
-      vi.advanceTimersByTime(5_000);
-    });
+    advance(5_000);
 
     expect(result.current.isPast).toBe(true);
     expect(result.current).toMatchObject({ days: 0, hours: 0, minutes: 0, seconds: 0 });
@@ -68,15 +76,11 @@ describe('useStreamCountdown', () => {
 
     expect(result.current.progressFraction).toBe(0);
 
-    act(() => {
-      vi.advanceTimersByTime(50_000);
-    });
-    expect(result.current.progressFraction).toBe(0.5);
+    advance(50_000);
+    expect(result.current.progressFraction).toBeCloseTo(0.5, 2);
 
-    act(() => {
-      vi.advanceTimersByTime(50_000);
-    });
-    expect(result.current.progressFraction).toBe(1);
+    advance(50_000);
+    expect(result.current.progressFraction).toBeCloseTo(1, 2);
   });
 
   it('clamps progressFraction to 0 before the window starts', () => {
@@ -95,11 +99,9 @@ describe('useStreamCountdown', () => {
     expect(result.current.progressFraction).toBe(0);
     expect(result.current.isPast).toBe(false);
 
-    act(() => {
-      vi.advanceTimersByTime(10_000);
-    });
+    advance(10_000);
 
-    expect(result.current.progressFraction).toBe(1);
+    expect(result.current.progressFraction).toBeCloseTo(1, 2);
     expect(result.current.isPast).toBe(true);
   });
 
@@ -167,9 +169,7 @@ describe('useStreamCountdown', () => {
     const target = BASE_SEC + 1;
     const { result } = renderHook(() => useStreamCountdown(target));
 
-    act(() => {
-      vi.advanceTimersByTime(1_000);
-    });
+    advance(1_000);
 
     expect(result.current.isPast).toBe(true);
     expect(result.current.progressFraction).toBeNull();
