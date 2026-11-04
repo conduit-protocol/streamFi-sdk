@@ -691,7 +691,10 @@ export class StreamBuilder {
       if (config.startTime >= now) {
         builder.startTime(config.startTime);
       } else {
-        (builder as any)._startTime = config.startTime;
+        // `startTime` is not part of the public builder surface, but the
+        // field exists at runtime; reach it through a narrow record cast
+        // instead of `any` so the shape stays explicit.
+        (builder as unknown as { _startTime: number })._startTime = config.startTime;
       }
     }
 

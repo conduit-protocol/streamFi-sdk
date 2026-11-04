@@ -14,8 +14,8 @@ export interface WalletConnectSignClient {
   disconnect?: (opts: unknown) => Promise<void>;
   request?: (opts: unknown) => Promise<unknown>;
   /** Event emitter surface of a WalletConnect v2 SignClient. */
-  on?: (event: string, listener: (...args: any[]) => void) => unknown;
-  off?: (event: string, listener: (...args: any[]) => void) => unknown;
+  on?: (event: string, listener: (...args: unknown[]) => void) => unknown;
+  off?: (event: string, listener: (...args: unknown[]) => void) => unknown;
   [key: string]: unknown;
 }
 

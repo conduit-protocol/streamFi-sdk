@@ -961,7 +961,9 @@ export class GraphQLIndexer {
     let cursor: string | null | undefined = undefined;
     let pagesFetched = 0;
 
-    while (true) {
+    // Paginate until the indexer stops returning a cursor. The loop condition
+    // is explicit rather than `while (true)` so the exit paths are visible.
+    for (;;) {
       if (pagesFetched >= maxPages) {
         throw new IndexerMaxPagesExceededError(pagesFetched, maxPages);
       }
