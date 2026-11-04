@@ -119,10 +119,12 @@ function assertWalletNetworkMatch(
  * ```
  */
 export class ConduitClient {
-  readonly streams: StreamsModule;
-  readonly governor: GovernorModule;
+  // Not `readonly`: `tryFailoverRpc()` rebuilds these against the new RPC URL,
+  // so they must be reassignable.
+  streams: StreamsModule;
+  governor: GovernorModule;
   /** SEP-41 token allowance reads and approvals. */
-  readonly tokens: TokenModule;
+  tokens: TokenModule;
 
   /**
    * Access the DripFactory read-query module.
@@ -496,6 +498,10 @@ export class ConduitClient {
     if (timeouts >= threshold && this.rpcUrls.length > 1) {
       this.rpcUrlIndex = (this.rpcUrlIndex + 1) % this.rpcUrls.length;
       const newUrl = this.rpcUrls[this.rpcUrlIndex];
+      // `noUncheckedIndexedAccess` widens the lookup to `string | undefined`;
+      // the modulo above keeps the index in range, so bail only if the array
+      // was emptied underneath us rather than silently writing `undefined`.
+      if (newUrl === undefined) return;
       this.config.rpcUrl = newUrl;
 
       // Reconstruct modules with new RPC URL

@@ -92,9 +92,13 @@ export async function withRetry<T>(
       }
 
       const retryAfterMs = classified instanceof RateLimitError ? classified.retryAfterMs : undefined;
-      const baseWait = retryAfterMs ?? delay;
-      const clampedWait = Math.min(baseWait, maxDelayMs);
-      const waitTime = applyJitter(clampedWait, jitter, prevDelay);
+      // A server-supplied `Retry-After` is a directive, not an estimate: honour
+      // it exactly. Jitter exists to desynchronise *clients guessing* at a
+      // backoff, and applying it here would retry earlier than the server
+      // asked (re-triggering the 429) or later than necessary.
+      const waitTime = retryAfterMs !== undefined
+        ? Math.min(retryAfterMs, maxDelayMs)
+        : applyJitter(Math.min(delay, maxDelayMs), jitter, prevDelay);
 
       onRetry?.({ attempt: attempt + 1, delayMs: waitTime, error: classified });
       await sleep(waitTime, signal);
