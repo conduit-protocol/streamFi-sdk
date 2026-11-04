@@ -92,8 +92,11 @@ describe('simulateBatch()', () => {
 
   it('propagates validateContext errors as a BatchBuildError', async () => {
     const { BatchBuildError } = await import('../batch-tx.js');
+    // Destructure off a copy so the omitted keys are absent rather than
+    // explicitly `undefined` — `exactOptionalPropertyTypes` rejects the latter.
+    const { rpcUrl: _rpcUrl, sequence: _sequence, ...contextWithoutRpc } = CONTEXT;
     await expect(
-      simulateBatch({ operations: [{ method: 'a' }], context: { ...CONTEXT, rpcUrl: undefined, sequence: undefined } }),
+      simulateBatch({ operations: [{ method: 'a' }], context: contextWithoutRpc }),
     ).rejects.toThrow(BatchBuildError);
   });
 });

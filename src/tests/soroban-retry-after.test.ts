@@ -71,6 +71,13 @@ describe('createRpcServer — 429 retry (#635)', () => {
       .mockRejectedValueOnce(rateLimited())
       .mockResolvedValueOnce({ sequence: 7 });
 
+    // The default jitter is 'full', which picks a random delay in
+    // [0, baseDelayMs] — so this assertion is only meaningful with jitter off.
+    // Stub Math.random to 1 so any jittered delay would land on the full
+    // baseDelayMs, keeping the boundary check exact without changing the
+    // production default.
+    const randomSpy = vi.spyOn(Math, 'random').mockReturnValue(0.999_999);
+
     const server = createRpcServer(RPC);
     const promise = server.getLatestLedger();
     promise.catch(() => {});
@@ -80,6 +87,7 @@ describe('createRpcServer — 429 retry (#635)', () => {
 
     await vi.advanceTimersByTimeAsync(1);
     await expect(promise).resolves.toEqual({ sequence: 7 });
+    randomSpy.mockRestore();
   });
 
   it('gives up after MAX_RETRIES and rejects with a RateLimitError', async () => {
