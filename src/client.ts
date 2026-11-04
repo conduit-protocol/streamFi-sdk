@@ -297,10 +297,15 @@ export class ConduitClient {
    * Read many streams while staying under RPC rate limits.
    *
    * Duplicate IDs are collapsed, the remaining IDs are split into chunks of
-   * `chunkSize` (default 20) and chunks are read one after another, each with
-   * bounded concurrency (`maxConcurrency`, default 8). `chunkDelayMs` adds a
-   * pause between chunks. A failing stream is reported in `failures` rather
-   * than failing the whole batch.
+   * `chunkSize` (default 20) and chunks are read one after another via
+   * {@link StreamsModule.getStreamInfosBatched}, which resolves a whole chunk
+   * from ledger entries instead of simulating each stream (#904). `chunkDelayMs`
+   * adds a pause between chunks. A failing stream is reported in `failures`
+   * rather than failing the whole batch.
+   *
+   * `maxConcurrency` is accepted for backward compatibility but no longer
+   * affects the number of RPC calls: each chunk costs at most two
+   * `getLedgerEntries` requests regardless of how many streams it holds.
    *
    * @example
    * const { results, failures } = await client.getStreamsBatch(ids, { chunkSize: 10 });
@@ -319,7 +324,7 @@ export class ConduitClient {
       if (i > 0 && chunkDelayMs > 0) {
         await new Promise((resolve) => setTimeout(resolve, chunkDelayMs));
       }
-      const chunk = await this.streams.getStreamInfos(
+      const chunk = await this.streams.getStreamInfosBatched(
         unique.slice(i, i + chunkSize),
         options.maxConcurrency === undefined
           ? {}
