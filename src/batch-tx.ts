@@ -134,6 +134,22 @@ export interface BatchSimulationResult {
   error?: string;
 }
 
+/** Operations plus their build context, as accepted by {@link simulateBatch}. */
+export interface BatchPayload {
+  operations: BuildableOperation[];
+  context: BatchTransactionContext;
+}
+
+/** Aggregate result of {@link simulateBatch}. */
+export interface BatchSimulationSummary {
+  /** `true` only when every operation in the batch simulated successfully. */
+  success: boolean;
+  /** Per-operation simulation results, in input order. */
+  results: BatchSimulationResult[];
+  /** Indices of operations that failed simulation, in input order. */
+  invalidIndices: number[];
+}
+
 export class BatchBuildError extends Error {
   constructor(message: string) {
     super(message);
@@ -398,6 +414,22 @@ export async function preBatchSimulate(
     return { index, method: operation.method, success: true } satisfies BatchSimulationResult;
   }));
   return results;
+}
+
+/**
+ * Dry-run a batch before prompting for wallet signatures (#959).
+ *
+ * Wraps {@link preBatchSimulate} and folds the per-operation results into a
+ * single pass/fail verdict, so a caller can gate signing on `success` without
+ * spending an inclusion fee on a batch that would revert.
+ *
+ * A failed operation is reported in `results` / `invalidIndices` rather than
+ * thrown, so one bad operation does not hide the state of the others.
+ */
+export async function simulateBatch(batch: BatchPayload): Promise<BatchSimulationSummary> {
+  const results = await preBatchSimulate(batch.operations, batch.context);
+  const invalidIndices = results.filter(r => !r.success).map(r => r.index);
+  return { success: invalidIndices.length === 0, results, invalidIndices };
 }
 
 /**

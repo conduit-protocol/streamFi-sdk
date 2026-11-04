@@ -121,8 +121,13 @@ describe('FreighterWalletAdapter (#805)', () => {
   });
 
   it('rejects with WalletTimeoutError if signTransaction never resolves (#970)', async () => {
+    // `exactOptionalPropertyTypes` requires the optional member to keep its
+    // `| undefined`, so the mock is typed as the member itself rather than the
+    // whole interface.
+    const neverResolves: NonNullable<FreighterApi['signTransaction']> = () =>
+      new Promise<string>(() => {}); // simulates an ignored/open popup
     const mockClient: FreighterApi = {
-      signTransaction: vi.fn(() => new Promise(() => {})), // simulates an ignored/open popup
+      signTransaction: vi.fn(neverResolves),
     };
 
     const adapter = new FreighterWalletAdapter({

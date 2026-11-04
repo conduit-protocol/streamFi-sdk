@@ -130,15 +130,32 @@ async function fetchAdapter(config: RequestConfig): Promise<unknown> {
   const registration = registry.get(stripTrailingSlash(url));
   if (!registration) throw new Error(`No custom fetch registered for ${url}`);
 
-  const send = () => sendOnce(config, url, customFetch);
+  const send = () => sendOnce(config, url, registration.fetch, registration.timeoutMs);
   return isIdempotentRequest(config) ? retryGatewayErrors(send, config.signal) : send();
 }
 
-async function sendOnce(config: RequestConfig, url: string, customFetch: typeof fetch): Promise<unknown> {
-  const signals: AbortSignal[] = [];
-  if (config.signal) signals.push(config.signal);
-  if (config.timeout && config.timeout > 0 && typeof AbortSignal.timeout === 'function') {
-    signals.push(AbortSignal.timeout(config.timeout));
+async function sendOnce(
+  config: RequestConfig,
+  url: string,
+  customFetch: typeof fetch,
+  defaultTimeoutMs: number,
+): Promise<unknown> {
+  // One controller carries both abort sources: the caller's signal and this
+  // request's timeout. Aborting either one must cancel the in-flight fetch, so
+  // they cannot be two independent signals.
+  const controller = new AbortController();
+  const onCallerAbort = () => controller.abort(config.signal?.reason);
+  if (config.signal) {
+    if (config.signal.aborted) onCallerAbort();
+    else config.signal.addEventListener('abort', onCallerAbort, { once: true });
+  }
+
+  // An explicit per-request `timeout` wins over the registration default; 0 on
+  // either means "no timeout", matching registerCustomFetch's contract.
+  const timeoutMs = config.timeout && config.timeout > 0 ? config.timeout : defaultTimeoutMs;
+  let timer: ReturnType<typeof setTimeout> | undefined;
+  if (timeoutMs > 0) {
+    timer = setTimeout(() => controller.abort(new Error(`RPC request timed out after ${timeoutMs}ms`)), timeoutMs);
   }
 
   const init: RequestInit = {
@@ -151,7 +168,7 @@ async function sendOnce(config: RequestConfig, url: string, customFetch: typeof 
   let res: Response;
   let text: string;
   try {
-    res = await registration.fetch(url, init);
+    res = await customFetch(url, init);
     text = await res.text();
   } finally {
     if (timer !== undefined) clearTimeout(timer);

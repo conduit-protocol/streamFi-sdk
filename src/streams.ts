@@ -31,6 +31,7 @@ import type {
   ValidationResult,
   CancelEvent,
   CliffReachedEvent,
+  DurationBreakdown,
 } from "./types/index.js";
 import type { WalletAdapter } from "./adapters/types.js";
 import type { Signer } from "./signer.js";
@@ -1847,7 +1848,9 @@ export class StreamsModule {
   async onStreamEvent(
     streamId: bigint | string,
     type: 'CliffReached' | 'Cancelled',
-    callback: (event: CancelEvent | CliffReachedEvent) => void,
+    // Union of the two callback shapes; `strictFunctionTypes` rejects the
+    // narrower single-parameter type as an implementation signature.
+    callback: ((event: CancelEvent) => void) | ((event: CliffReachedEvent) => void),
     options?: CliffReachedListenerOptions,
   ): Promise<Subscription> {
     const addr = await this._resolveAddr(BigInt(streamId));

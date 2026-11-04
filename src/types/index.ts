@@ -134,6 +134,39 @@ export enum StreamState {
 }
 
 /**
+ * High-level, UI-friendly lifecycle status for a stream, derived client-side
+ * from its on-chain {@link StreamInfo}.
+ *
+ * Unlike {@link StreamState} (which mirrors the contract's coarse lifecycle),
+ * `StreamStatus` adds the `Created` (scheduled, not yet started) and
+ * `Completed` (reached its natural `endTime`) states so UI components can drive
+ * switch statements without re-deriving them from disparate boolean flags
+ * (`paused`, `cancelled`) and timestamp comparisons.
+ */
+export enum StreamStatus {
+  Created = "Created",
+  Active = "Active",
+  Paused = "Paused",
+  Completed = "Completed",
+  Cancelled = "Cancelled",
+}
+
+/**
+ * Derive a {@link StreamStatus} from a stream's {@link StreamInfo}.
+ *
+ * Resolution order: `Cancelled` → `Paused` → `Completed` (past `endTime`) →
+ * `Created` (future `startTime`) → `Active`. `now` defaults to `Date.now()`
+ * but may be injected for deterministic, time-independent tests.
+ */
+export function deriveStreamStatus(info: StreamInfo, now: number = Date.now()): StreamStatus {
+  if (info.cancelled) return StreamStatus.Cancelled;
+  if (info.paused) return StreamStatus.Paused;
+  if (info.endTime > 0 && now >= info.endTime) return StreamStatus.Completed;
+  if (info.startTime > now) return StreamStatus.Created;
+  return StreamStatus.Active;
+}
+
+/**
  * Identifies the vesting schedule shape a stream follows.
  *
  * Numeric (not string) values, since this is meant to be passed across
