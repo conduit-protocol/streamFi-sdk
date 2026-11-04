@@ -91,7 +91,11 @@ jobs:
   react-package:
     name: "@streamfi/react"
     runs-on: ubuntu-latest
-    needs: [build]
+    # No `needs`: this job installs and builds the SDK itself, so it shares no
+    # state with `build`. Gating it on `build` — which is itself gated on
+    # `lint-typecheck` — meant any SDK type error silently skipped the entire
+    # React package's checks, which is how it accumulated 20 type errors and 40
+    # failing tests without CI ever going red on them.
     steps:
       - uses: actions/checkout@v4
 
