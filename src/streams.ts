@@ -20,7 +20,6 @@ import type {
   StreamEventHandlers,
   StreamInfo,
   Subscription,
-  BatchWithdrawItem,
   BatchWithdrawPayload,
   BatchWithdrawResult,
   BatchCreateStreamResult,
@@ -1301,8 +1300,13 @@ export class StreamsModule {
     const server = this._server();
 
     const opType = typeof operation === "string" ? operation : operation.type;
+    // The operation is a heterogeneous bag whose shape depends on `opType`,
+    // and each switch branch narrows the fields it needs. A single concrete
+    // record type would have to be a union of every operation variant, so the
+    // per-key access stays deliberately loose here.
     const opObj = (
       typeof operation === "object" && operation !== null ? operation : {}
+      // eslint-disable-next-line @typescript-eslint/no-explicit-any -- see above
     ) as Record<string, any>;
     const cacheKey = `${opType}:${JSON.stringify(operation, (_key, value) =>
       typeof value === "bigint" ? `${value}n` : value,
