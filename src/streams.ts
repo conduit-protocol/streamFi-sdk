@@ -935,7 +935,10 @@ export class StreamsModule {
       // `LedgerEntryResult.val` is a `LedgerEntryData`; the stored value sits
       // under its `contractData` arm.
       if (entry.val.switch().name !== "contractData") continue;
-      const scVal = entry.val.contractData().val;
+      // `contractData().val` is typed as an accessor method but is a plain
+      // property at runtime (see ledger-keys.ts).
+      const scVal = (entry.val.contractData() as unknown as { val: xdr.ScVal })
+        .val;
       if (scVal.switch().name !== "scvAddress") continue;
       addressById.set(id, Address.fromScVal(scVal).toString());
     }
