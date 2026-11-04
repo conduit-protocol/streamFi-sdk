@@ -15,8 +15,6 @@ import type {
   ResumeEvent,
   StreamTopUpEvent,
   StreamClawbackedEvent,
-  TopUpEvent,
-  ClawbackEvent,
   CreatedEvent,
   ForceCancelEvent,
   RecipientTransferEvent,

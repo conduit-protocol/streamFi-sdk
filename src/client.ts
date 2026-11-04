@@ -14,7 +14,7 @@ import type {
   GetStreamInfosResult,
 } from "./types/index.js";
 import type { WalletAdapter } from "./adapters/types.js";
-import { DEFAULT_RPC, getServer } from "./soroban.js";
+import { DEFAULT_RPC, getConsecutiveTimeouts, getServer } from "./soroban.js";
 import { registerCustomFetch } from "./custom-fetch.js";
 import { SorobanRpc } from "@stellar/stellar-sdk";
 import { StreamsModule } from "./streams.js";
@@ -497,8 +497,6 @@ export class ConduitClient {
    */
   private tryFailoverRpc(): void {
     const threshold = this.config.rpcUrlFailureThresholdConsecutive ?? 3;
-    const { getConsecutiveTimeouts } = require("./soroban.js");
-
     const timeouts = getConsecutiveTimeouts(this.config.rpcUrl);
     if (timeouts >= threshold && this.rpcUrls.length > 1) {
       this.rpcUrlIndex = (this.rpcUrlIndex + 1) % this.rpcUrls.length;

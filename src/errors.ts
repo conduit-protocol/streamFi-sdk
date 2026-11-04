@@ -1,4 +1,4 @@
-import { SorobanRpc, xdr } from '@stellar/stellar-sdk';
+import { xdr } from '@stellar/stellar-sdk';
 
 /**
  * Each of the three Conduit contracts defines its own `Error` enum in Rust —
