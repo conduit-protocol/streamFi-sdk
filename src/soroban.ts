@@ -159,10 +159,16 @@ export async function getLatestLedgerInfo(rpcUrl: string): Promise<LedgerInfo> {
     throw RateLimitError.fromRpcError(err) ?? err;
   }
 
+  // `getLatestLedger` returns `closeTime` (Unix seconds, as a string) — NOT
+  // `closedAt`. `@stellar/stellar-sdk` v12 omits the field from its
+  // `GetLatestLedgerResponse` type, so it is read through a narrowed cast
+  // rather than by widening the SDK type.
+  const closeTime = (ledger as { closeTime?: string | number }).closeTime;
+  const closeTimeSeconds = Number(closeTime);
   const info: CachedLedgerInfo = {
     sequence: ledger.sequence,
-    timestamp: Math.floor(new Date(ledger.closedAt).getTime() / 1000),
-    closedAt: ledger.closedAt,
+    timestamp: Number.isFinite(closeTimeSeconds) ? closeTimeSeconds : Math.floor(now / 1000),
+    closedAt: closeTime === undefined ? "" : String(closeTime),
     cachedAt: now,
   };
 

@@ -15,8 +15,6 @@ import type {
   ResumeEvent,
   StreamTopUpEvent,
   StreamClawbackedEvent,
-  TopUpEvent,
-  ClawbackEvent,
   CreatedEvent,
   ForceCancelEvent,
   RecipientTransferEvent,
@@ -454,11 +452,14 @@ export function onStreamEvent(
   rpcUrl: string,
   streamAddress: string,
   type: 'CliffReached' | 'Cancelled',
-  callback: (event: CancelEvent | CliffReachedEvent) => void,
+  // Union of the two callback shapes: `strictFunctionTypes` rejects a narrower
+  // single-parameter type here, because the implementation would then be
+  // claiming it may call with either event.
+  callback: ((event: CancelEvent) => void) | ((event: CliffReachedEvent) => void),
   options?: CliffReachedListenerOptions,
 ): Subscription {
   if (type === 'Cancelled') {
-    return subscribeToStream(rpcUrl, streamAddress, { onCancel: callback });
+    return subscribeToStream(rpcUrl, streamAddress, { onCancel: callback as (event: CancelEvent) => void });
   }
 
   if (!options || !Number.isFinite(options.cliffTime)) {
@@ -475,7 +476,7 @@ export function onStreamEvent(
     if (stopped || fired) return;
     if (Math.floor(Date.now() / 1000) >= cliffTime) {
       fired = true;
-      callback({ cliffTime });
+      (callback as (event: CliffReachedEvent) => void)({ cliffTime });
       return;
     }
     timer = setTimeout(check, pollInterval);

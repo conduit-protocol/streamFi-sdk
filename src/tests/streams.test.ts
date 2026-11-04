@@ -73,7 +73,7 @@ describe('StreamsModule — keypair guard', () => {
     const sdk = new StreamsModule(makeConfig(false));
     await expect(sdk.create({
       recipient:       'GBBD47IF6LWK7P7MDEVSCWR7DPUWV3NY3DTQEVFL4NAT4AQH3ZLLFLA5',
-      token:           'CDLZFC3SYJYDZT7K67VZ75HPJVIEUVNIXF47ZG2FB2RMQQVU2HHGCN3',
+      token:           'CBQHNAXSI55GX2GN6D67GK7BHVPSLJUGZQEU7WJ5LKR5PNUCGLIMAO4K',
       depositAmount:   '1000',
       durationSeconds: 86400,
     })).rejects.toThrow('keypair');
@@ -197,7 +197,7 @@ describe('StreamsModule — create() param validation', () => {
     const sdk = new StreamsModule(makeConfig(true));
     await expect(sdk.create({
       recipient:     'GBBD47IF6LWK7P7MDEVSCWR7DPUWV3NY3DTQEVFL4NAT4AQH3ZLLFLA5',
-      token:         'CDLZFC3SYJYDZT7K67VZ75HPJVIEUVNIXF47ZG2FB2RMQQVU2HHGCN3',
+      token:         'CBQHNAXSI55GX2GN6D67GK7BHVPSLJUGZQEU7WJ5LKR5PNUCGLIMAO4K',
       depositAmount: '100',
     })).rejects.toThrow(/durationSeconds|ratePerSecond/);
   });
@@ -208,7 +208,7 @@ describe('StreamsModule — create() param validation', () => {
     const sdk = new StreamsModule(makeConfig(true));
     await expect(sdk.create({
       recipient:       'GBBD47IF6LWK7P7MDEVSCWR7DPUWV3NY3DTQEVFL4NAT4AQH3ZLLFLA5',
-      token:           'CDLZFC3SYJYDZT7K67VZ75HPJVIEUVNIXF47ZG2FB2RMQQVU2HHGCN3',
+      token:           'CBQHNAXSI55GX2GN6D67GK7BHVPSLJUGZQEU7WJ5LKR5PNUCGLIMAO4K',
       depositAmount:   '100',
       durationSeconds: MIN_STREAM_DURATION_SECONDS - 1,
     })).rejects.toThrow(/durationSeconds.*at least.*3600/);

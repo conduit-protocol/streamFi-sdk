@@ -1,4 +1,4 @@
-import { StrKey, Networks } from '@stellar/stellar-sdk';
+import { Networks } from '@stellar/stellar-sdk';
 
 /** Stellar networks supported by public explorer links. */
 export type NetworkType = 'mainnet' | 'testnet' | 'futurenet';

@@ -20,7 +20,6 @@ import type {
   StreamEventHandlers,
   StreamInfo,
   Subscription,
-  BatchWithdrawItem,
   BatchWithdrawPayload,
   BatchWithdrawResult,
   BatchCreateStreamResult,
@@ -31,6 +30,7 @@ import type {
   ValidationResult,
   CancelEvent,
   CliffReachedEvent,
+  DurationBreakdown,
 } from "./types/index.js";
 import type { WalletAdapter } from "./adapters/types.js";
 import type { Signer } from "./signer.js";
@@ -1300,8 +1300,13 @@ export class StreamsModule {
     const server = this._server();
 
     const opType = typeof operation === "string" ? operation : operation.type;
+    // The operation is a heterogeneous bag whose shape depends on `opType`,
+    // and each switch branch narrows the fields it needs. A single concrete
+    // record type would have to be a union of every operation variant, so the
+    // per-key access stays deliberately loose here.
     const opObj = (
       typeof operation === "object" && operation !== null ? operation : {}
+      // eslint-disable-next-line @typescript-eslint/no-explicit-any -- see above
     ) as Record<string, any>;
     const cacheKey = `${opType}:${JSON.stringify(operation, (_key, value) =>
       typeof value === "bigint" ? `${value}n` : value,
@@ -1667,7 +1672,9 @@ export class StreamsModule {
   async onStreamEvent(
     streamId: bigint | string,
     type: 'CliffReached' | 'Cancelled',
-    callback: (event: CancelEvent | CliffReachedEvent) => void,
+    // Union of the two callback shapes; `strictFunctionTypes` rejects the
+    // narrower single-parameter type as an implementation signature.
+    callback: ((event: CancelEvent) => void) | ((event: CliffReachedEvent) => void),
     options?: CliffReachedListenerOptions,
   ): Promise<Subscription> {
     const addr = await this._resolveAddr(BigInt(streamId));

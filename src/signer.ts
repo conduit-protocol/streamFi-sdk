@@ -121,6 +121,15 @@ export interface LedgerDevice {
 }
 
 /** A Ledger hardware wallet signer that implements the `Signer` interface (#912). */
+/**
+ * The subset of `@ledgerhq/hw-app-str`'s `StrApp` this adapter uses. Declared
+ * locally because the package is an optional dependency resolved at runtime.
+ */
+interface LedgerStrApp {
+  getPublicKey(path: string): Promise<{ publicKey: string }>;
+  signTransaction(path: string, txXdr: string): Promise<{ signature: Uint8Array; signedTxXdr: string }>;
+}
+
 export class LedgerSigner implements Signer {
   private readonly appName: string;
   private readonly path: string;
@@ -183,10 +192,18 @@ export class LedgerSigner implements Signer {
       // optional deps (which may be absent from the dependency tree).
       const ledgerAppModule = '@ledgerhq/hw-app-str';
       const ledgerTransportModule = '@ledgerhq/hw-transport-webusb';
-      const hwApp: any = await import(ledgerAppModule);
-      const transportMod: any = await import(ledgerTransportModule);
+      const hwApp = (await import(ledgerAppModule)) as {
+        default: new (transport: unknown) => LedgerStrApp;
+      };
+      const transportMod = (await import(ledgerTransportModule)) as {
+        default?: { create: () => Promise<unknown> };
+        create?: () => Promise<unknown>;
+      };
       const TransportWebUSB = transportMod.default ?? transportMod;
-      const t: unknown = await TransportWebUSB.create();
+      if (typeof TransportWebUSB?.create !== 'function') {
+        throw new Error('Ledger transport could not be loaded');
+      }
+      const t = await TransportWebUSB.create();
       const app = new hwApp.default(t);
       return {
         getPublicKey: (path: string) => app.getPublicKey(path),

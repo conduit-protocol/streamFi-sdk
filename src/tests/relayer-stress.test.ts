@@ -499,12 +499,14 @@ describe('WebSocketRelayer — Heartbeat/Ping Support', () => {
       heartbeatTimeoutMs: 500,
     });
 
-    await relayer.connect();
+    const connecting = relayer.connect();
+    await vi.advanceTimersByTimeAsync(0);
+    await connecting;
     expect(mockWs.send).toHaveBeenCalledTimes(0);
 
     // Advance time to trigger first heartbeat
     vi.advanceTimersByTime(1000);
-    await new Promise(resolve => setTimeout(resolve, 10));
+    await vi.advanceTimersByTimeAsync(10);
 
     expect(mockWs.send).toHaveBeenCalledWith(JSON.stringify({ type: 'ping' }));
 
@@ -518,12 +520,14 @@ describe('WebSocketRelayer — Heartbeat/Ping Support', () => {
       heartbeatTimeoutMs: 300,
     });
 
-    await relayer.connect();
+    const connecting = relayer.connect();
+    await vi.advanceTimersByTimeAsync(0);
+    await connecting;
     const onmessage = getOnmessage();
 
     // Trigger heartbeat
     vi.advanceTimersByTime(500);
-    await new Promise(resolve => setTimeout(resolve, 10));
+    await vi.advanceTimersByTimeAsync(10);
 
     const pingCall = mockWs.send.mock.calls.length;
     expect(pingCall).toBeGreaterThan(0);
@@ -545,15 +549,17 @@ describe('WebSocketRelayer — Heartbeat/Ping Support', () => {
       heartbeatTimeoutMs: 300,
     });
 
-    await relayer.connect();
+    const connecting = relayer.connect();
+    await vi.advanceTimersByTimeAsync(0);
+    await connecting;
 
     // Trigger heartbeat
     vi.advanceTimersByTime(500);
-    await new Promise(resolve => setTimeout(resolve, 10));
+    await vi.advanceTimersByTimeAsync(10);
 
     // Advance time past pong timeout without sending pong
     vi.advanceTimersByTime(300);
-    await new Promise(resolve => setTimeout(resolve, 10));
+    await vi.advanceTimersByTimeAsync(10);
 
     // Connection should be closed due to missing pong
     expect(mockWs.close).toHaveBeenCalled();
@@ -567,12 +573,14 @@ describe('WebSocketRelayer — Heartbeat/Ping Support', () => {
       heartbeatIntervalMs: 1000,
     });
 
-    await relayer.connect();
+    const connecting = relayer.connect();
+    await vi.advanceTimersByTimeAsync(0);
+    await connecting;
     relayer.disconnect();
 
     // Advance time and verify no new pings are sent
     vi.advanceTimersByTime(2000);
-    await new Promise(resolve => setTimeout(resolve, 10));
+    await vi.advanceTimersByTimeAsync(10);
 
     expect(mockWs.send).not.toHaveBeenCalled();
 
@@ -585,7 +593,8 @@ describe('WebSocketRelayer — Heartbeat/Ping Support', () => {
       heartbeatTimeoutMs: 2000,
     });
 
-    // Verify options are set (indirectly through behavior)
+    // Verify options are set (indirectly through behavior). No fake timers
+    // here, so the mock's setTimeout(0) `onopen` fires on its own.
     await relayer.connect();
     expect(relayer.state.connected).toBe(true);
 
