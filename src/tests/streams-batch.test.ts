@@ -37,10 +37,12 @@ describe('ConduitClient.getStreamsBatch', () => {
 
   it('keeps per-id failures from the batch', async () => {
     const client = new ConduitClient({ network: 'testnet', factoryAddress: FACTORY });
-    vi.spyOn(client.streams, 'getStreamInfosBatched').mockImplementation(async (ids) => ({
-      results: ids.slice(0, 1).map((id) => ({ id }) as never),
-      failures: ids.slice(1).map((id) => ({ id, error: 'not found' })),
-    }));
+    vi.spyOn(client.streams, 'getStreamInfosBatched').mockImplementation(
+      (async (ids: bigint[]) => ({
+        results: ids.slice(0, 1).map((id) => ({ id }) as never),
+        failures: ids.slice(1).map((id) => ({ id, error: 'not found' })),
+      })) as never,
+    );
 
     const out = await client.getStreamsBatch([1n, 2n]);
 
