@@ -40,7 +40,7 @@ describe('ConduitClient.getStreamsBatch', () => {
     vi.spyOn(client.streams, 'getStreamInfosBatched').mockImplementation(async (ids) => ({
       results: ids.slice(0, 1).map((id) => ({ id }) as never),
       failures: ids.slice(1).map((id) => ({ id, error: 'not found' })),
-    }));
+    }) as never);
 
     const out = await client.getStreamsBatch([1n, 2n]);
 
