@@ -3,7 +3,7 @@
  */
 
 import { nativeToScVal, xdr, Address, hash, StrKey } from '@stellar/stellar-sdk';
-import type { ConduitConfig, FactoryConfig } from './types/index.js';
+import type { ConduitConfig, FactoryConfig, StreamInfo } from './types/index.js';
 import type { WalletAdapter } from './adapters/types.js';
 import { KeypairWalletAdapter } from './adapters/keypair.js';
 import { ZERO_ADDR, DEFAULT_LIST_LIMIT, clampListLimit, clampOffset } from './constants.js';
@@ -15,8 +15,16 @@ import {
   NETWORK_PASSPHRASE,
   DEFAULT_RPC,
   DEFAULT_HORIZON,
+  createRpcServer,
+  catchNetworkError,
 } from './soroban.js';
 import { SUPPORTED_NETWORKS, UnsupportedChainError } from './errors.js';
+import {
+  contractInstanceLedgerKey,
+  contractIdFromInstanceLedgerKey,
+  instanceConfigValue,
+} from './ledger-keys.js';
+import { parseStreamInfo } from './streams.js';
 import { mapWithConcurrency, DEFAULT_LIST_CONCURRENCY } from './map-with-concurrency.js';
 import { coalesceAsync } from './coalesce-async.js';
 
@@ -421,6 +429,76 @@ export class FactoryModule {
    */
   async hasStream(streamId: bigint | string, signal?: AbortSignal): Promise<boolean> {
     return (await this.streamAddress(streamId, signal)) !== null;
+  }
+
+  /**
+   * Fetch several streams' details in a single RPC round-trip (#904).
+   *
+   * Takes stream **contract addresses** (as the issue specifies) and resolves
+   * them through one batched `getLedgerEntries` call instead of one simulation
+   * per stream. N streams previously meant N+1 round-trips, which made list
+   * pages slow and tripped RPC rate limits.
+   *
+   * Each stream keeps its whole `StreamInfo` under `DataKey::Config` in
+   * instance storage, and instance storage is one ledger entry per contract,
+   * so every address contributes exactly one key to the batch.
+   *
+   * Addresses that have no ledger entry (expired, never initialised, or not a
+   * stream) are omitted from the result rather than throwing, so one bad
+   * address cannot fail the whole page. Duplicates collapse to one read.
+   *
+   * @example
+   * const streams = await client.factory.getMultipleStreams(addresses);
+   */
+  async getMultipleStreams(
+    streamAddresses: string[],
+    signal?: AbortSignal,
+  ): Promise<StreamInfo[]> {
+    if (signal?.aborted) throw new DOMException("Aborted", "AbortError");
+
+    // De-duplicate so a page that repeats an address never schedules two reads.
+    const unique: string[] = [];
+    const seen = new Set<string>();
+    for (const address of streamAddresses) {
+      const key = address.trim();
+      if (!key || seen.has(key)) continue;
+      seen.add(key);
+      unique.push(key);
+    }
+    if (unique.length === 0) return [];
+
+    const server = createRpcServer(this.rpcUrl);
+    const response = await catchNetworkError(
+      "getLedgerEntries",
+      server.getLedgerEntries(
+        ...unique.map((address) => contractInstanceLedgerKey(address)),
+      ),
+    );
+
+    // Instance entries come back keyed by contract address.
+    const instanceByAddress = new Map<string, xdr.LedgerEntryData>();
+    for (const entry of response.entries ?? []) {
+      const contractId = contractIdFromInstanceLedgerKey(entry.key);
+      if (contractId === undefined) continue;
+      instanceByAddress.set(contractId, entry.val);
+    }
+
+    const results: StreamInfo[] = [];
+    for (const address of unique) {
+      const instance = instanceByAddress.get(address);
+      if (!instance) continue;
+      const configVal = instanceConfigValue(instance);
+      if (!configVal) continue;
+      try {
+        // The stream id is not part of the address, so it is read back from
+        // the decoded state rather than guessed from the batch position.
+        results.push(parseStreamInfo(0n, address, configVal));
+      } catch {
+        // A malformed entry must not fail its neighbours.
+        continue;
+      }
+    }
+    return results;
   }
 
   /**

@@ -43,6 +43,13 @@ import {
   isValidAddress,
 } from "./utils.js";
 import {
+  streamAddressLedgerKey,
+  contractInstanceLedgerKey,
+  streamIdFromAddressLedgerKey,
+  contractIdFromInstanceLedgerKey,
+  instanceConfigValue,
+} from "./ledger-keys.js";
+import {
   buildContractCallTx,
   scValToI128,
   scValToU64,
@@ -793,6 +800,12 @@ export class StreamsModule {
    * Returns both successful results and per-id failures so one missing or
    * broken stream does not fail the whole fan-out. Order of `results` and
    * `failures` matches the input order.
+   *
+   * This is the per-stream path: it resolves each id to its contract address
+   * and runs one `simulateTransaction` per stream, so N ids cost N (plus
+   * address-resolution) round trips. Prefer {@link getStreamInfosBatched} when
+   * reading more than a couple of streams — it reads them all in a single RPC
+   * call.
    */
   async getStreamInfos(
     streamIds: (bigint | string)[],
@@ -820,6 +833,173 @@ export class StreamsModule {
         .filter((o) => !o.ok)
         .map((o) => ({ id: o.id, error: o.error })),
     };
+  }
+
+  /**
+   * Fetch full stream state for many stream IDs in a **single** RPC call
+   * (#904).
+   *
+   * {@link getStreamInfos} costs one `simulateTransaction` per stream, so
+   * rendering 20 rows issues 20 round trips and invites rate limiting.
+   * Soroban exposes `getLedgerEntries`, which accepts many keys at once, and
+   * the protocol stores everything needed in ledger entries that are directly
+   * addressable:
+   *
+   * - the factory maps `DataKey::StreamAddr(u64)` → stream contract address,
+   *   in **persistent** storage; and
+   * - each stream stores its entire `StreamInfo` struct under
+   *   `DataKey::Config` in **instance** storage, which is itself one ledger
+   *   entry per contract.
+   *
+   * So two key types per stream — address and state — read in one batched
+   * call replace N simulations. No contract call is executed and no signer is
+   * needed: this is a pure ledger read.
+   *
+   * The parsed shape is identical to {@link getStreamInfos} and
+   * {@link StreamsModule.get}, because both paths decode the same on-chain
+   * `StreamInfo` map through {@link parseStreamInfo}.
+   *
+   * Streams that do not exist (or whose address entry has expired) are
+   * reported in `failures` rather than throwing, matching
+   * {@link getStreamInfos}. Duplicate ids are collapsed; `results` follows
+   * first-seen input order.
+   *
+   * @param streamIds - Stream IDs to read, as `bigint` or decimal `string`.
+   * @param options - See {@link GetStreamInfosOptions}. `maxConcurrency` is
+   *   unused by this path (it issues one call) and is accepted only for
+   *   signature compatibility with {@link getStreamInfos}.
+   * @param signal - Abort signal; rejects with an `AbortError` if aborted.
+   * @returns Parsed `StreamInfo` for the ids that resolved, plus per-id
+   *   failures for the rest.
+   * @throws If the batched RPC call itself fails (network, rate limit, or a
+   *   malformed response). A single missing stream is not a throw.
+   *
+   * @example
+   * ```typescript
+   * const { ids } = await client.factory.streamsBySender(sender, 0, 50);
+   * const { results, failures } = await client.streams.getStreamInfosBatched(ids);
+   * ```
+   */
+  async getStreamInfosBatched(
+    streamIds: (bigint | string)[],
+    options: import("./types/index.js").GetStreamInfosOptions = {},
+    signal?: AbortSignal,
+  ): Promise<import("./types/index.js").GetStreamInfosResult> {
+    void options; // signature compatibility; one RPC call regardless
+    if (signal?.aborted) throw new DOMException("Aborted", "AbortError");
+
+    const factoryId = this.config.factoryAddress ?? "";
+    const ids: bigint[] = [];
+    const seen = new Set<string>();
+    for (const raw of streamIds) {
+      const id = BigInt(raw);
+      const key = id.toString();
+      if (!seen.has(key)) {
+        seen.add(key);
+        ids.push(id);
+      }
+    }
+
+    const empty: import("./types/index.js").GetStreamInfosResult = {
+      results: [],
+      failures: [],
+    };
+    // Without a factory address there is no address index to read, so nothing
+    // can be resolved. Report every id rather than silently returning [].
+    if (ids.length === 0) return empty;
+    if (!factoryId) {
+      return {
+        results: [],
+        failures: ids.map((id) => ({
+          id,
+          error:
+            "getStreamInfosBatched requires config.factoryAddress to resolve stream addresses",
+        })),
+      };
+    }
+
+    const server = this._server();
+    const response = await catchNetworkError(
+      "getLedgerEntries",
+      server.getLedgerEntries(
+        ...ids.map((id) => streamAddressLedgerKey(factoryId, id)),
+      ),
+    );
+
+    // The RPC omits keys it has no entry for, so map responses back by the
+    // stream id encoded in the key rather than by array position.
+    const addressById = new Map<string, string>();
+    for (const entry of response.entries ?? []) {
+      const id = streamIdFromAddressLedgerKey(entry.key);
+      if (id === undefined) continue;
+      // `LedgerEntryResult.val` is a `LedgerEntryData`; the stored value sits
+      // under its `contractData` arm.
+      if (entry.val.switch().name !== "contractData") continue;
+      // `contractData().val` is typed as an accessor method but is a plain
+      // property at runtime (see ledger-keys.ts).
+      const scVal = (entry.val.contractData() as unknown as { val: xdr.ScVal })
+        .val;
+      if (scVal.switch().name !== "scvAddress") continue;
+      addressById.set(id, Address.fromScVal(scVal).toString());
+    }
+
+    const missing: import("./types/index.js").GetStreamInfosFailure[] = [];
+    const found: Array<{ id: bigint; address: string }> = [];
+    for (const id of ids) {
+      const address = addressById.get(id.toString());
+      if (address) found.push({ id, address });
+      else missing.push({ id, error: `Stream ${id} not found` });
+    }
+
+    if (found.length === 0) return { results: [], failures: missing };
+
+    // Second half of the batch: every stream's instance storage in one call.
+    const stateResponse = await catchNetworkError(
+      "getLedgerEntries",
+      server.getLedgerEntries(
+        ...found.map((s) => contractInstanceLedgerKey(s.address)),
+      ),
+    );
+
+    // Instance entries come back keyed by contract address.
+    const instanceByAddress = new Map<string, xdr.LedgerEntryData>();
+    for (const entry of stateResponse.entries ?? []) {
+      const contractId = contractIdFromInstanceLedgerKey(entry.key);
+      if (contractId === undefined) continue;
+      instanceByAddress.set(contractId, entry.val);
+    }
+
+    const results: StreamInfo[] = [];
+    const failures: import("./types/index.js").GetStreamInfosFailure[] =
+      missing.slice();
+    for (const { id, address } of found) {
+      const instance = instanceByAddress.get(address);
+      if (!instance) {
+        failures.push({
+          id,
+          error: `Stream ${id} has no ledger entry (expired or never initialised)`,
+        });
+        continue;
+      }
+      const configVal = instanceConfigValue(instance);
+      if (!configVal) {
+        failures.push({
+          id,
+          error: `Stream ${id} ledger entry has no Config value`,
+        });
+        continue;
+      }
+      try {
+        results.push(parseStreamInfo(id, address, configVal));
+      } catch (err) {
+        failures.push({
+          id,
+          error: err instanceof Error ? err.message : String(err),
+        });
+      }
+    }
+
+    return { results, failures };
   }
 
   /** Get withdrawable balance - read-only, no transaction. */
