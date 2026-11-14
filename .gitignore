@@ -8,3 +8,4 @@ test-results/
 # Next.js example app build output
 examples/nextjs-app/.next/
 examples/nextjs-app/next-env.d.ts
+config.bat
