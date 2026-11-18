@@ -222,7 +222,7 @@ export type {
   ContractRole,
 } from "./constants.js";
 
-export { TokenModule } from "./token.js";
+export { TokenModule, formatTokenAmount as formatLocalizedTokenAmount } from "./token.js";
 
 // RPC server lifecycle
 export { getServer, clearServerCache, resolveFee } from "./soroban.js";
@@ -329,6 +329,7 @@ export {
   ProposalState,
   parseProposalState,
   formatProposalState,
+  isVotingActive,
 } from "./governor.js";
 export type {
   StreamHistoryEntry,
@@ -342,4 +343,5 @@ export type {
   GovernorProposal,
   ExecuteProposalResult,
   ExecuteProposalsOptions,
+  ProposalDetails,
 } from "./governor.js";
