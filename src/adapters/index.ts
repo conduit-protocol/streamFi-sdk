@@ -17,16 +17,22 @@ export {
   type WalletConnectAppMetadata,
   type WalletConnectSessionChange,
   type WalletConnectDisconnectEvent,
+  DEFAULT_WALLETCONNECT_PING_INTERVAL_MS,
+  DEFAULT_WALLETCONNECT_PING_TIMEOUT_MS,
+  DEFAULT_WALLETCONNECT_MAX_MISSED_PINGS,
 } from './walletconnect.js';
 export {
   FreighterWalletAdapter,
   DEFAULT_FREIGHTER_SIGN_TIMEOUT_MS,
+  DEFAULT_FREIGHTER_WATCH_INTERVAL_MS,
+  type FreighterWalletChange,
   type FreighterWalletAdapterOptions,
   type FreighterApi,
   type FreighterNetworkDetails,
 } from './freighter.js';
 export {
   AlbedoWalletAdapter,
+  resolveAlbedoNetwork,
   type AlbedoWalletAdapterOptions,
   type AlbedoApi,
   type AlbedoPublicKeyResult,
