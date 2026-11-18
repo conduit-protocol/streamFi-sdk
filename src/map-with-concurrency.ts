@@ -111,15 +111,25 @@ export interface AdaptiveConcurrencyOptions {
   /** Highest the limit may grow to. Default: {@link DEFAULT_LIST_CONCURRENCY}. */
   max?: number;
   /**
-   * A call slower than this many milliseconds counts as congestion and halves
-   * the limit. A faster call adds one slot. Default: 1000.
+   * When the moving-average latency is above this many milliseconds the
+   * endpoint counts as congested and the limit halves; otherwise each finished
+   * call adds one slot. Default: 1000.
    */
   targetLatencyMs?: number;
+  /**
+   * Weight given to the newest latency sample in the exponential moving
+   * average the limit reacts to (#1076), in `(0, 1]`. Lower values smooth out
+   * one-off slow calls; `1` reacts to every single sample. Default: 0.3.
+   */
+  latencySmoothing?: number;
+  /** Called with the new limit each time it changes. Useful for metrics. */
+  onLimitChange?: (limit: number, averageLatencyMs: number) => void;
 }
 
 const DEFAULT_ADAPTIVE_INITIAL = 2;
 const DEFAULT_ADAPTIVE_MIN = 1;
 const DEFAULT_ADAPTIVE_TARGET_LATENCY_MS = 1000;
+const DEFAULT_LATENCY_SMOOTHING = 0.3;
 
 function finiteOr(value: number | undefined, fallback: number): number {
   return value !== undefined && Number.isFinite(value) ? Math.trunc(value) : fallback;
@@ -127,10 +137,12 @@ function finiteOr(value: number | undefined, fallback: number): number {
 
 /**
  * Like {@link mapWithConcurrency}, but the in-flight limit adapts to measured
- * latency using AIMD (additive increase, multiplicative decrease). A call that
- * finishes within `targetLatencyMs` adds one slot, up to `max`. A slower call
- * halves the limit, down to `min`. Fast links ramp up, and an endpoint that
- * starts to slow down is backed off quickly.
+ * latency using AIMD (additive increase, multiplicative decrease). The signal
+ * is an exponential moving average of call latency (#1076), so one slow
+ * outlier doesn't collapse the window. While the average is within
+ * `targetLatencyMs` each finished call adds one slot, up to `max`; once it
+ * rises above, the limit halves, down to `min`. Fast links ramp up, and an
+ * endpoint that is genuinely slowing down is backed off quickly.
  *
  * Results keep input order and the first rejection propagates, matching
  * {@link mapWithConcurrency}.
@@ -144,9 +156,17 @@ export async function mapWithAdaptiveConcurrency<T, R>(
   const max = Math.max(min, finiteOr(options.max, DEFAULT_LIST_CONCURRENCY));
   const targetLatencyMs = finiteOr(options.targetLatencyMs, DEFAULT_ADAPTIVE_TARGET_LATENCY_MS);
   const initial = finiteOr(options.initial, DEFAULT_ADAPTIVE_INITIAL);
+  const smoothing =
+    options.latencySmoothing !== undefined &&
+    Number.isFinite(options.latencySmoothing) &&
+    options.latencySmoothing > 0 &&
+    options.latencySmoothing <= 1
+      ? options.latencySmoothing
+      : DEFAULT_LATENCY_SMOOTHING;
 
   const results = new Array<R>(items.length);
   let limit = Math.min(max, Math.max(min, initial));
+  let averageLatencyMs: number | undefined;
   let inFlight = 0;
   let index = 0;
   const waiters: Array<() => void> = [];
@@ -171,7 +191,18 @@ export async function mapWithAdaptiveConcurrency<T, R>(
       try {
         results[i] = await fn(items[i] as T);
         const elapsed = Date.now() - startedAt;
-        limit = elapsed > targetLatencyMs ? Math.max(min, Math.floor(limit / 2)) : Math.min(max, limit + 1);
+        averageLatencyMs =
+          averageLatencyMs === undefined
+            ? elapsed
+            : smoothing * elapsed + (1 - smoothing) * averageLatencyMs;
+        const next =
+          averageLatencyMs > targetLatencyMs
+            ? Math.max(min, Math.floor(limit / 2))
+            : Math.min(max, limit + 1);
+        if (next !== limit) {
+          limit = next;
+          options.onLimitChange?.(limit, averageLatencyMs);
+        }
       } finally {
         release();
       }

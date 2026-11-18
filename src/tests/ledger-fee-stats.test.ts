@@ -5,7 +5,7 @@
  */
 
 import { describe, it, expect, vi } from 'vitest';
-import { FeeEstimator } from '../fee-estimator.js';
+import { DEFAULT_FEE_CACHE_TTL_MS, FeeEstimator } from '../fee-estimator.js';
 
 const feeStats = (overrides: Record<string, unknown> = {}) => ({
   ok: true,
@@ -20,7 +20,7 @@ const feeStats = (overrides: Record<string, unknown> = {}) => ({
 describe('FeeEstimator.getLedgerFeeStats', () => {
   it('returns p75/p95 parsed as bigint stroops', async () => {
     const fetchMock = vi.fn().mockResolvedValue(feeStats());
-    const est = new FeeEstimator(100n, { fetch: fetchMock as never, horizonUrl: 'https://h.test/' });
+    const est = new FeeEstimator(100n, { fetch: fetchMock as never, horizonUrl: 'https://h.test/', feeMultiplier: 1 });
 
     const stats = await est.getLedgerFeeStats();
     expect(stats.p75).toBe(250n);
@@ -43,7 +43,7 @@ describe('FeeEstimator.getLedgerFeeStats', () => {
       status: 200,
       json: async () => ({ fee_charged: { mode: '150' } }),
     });
-    const est = new FeeEstimator(100n, { fetch: fetchMock as never });
+    const est = new FeeEstimator(100n, { fetch: fetchMock as never, feeMultiplier: 1 });
 
     const stats = await est.getLedgerFeeStats();
     expect(stats.p75).toBe(150n);
@@ -52,7 +52,7 @@ describe('FeeEstimator.getLedgerFeeStats', () => {
 
   it('caches within the TTL window — a second call does not refetch', async () => {
     const fetchMock = vi.fn().mockResolvedValue(feeStats());
-    const est = new FeeEstimator(100n, { fetch: fetchMock as never });
+    const est = new FeeEstimator(100n, { fetch: fetchMock as never, feeMultiplier: 1 });
 
     await est.getLedgerFeeStats();
     await est.getLedgerFeeStats();
@@ -65,7 +65,7 @@ describe('FeeEstimator.getLedgerFeeStats', () => {
     const fetchMock = vi.fn().mockImplementation(
       () => new Promise(resolve => { resolveFetch = resolve; }),
     );
-    const est = new FeeEstimator(100n, { fetch: fetchMock as never });
+    const est = new FeeEstimator(100n, { fetch: fetchMock as never, feeMultiplier: 1 });
 
     const first = est.getLedgerFeeStats();
     const second = est.getLedgerFeeStats();
@@ -79,7 +79,7 @@ describe('FeeEstimator.getLedgerFeeStats', () => {
   it('throws and reports the error when there is no prior successful fetch to fall back to', async () => {
     const onError = vi.fn();
     const fetchMock = vi.fn().mockResolvedValue({ ok: false, status: 503, json: async () => ({}) });
-    const est = new FeeEstimator(100n, { fetch: fetchMock as never });
+    const est = new FeeEstimator(100n, { fetch: fetchMock as never, feeMultiplier: 1 });
 
     await expect(est.getLedgerFeeStats({ onError })).rejects.toThrow();
     expect(onError).toHaveBeenCalled();
@@ -92,12 +92,12 @@ describe('FeeEstimator.getLedgerFeeStats', () => {
       const fetchMock = vi.fn()
         .mockResolvedValueOnce(feeStats())
         .mockResolvedValueOnce({ ok: false, status: 503, json: async () => ({}) });
-      const est = new FeeEstimator(100n, { fetch: fetchMock as never });
+      const est = new FeeEstimator(100n, { fetch: fetchMock as never, feeMultiplier: 1 });
 
       const first = await est.getLedgerFeeStats();
       expect(first.p75).toBe(250n);
 
-      vi.advanceTimersByTime(3_001); // past the 3s internal cache TTL
+      vi.advanceTimersByTime(DEFAULT_FEE_CACHE_TTL_MS + 1); // past the default cache TTL
 
       const second = await est.getLedgerFeeStats({ onError });
       expect(second).toEqual(first);
