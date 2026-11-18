@@ -159,6 +159,43 @@ export enum StreamScheduleType {
   ExponentialDecay = 2,
 }
 
+// ── Stream schedule configuration (#1097) ────────────────────────────────────
+// A discriminated union replacing loose, unvalidated schedule option objects.
+// All times are Unix timestamps in seconds. Validate with
+// `validateStreamSchedule` (src/schedule.ts) before building a transaction.
+
+/** Funds vest at a constant rate from `startTime` to `endTime`. */
+export interface LinearSchedule {
+  kind: "linear";
+  startTime: number;
+  endTime: number;
+}
+
+/**
+ * Nothing vests before `cliffTime`; at the cliff everything accrued since
+ * `startTime` unlocks, then vesting continues linearly until `endTime`.
+ */
+export interface CliffSchedule {
+  kind: "cliff";
+  startTime: number;
+  cliffTime: number;
+  endTime: number;
+}
+
+/**
+ * Funds unlock in `steps` equal tranches, one every `stepDurationSeconds`,
+ * starting at `startTime + stepDurationSeconds`.
+ */
+export interface SteppedSchedule {
+  kind: "stepped";
+  startTime: number;
+  stepDurationSeconds: number;
+  steps: number;
+}
+
+/** Vesting schedule for a stream: linear, cliff, or stepped. */
+export type StreamScheduleConfig = LinearSchedule | CliffSchedule | SteppedSchedule;
+
 export interface ConduitConfig {
   /** Network to connect to */
   network: Network;

@@ -17,6 +17,9 @@ import {
   Memo,
   xdr,
   BASE_FEE,
+  StrKey,
+  scValToNative,
+  FeeBumpTransaction,
 } from "@stellar/stellar-sdk";
 import type { Network } from "./types/index.js";
 import type { Signer } from "./signer.js";
@@ -379,6 +382,41 @@ export async function waitForConfirmation(
  * {@link RpcServiceUnavailableError} so callers can fail over to a
  * different RPC URL instead of retrying a node that is down. See #456.
  */
+/**
+ * Idempotent RPC methods (#1100). Besides HTTP 429, these are also retried on
+ * transport failures (connection reset, DNS, timeout, ...), since repeating a
+ * read can't change chain state. `sendTransaction` and anything else not
+ * listed keeps the 429-only policy. A 503 is never retried (see #456).
+ * `getAccount` is deliberately absent: `getAccountWithFallback` already falls
+ * back to Horizon on a transport failure, and retrying first would only delay
+ * that fallback.
+ */
+export const IDEMPOTENT_RPC_METHODS: ReadonlySet<string> = new Set([
+  "getHealth",
+  "getNetwork",
+  "getLatestLedger",
+  "getLedgerEntries",
+  "getTransaction",
+  "getTransactions",
+  "getEvents",
+  "getContractData",
+  "getFeeStats",
+  "getVersionInfo",
+  "simulateTransaction",
+]);
+
+/**
+ * Retry predicate for idempotent reads: a rate limit, or an error that is
+ * provably a transport failure (the same signals {@link catchNetworkError}
+ * uses). Anything else, including a 503, is surfaced immediately.
+ */
+export function isRetryableReadError(err: unknown): boolean {
+  if (err instanceof RateLimitError || err instanceof StreamFiNetworkError) return true;
+  if (err instanceof RpcServiceUnavailableError) return false;
+  if (err instanceof TypeError && NETWORK_TYPE_ERROR_MESSAGES.has(err.message)) return true;
+  return hasNetworkErrorCode(err);
+}
+
 export function createRpcServer(rpcUrl: string): SorobanRpc.Server {
   const cached = _proxiedServerCache.get(rpcUrl);
   if (cached) return cached;
@@ -407,6 +445,9 @@ export function createRpcServer(rpcUrl: string): SorobanRpc.Server {
               baseDelayMs: 500,
               backoffFactor: 2,
               circuitScope: rpcUrl,
+              ...(IDEMPOTENT_RPC_METHODS.has(propKey)
+                ? { shouldRetry: isRetryableReadError }
+                : {}),
             },
           )
             .then((result) => {
@@ -698,6 +739,160 @@ export async function simulateReadOnly(
     throw new Error("Simulation returned no result");
   }
   return xdr.ScVal.fromXDR(result.result.retval.toXDR());
+}
+
+// ── Diagnostic event decoding (#1098) ────────────────────────────────────────
+
+function renderScVal(val: xdr.ScVal): string {
+  try {
+    const native: unknown = scValToNative(val);
+    if (typeof native === "string") return native;
+    return JSON.stringify(native, (_key, value: unknown) =>
+      typeof value === "bigint" ? value.toString() : value,
+    );
+  } catch {
+    // e.g. scvError, which has no native JS form
+    return val.switch().name;
+  }
+}
+
+function formatDiagnosticEvent(event: xdr.DiagnosticEvent): string {
+  const contractEvent = event.event();
+  const contractId = contractEvent.contractId();
+  const source = contractId ? StrKey.encodeContract(contractId) : "host";
+  const v0 = contractEvent.body().v0();
+  const topics = v0.topics().map(renderScVal);
+  const failed = event.inSuccessfulContractCall() ? "" : " (in failed call)";
+  return `${source}${failed}: [${topics.join(", ")}] ${renderScVal(v0.data())}`;
+}
+
+/**
+ * Decode the diagnostic events of a simulation response into readable lines,
+ * one per event: `<contract or "host">: [topics] data`, e.g.
+ * `host (in failed call): [error, Error(Contract, #10)] "insufficient allowance"`.
+ *
+ * Accepts both parsed `xdr.DiagnosticEvent`s and raw base64 strings. For a
+ * failed simulation the RPC error string comes first (`error: ...`), so the
+ * returned lines explain why the transaction would fail. An event that can't
+ * be decoded becomes `<undecodable diagnostic event>` rather than throwing.
+ */
+export function decodeDiagnosticEvents(
+  simulationResponse: SorobanRpc.Api.SimulateTransactionResponse,
+): string[] {
+  const lines: string[] = [];
+  if (SorobanRpc.Api.isSimulationError(simulationResponse) && simulationResponse.error) {
+    lines.push(`error: ${simulationResponse.error}`);
+  }
+
+  const events =
+    (simulationResponse as unknown as { events?: Array<xdr.DiagnosticEvent | string> })
+      .events ?? [];
+  for (const entry of events) {
+    try {
+      const event =
+        typeof entry === "string" ? xdr.DiagnosticEvent.fromXDR(entry, "base64") : entry;
+      lines.push(formatDiagnosticEvent(event));
+    } catch {
+      lines.push("<undecodable diagnostic event>");
+    }
+  }
+  return lines;
+}
+
+// ── Pre-signed transaction submission (#1099) ────────────────────────────────
+
+/** Lifecycle of a pre-signed transaction submitted with {@link submitSignedTransaction}. */
+export type SignedTransactionStatus = "submitted" | "success" | "failed" | "pending";
+
+export interface SubmitSignedTransactionOptions extends ConfirmationPollingOptions {
+  /** Abort status polling; the promise rejects with an `AbortError`. */
+  signal?: AbortSignal | undefined;
+  /** Called on every status transition: `submitted`, then a terminal status. */
+  onStatus?: (status: SignedTransactionStatus, hash: string) => void;
+}
+
+export interface SignedTransactionResult {
+  hash: string;
+  /** `pending` when polling ran out (or errored) before a terminal status. */
+  status: Exclude<SignedTransactionStatus, "submitted">;
+  /** The contract call's return value, for a successful invocation. */
+  returnValue?: xdr.ScVal | undefined;
+}
+
+/**
+ * Submit a transaction that was signed elsewhere (multi-party or offline
+ * signing) and track it to a terminal status.
+ *
+ * `signedXdr` is the base64 envelope of a fully signed `Transaction` or
+ * `FeeBumpTransaction`; it must already carry at least one signature. The SDK
+ * does not sign or modify it. A `DUPLICATE` response (the network already has
+ * it) is tracked like a fresh submission. A rejected transaction throws.
+ * Unlike {@link invokeContract}, a `FAILED` transaction resolves with
+ * `status: "failed"` rather than throwing, so callers can inspect the hash;
+ * set `strict` to turn a polling timeout into a {@link ConfirmationTimeoutError}.
+ */
+export async function submitSignedTransaction(
+  rpcUrl: string,
+  passphrase: string,
+  signedXdr: string,
+  options: SubmitSignedTransactionOptions = {},
+): Promise<SignedTransactionResult> {
+  let tx: Transaction | FeeBumpTransaction;
+  try {
+    tx = TransactionBuilder.fromXDR(signedXdr, passphrase);
+  } catch (err) {
+    throw new Error(
+      `Invalid signed transaction XDR: ${err instanceof Error ? err.message : String(err)}`,
+    );
+  }
+  if (tx.signatures.length === 0) {
+    throw new Error("Transaction has no signatures; sign it before submitting");
+  }
+
+  const server = createRpcServer(rpcUrl);
+  const polling = normalizePollingOptions(options);
+
+  let sent;
+  try {
+    sent = await catchNetworkError("sendTransaction", server.sendTransaction(tx));
+  } catch (err) {
+    throw RateLimitError.fromRpcError(err) ?? err;
+  }
+  if (sent.status === "ERROR") {
+    throw new Error(`Transaction rejected: ${JSON.stringify(sent.errorResult)}`);
+  }
+  if (sent.status === "TRY_AGAIN_LATER") {
+    throw new Error(`Transaction not accepted, try again later: ${sent.hash}`);
+  }
+
+  const hash = sent.hash;
+  options.onStatus?.("submitted", hash);
+
+  const outcome = await pollForConfirmation(server, hash, {
+    pollIntervalMs: polling.pollIntervalMs,
+    maxAttempts: polling.maxAttempts,
+    signal: options.signal,
+  });
+
+  let result: SignedTransactionResult;
+  switch (outcome.kind) {
+    case "success":
+      result = { hash, status: "success", returnValue: outcome.returnValue };
+      break;
+    case "failed":
+      result = { hash, status: "failed" };
+      break;
+    case "timeout":
+    case "poll-error":
+      if (polling.strict) {
+        const attempts = outcome.kind === "timeout" ? outcome.attempts : outcome.attempt;
+        throw new ConfirmationTimeoutError(hash, attempts, attempts * polling.pollIntervalMs);
+      }
+      result = { hash, status: "pending" };
+      break;
+  }
+  options.onStatus?.(result.status, hash);
+  return result;
 }
 
 // ── Token decimals cache ─────────────────────────────────────────────────────

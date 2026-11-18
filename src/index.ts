@@ -244,6 +244,13 @@ export {
 } from "./soroban.js";
 export { getLatestLedgerInfo, clearLedgerInfoCache } from "./soroban.js";
 export type { LedgerInfo } from "./soroban.js";
+export { decodeDiagnosticEvents, submitSignedTransaction } from "./soroban.js";
+export type {
+  SignedTransactionStatus,
+  SignedTransactionResult,
+  SubmitSignedTransactionOptions,
+} from "./soroban.js";
+export { validateStreamSchedule, scheduleEndTime, InvalidScheduleError } from "./schedule.js";
 export {
   getCircuitState,
   recordSuccess,
