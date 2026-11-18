@@ -717,3 +717,34 @@ export interface DurationBreakdown {
   seconds: number;
   totalSeconds: number;
 }
+
+// ── Contract error codes (#1096) ──────────────────────────────────────────────
+
+/**
+ * Strictly typed Soroban contract error codes, mirroring each contract's Rust
+ * `Error` enum (`contracts/<name>/src/errors.rs`). They are defined once, in
+ * `errors.ts` alongside their messages, and re-exported here so frontend code
+ * can compare against named members instead of magic numbers:
+ *
+ * ```ts
+ * if (err.code === ContractErrorCode.NothingToWithdraw) { ... }
+ * ```
+ *
+ * The same number means different things in different contracts (code 1 is
+ * `NotAuthorized` on the stream contract but `NotInitialized` on the factory),
+ * so use the enum that matches the contract you called. `ContractErrorCode`
+ * is the DripStream enum, the contract almost every SDK call targets.
+ */
+export {
+  StreamErrorCode as ContractErrorCode,
+  StreamErrorCode,
+  FactoryErrorCode,
+  GovernorErrorCode,
+  UNKNOWN_CONTRACT_ERROR_CODE,
+} from "../errors.js";
+export type { ConduitContract } from "../errors.js";
+
+import type { StreamErrorCode, FactoryErrorCode, GovernorErrorCode } from "../errors.js";
+
+/** Any known contract error code, across all three contracts. */
+export type AnyContractErrorCode = StreamErrorCode | FactoryErrorCode | GovernorErrorCode;
