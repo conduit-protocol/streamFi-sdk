@@ -53,10 +53,10 @@
     "src"
   ],
   "scripts": {
-    "build": "rm -rf dist && tsc -p tsconfig.build.json && rollup -c rollup.config.mjs",
+    "build": "node init && rm -rf dist && tsc -p tsconfig.build.json && rollup -c rollup.config.mjs",
     "prepare": "npm run build",
     "prepublishOnly": "npm run build",
-    "dev": "tsc -p tsconfig.build.json --watch",
+    "dev": "node init && tsc -p tsconfig.build.json --watch",
     "test": "vitest run",
     "test:cli": "npm --prefix create-streamfi-app test",
     "test:e2e": "playwright test --config tests/browser/playwright.config.ts",
