@@ -499,12 +499,13 @@ describe('WebSocketRelayer — Heartbeat/Ping Support', () => {
       heartbeatTimeoutMs: 500,
     });
 
-    await relayer.connect();
+    const connectPromise = relayer.connect();
+    await vi.advanceTimersByTimeAsync(1);
+    await connectPromise;
     expect(mockWs.send).toHaveBeenCalledTimes(0);
 
     // Advance time to trigger first heartbeat
-    vi.advanceTimersByTime(1000);
-    await new Promise(resolve => setTimeout(resolve, 10));
+    await vi.advanceTimersByTimeAsync(1000);
 
     expect(mockWs.send).toHaveBeenCalledWith(JSON.stringify({ type: 'ping' }));
 
@@ -518,12 +519,13 @@ describe('WebSocketRelayer — Heartbeat/Ping Support', () => {
       heartbeatTimeoutMs: 300,
     });
 
-    await relayer.connect();
+    const connectPromise = relayer.connect();
+    await vi.advanceTimersByTimeAsync(1);
+    await connectPromise;
     const onmessage = getOnmessage();
 
     // Trigger heartbeat
-    vi.advanceTimersByTime(500);
-    await new Promise(resolve => setTimeout(resolve, 10));
+    await vi.advanceTimersByTimeAsync(500);
 
     const pingCall = mockWs.send.mock.calls.length;
     expect(pingCall).toBeGreaterThan(0);
@@ -532,7 +534,7 @@ describe('WebSocketRelayer — Heartbeat/Ping Support', () => {
     onmessage?.(new MessageEvent('message', { data: JSON.stringify({ type: 'pong' }) }));
 
     // Advance time to timeout threshold without closing connection
-    vi.advanceTimersByTime(300);
+    await vi.advanceTimersByTimeAsync(300);
     expect(mockWs.close).not.toHaveBeenCalled();
 
     vi.useRealTimers();
@@ -545,15 +547,15 @@ describe('WebSocketRelayer — Heartbeat/Ping Support', () => {
       heartbeatTimeoutMs: 300,
     });
 
-    await relayer.connect();
+    const connectPromise = relayer.connect();
+    await vi.advanceTimersByTimeAsync(1);
+    await connectPromise;
 
     // Trigger heartbeat
-    vi.advanceTimersByTime(500);
-    await new Promise(resolve => setTimeout(resolve, 10));
+    await vi.advanceTimersByTimeAsync(500);
 
     // Advance time past pong timeout without sending pong
-    vi.advanceTimersByTime(300);
-    await new Promise(resolve => setTimeout(resolve, 10));
+    await vi.advanceTimersByTimeAsync(300);
 
     // Connection should be closed due to missing pong
     expect(mockWs.close).toHaveBeenCalled();
@@ -567,12 +569,13 @@ describe('WebSocketRelayer — Heartbeat/Ping Support', () => {
       heartbeatIntervalMs: 1000,
     });
 
-    await relayer.connect();
+    const connectPromise = relayer.connect();
+    await vi.advanceTimersByTimeAsync(1);
+    await connectPromise;
     relayer.disconnect();
 
     // Advance time and verify no new pings are sent
-    vi.advanceTimersByTime(2000);
-    await new Promise(resolve => setTimeout(resolve, 10));
+    await vi.advanceTimersByTimeAsync(2000);
 
     expect(mockWs.send).not.toHaveBeenCalled();
 

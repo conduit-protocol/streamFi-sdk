@@ -29,7 +29,16 @@ export interface WebSocketRelayerOptions {
   reconnectDelayMs?: number;
   maxReconnectDelayMs?: number;
   onStateChange?: StateChangeHandler;
+  /**
+   * Interval in milliseconds between periodic ping keepalive messages to prevent
+   * silent socket dropouts by intermediate firewalls and NAT gateways (#920).
+   * Defaults to 30,000 ms (30 seconds). Set to 0 to disable.
+   */
   heartbeatIntervalMs?: number;
+  /**
+   * Maximum milliseconds to wait for a pong response before declaring the socket dead
+   * and reconnecting (#920). Defaults to 5,000 ms (5 seconds).
+   */
   heartbeatTimeoutMs?: number;
   /**
    * Maximum milliseconds a message may sit in the offline buffer before it is
