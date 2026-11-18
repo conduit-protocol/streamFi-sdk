@@ -121,4 +121,19 @@ describe('KeypairWalletAdapter', () => {
     adapter.destroy();
     expect(adapter.isDestroyed).toBe(true);
   });
+
+  it('wipe() zeroes the secret key and blocks further signing (#1081)', async () => {
+    const keypair = Keypair.random();
+    const secretKey = (keypair as unknown as Record<string, unknown>)._secretKey as Uint8Array;
+    const adapter = new KeypairWalletAdapter(keypair);
+    const tx = buildUnsignedTx(keypair);
+
+    adapter.wipe();
+
+    expect(secretKey.every((byte) => byte === 0)).toBe(true);
+    expect(adapter.isDestroyed).toBe(true);
+    await expect(adapter.signTransaction(tx)).rejects.toThrow(/has been destroyed/);
+    expect(() => adapter.exportKeystore('pw')).toThrow(/has been destroyed/);
+    expect(() => adapter.wipe()).not.toThrow();
+  });
 });

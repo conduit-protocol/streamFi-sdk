@@ -264,7 +264,13 @@ export {
   formatTimestamp,
   exportTransactionsToCsv,
   exportTransactionsToJson,
+  createTransactionHistoryPager,
   type ExportTransactionsOptions,
+  type StreamTransaction,
+  type RawTransactionPage,
+  type TransactionPageFetcher,
+  type TransactionHistoryPage,
+  type TransactionHistoryPager,
 } from "./dashboard/transaction-history.js";
 
 export { Module36 } from "./module36.js";
