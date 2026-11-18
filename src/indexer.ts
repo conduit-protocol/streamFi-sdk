@@ -66,7 +66,24 @@ export interface GraphQLSubscriptionOptions {
    * the connection is dead and triggering a reconnect. Defaults to 5_000ms.
    */
   heartbeatTimeoutMs?: number;
+  /**
+   * When the WebSocket cannot be re-established after `maxReconnectAttempts`,
+   * keep the subscription alive by polling the endpoint over HTTP instead of
+   * tearing it down (#1089). Defaults to `true`; set `false` to restore the
+   * previous behaviour (report the error and unsubscribe).
+   */
+  pollingFallback?: boolean;
+  /** Interval (ms) between HTTP polls once in polling fallback. Default 10_000. */
+  pollingIntervalMs?: number;
+  /**
+   * Query sent on each poll. Defaults to the subscription document with its
+   * leading `subscription` keyword replaced by `query`.
+   */
+  pollingQuery?: string;
 }
+
+/** Default interval for {@link GraphQLSubscriptionOptions.pollingIntervalMs}. */
+export const DEFAULT_SUBSCRIPTION_POLLING_INTERVAL_MS = 10_000;
 
 export interface IndexerSubscription {
   unsubscribe: () => void;
@@ -190,6 +207,22 @@ export interface FetchStreamsBySenderOptions
   afterCursor?: string;
   /** Return items before this cursor (a previous page's `pageInfo.startCursor`). */
   beforeCursor?: string;
+}
+
+/**
+ * Stream lifecycle filter for {@link GraphQLIndexer.streamsByRecipient} (#1090).
+ * `active` streams are still vesting or withdrawable; `completed` streams have
+ * ended or been cancelled; `all` (the default) applies no filter.
+ */
+export type StreamStatusFilter = 'active' | 'completed' | 'all';
+
+const STREAM_STATUS_FILTERS: readonly StreamStatusFilter[] = ['active', 'completed', 'all'];
+
+/** Options for {@link GraphQLIndexer.streamsByRecipient}. */
+export interface StreamsByRecipientOptions
+  extends Omit<GraphQLQueryOptions, 'query' | 'variables'> {
+  /** Restrict results to active or completed streams. Default `'all'`. */
+  status?: StreamStatusFilter;
 }
 
 function decodePageInfo(raw: unknown): IndexerPageInfo {
@@ -606,6 +639,16 @@ export class GraphQLIndexer {
       600_000,
       'heartbeatTimeoutMs',
     );
+    const pollingIntervalMs = this.parseBoundedInt(
+      options.pollingIntervalMs,
+      DEFAULT_SUBSCRIPTION_POLLING_INTERVAL_MS,
+      100,
+      600_000,
+      'pollingIntervalMs',
+    );
+    const pollingFallback = options.pollingFallback !== false;
+    const pollingQuery =
+      options.pollingQuery ?? options.query.replace(/^\s*subscription\b/, 'query');
 
     let unsubscribed = false;
     const subId = `sub_${++this.subCounter}_${Date.now()}`;
@@ -617,6 +660,44 @@ export class GraphQLIndexer {
     let heartbeatInterval: ReturnType<typeof setInterval> | null = null;
     let heartbeatTimeout: ReturnType<typeof setTimeout> | null = null;
     let awaitingPong = false;
+    let polling = false;
+    let pollTimer: ReturnType<typeof setTimeout> | null = null;
+
+    /**
+     * WebSocket is unrecoverable: poll the endpoint over HTTP every
+     * `pollingIntervalMs` and feed each result to `onData`, so dashboards stay
+     * fresh behind proxies or firewalls that block WebSocket upgrades (#1089).
+     * The next poll is scheduled only after the previous one settles, so a slow
+     * indexer never has overlapping requests in flight.
+     */
+    const startPolling = (): void => {
+      if (polling || unsubscribed || this.isDestroyed) return;
+      polling = true;
+      const poll = (): void => {
+        pollTimer = null;
+        if (unsubscribed || this.isDestroyed) return;
+        abortController = typeof AbortController !== 'undefined' ? new AbortController() : null;
+        const pollOptions: GraphQLQueryOptions = { query: pollingQuery, variables };
+        if (options.headers) pollOptions.headers = options.headers;
+        if (abortController) pollOptions.signal = abortController.signal;
+        this.query(pollOptions)
+          .then((data) => {
+            if (!unsubscribed && !this.isDestroyed) options.onData(data);
+          })
+          .catch((err: unknown) => {
+            const isAbort = err instanceof Error && err.name === 'AbortError';
+            if (!unsubscribed && !this.isDestroyed && !isAbort) {
+              this.handleError(options.onError, err);
+            }
+          })
+          .finally(() => {
+            if (!unsubscribed && !this.isDestroyed) {
+              pollTimer = setTimeout(poll, pollingIntervalMs);
+            }
+          });
+      };
+      poll();
+    };
 
     const clearReconnectTimer = (): void => {
       if (reconnectTimer !== null) {
@@ -650,12 +731,16 @@ export class GraphQLIndexer {
     const scheduleReconnect = (): void => {
       if (unsubscribed || this.isDestroyed) return;
       if (reconnectAttempts >= maxReconnectAttempts) {
-        this.handleError(
-          options.onError,
-          new Error(
-            `GraphQL subscription WebSocket closed on ${this.endpoint} after ${maxReconnectAttempts} reconnect attempts exhausted`,
-          ),
-        );
+        const exhausted = `GraphQL subscription WebSocket closed on ${this.endpoint} after ${maxReconnectAttempts} reconnect attempts exhausted`;
+        if (pollingFallback) {
+          this.handleError(
+            options.onError,
+            new Error(`${exhausted}; falling back to HTTP polling every ${pollingIntervalMs}ms`),
+          );
+          startPolling();
+          return;
+        }
+        this.handleError(options.onError, new Error(exhausted));
         subscription.unsubscribe();
         return;
       }
@@ -728,6 +813,10 @@ export class GraphQLIndexer {
         unsubscribed = true;
         clearReconnectTimer();
         stopHeartbeat();
+        if (pollTimer !== null) {
+          clearTimeout(pollTimer);
+          pollTimer = null;
+        }
 
         if (ws) {
           try {
@@ -1148,11 +1237,22 @@ export class GraphQLIndexer {
    */
   async streamsByRecipient<T = unknown>(
     recipientAddress: string,
-    options?: Omit<GraphQLQueryOptions, 'query' | 'variables'>,
+    options: StreamsByRecipientOptions = {},
   ): Promise<T> {
+    const { status = 'all', ...queryOptions } = options;
+    if (!STREAM_STATUS_FILTERS.includes(status)) {
+      throw new Error(
+        `streamsByRecipient: status must be one of ${STREAM_STATUS_FILTERS.join(', ')}`,
+      );
+    }
+    // Only send `status` when it narrows the result, so the default request
+    // is unchanged for indexers that predate the argument (#1090).
+    const filtered = status !== 'all';
+    const variables: Record<string, unknown> = { recipient: recipientAddress };
+    if (filtered) variables.status = status;
     const query = `
-      query StreamsByRecipient($recipient: String!) {
-        streamsByRecipient(recipient: $recipient) {
+      query StreamsByRecipient($recipient: String!${filtered ? ', $status: String' : ''}) {
+        streamsByRecipient(recipient: $recipient${filtered ? ', status: $status' : ''}) {
           items {
             id
             sender
@@ -1176,9 +1276,9 @@ export class GraphQLIndexer {
       }
     `;
     return this.query<T>({
-      ...options,
+      ...queryOptions,
       query,
-      variables: { recipient: recipientAddress },
+      variables,
     });
   }
 

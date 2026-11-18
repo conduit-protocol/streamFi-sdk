@@ -48,6 +48,7 @@ export {
   GraphQLIndexer,
   DEFAULT_INDEXER_TIMEOUT_MS,
   DEFAULT_INDEXER_MAX_PAGES,
+  DEFAULT_SUBSCRIPTION_POLLING_INTERVAL_MS,
   LedgerGapDetector,
 } from "./indexer.js";
 export {
@@ -73,6 +74,8 @@ export type {
   IndexerPage,
   IndexerPageInfo,
   FetchStreamsBySenderOptions,
+  StreamsByRecipientOptions,
+  StreamStatusFilter,
 } from "./indexer.js";
 export {
   withSignatureTimeout,
