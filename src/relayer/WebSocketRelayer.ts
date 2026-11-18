@@ -45,6 +45,13 @@ export interface WebSocketRelayerOptions {
    * silently dropped on the next flush. `0` (default) disables TTL expiry.
    */
   offlineBufferTtlMs?: number;
+  /**
+   * Number of recently processed inbound message `id`s remembered so a
+   * message re-delivered after a reconnect is dispatched to handlers only
+   * once (#1056). Oldest ids are evicted first (LRU). Messages without an
+   * `id` are never deduplicated. Defaults to 1,000; set to 0 to disable.
+   */
+  dedupeWindowSize?: number;
 }
 
 export class WebSocketRelayer {
@@ -71,6 +78,9 @@ export class WebSocketRelayer {
   private heartbeatInterval: ReturnType<typeof setInterval> | null = null;
   private heartbeatTimeout: ReturnType<typeof setTimeout> | null = null;
   private awaitingPong = false;
+  private dedupeWindowSize: number;
+  /** Insertion-ordered set of recently processed message ids (#1056). */
+  private seenMessageIds: Map<string, true> = new Map();
 
   constructor(url: string, options?: WebSocketRelayerOptions) {
     this.url = url;
@@ -81,6 +91,7 @@ export class WebSocketRelayer {
     this.offlineBufferTtlMs = options?.offlineBufferTtlMs ?? 0;
     this.heartbeatIntervalMs = options?.heartbeatIntervalMs ?? 30_000;
     this.heartbeatTimeoutMs = options?.heartbeatTimeoutMs ?? 5_000;
+    this.dedupeWindowSize = Math.max(0, Math.floor(options?.dedupeWindowSize ?? 1000));
     if (options?.onStateChange) {
       this.stateChangeHandlers.add(options.onStateChange);
     }
@@ -290,12 +301,37 @@ export class WebSocketRelayer {
       return;
     }
 
+    if (this.isDuplicateMessage(parsed)) return;
+
     const typeHandlers = this.handlers.get(parsed.type);
     if (!typeHandlers) return;
 
     for (const handler of typeHandlers) {
       this.safeInvokeHandler(handler, parsed);
     }
+  }
+
+  /**
+   * True when `msg.id` was already processed within the dedupe window (#1056).
+   * Otherwise records the id, evicting the oldest once the window is full.
+   */
+  private isDuplicateMessage(msg: WebSocketMessage): boolean {
+    if (this.dedupeWindowSize === 0) return false;
+    if (typeof msg.id !== 'string' || msg.id === '') return false;
+
+    if (this.seenMessageIds.has(msg.id)) {
+      // Refresh recency so a message that keeps being re-sent stays remembered.
+      this.seenMessageIds.delete(msg.id);
+      this.seenMessageIds.set(msg.id, true);
+      return true;
+    }
+
+    this.seenMessageIds.set(msg.id, true);
+    if (this.seenMessageIds.size > this.dedupeWindowSize) {
+      const oldest = this.seenMessageIds.keys().next().value;
+      if (oldest !== undefined) this.seenMessageIds.delete(oldest);
+    }
+    return false;
   }
 
   private startHeartbeat(): void {
@@ -405,6 +441,17 @@ export class WebSocketRelayer {
     );
   }
 
+  /**
+   * Full-jitter exponential backoff (#1055): a uniformly random delay in
+   * `[0, min(maxDelay, baseDelay * 2 ** (attempt - 1)))`. Spreading clients
+   * across the whole window — rather than the previous 50–100% band — keeps
+   * a fleet reconnecting after a relayer restart from arriving in lockstep.
+   */
+  private reconnectDelayFor(attempt: number): number {
+    const cap = Math.min(this.maxReconnectDelayMs, this.reconnectDelayMs * 2 ** (attempt - 1));
+    return Math.floor(Math.random() * cap);
+  }
+
   private async attemptReconnect(): Promise<void> {
     if (!this.shouldAttemptReconnect()) {
       if (this.isPermanentlyDown()) {
@@ -426,10 +473,7 @@ export class WebSocketRelayer {
 
       this.reconnectAttempts++;
       this.emitStateChange('reconnecting');
-      const delay = Math.min(
-        this.maxReconnectDelayMs,
-        this.reconnectDelayMs * 2 ** (this.reconnectAttempts - 1),
-      ) * (0.5 + Math.random() * 0.5);
+      const delay = this.reconnectDelayFor(this.reconnectAttempts);
       await new Promise((r) => setTimeout(r, delay));
       // disconnect()/destroy() can land during the backoff delay; bail before
       // opening another socket if reconnection was cancelled meanwhile (#619).
@@ -569,6 +613,7 @@ export class WebSocketRelayer {
     this.emitStateChange('destroyed');
     this.handlers.clear();
     this.stateChangeHandlers.clear();
+    this.seenMessageIds.clear();
     this.lockQueue = [];
     this.isLocked = false;
   }

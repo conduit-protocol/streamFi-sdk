@@ -176,10 +176,13 @@ export {
   ErrorMapper,
   DEFAULT_ERROR_MESSAGE_TYPE_MAP,
   extractDiagnosticMessage,
+  describeContractError,
+  humanizeContractRevert,
 } from "./relayer/ErrorMapper.js";
 export type {
   MappedErrorHandler,
   ErrorMessageTypeMap,
+  DescribedContractError,
 } from "./relayer/ErrorMapper.js";
 
 // Utils are exported via the /utils subpath export, but also available here
