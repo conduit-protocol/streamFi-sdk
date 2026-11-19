@@ -5,6 +5,12 @@ import { StreamFiProvider, useClawbackStreamMutation } from '../index.js';
 const mockClawback = vi.fn();
 
 vi.mock('@conduit-protocol/sdk', () => ({
+  // `StreamFiProvider` reads these at module scope, so a mock that only stubs
+  // `ConduitClient` makes every render throw "No SUPPORTED_NETWORKS export".
+  SUPPORTED_NETWORKS: ['mainnet', 'testnet', 'local'],
+  UnsupportedChainError: class UnsupportedChainError extends Error {},
+  clearServerCache: () => {},
+  clearTokenDecimalsCache: () => {},
   ConduitClient: vi.fn(function () {
     return { streams: { clawback: mockClawback } };
   }),

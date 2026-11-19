@@ -254,13 +254,17 @@ describe('Issue #989 - useResumeStream pre-submit validation', () => {
   });
 
   it('still submits resume when the stream has not loaded, since its state cannot be known', async () => {
+    // A never-resolving `get` models "the snapshot has not arrived yet". The
+    // assertion is that the transaction is still submitted, so do not await
+    // `resume()`: it settles only after the post-submit refresh, which by
+    // construction never resolves here.
     mockGet.mockReturnValue(new Promise(() => {}));
     const { result } = renderHook(() => useResumeStream(7n), { wrapper });
 
-    await act(async () => {
-      await result.current.resume();
+    void act(() => {
+      void result.current.resume();
     });
 
-    expect(mockResume).toHaveBeenCalledWith(7n);
+    await waitFor(() => expect(mockResume).toHaveBeenCalledWith(7n));
   });
 });

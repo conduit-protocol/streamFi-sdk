@@ -22,6 +22,12 @@ vi.mock('../context/useStreamFiClient.js', () => ({
 }));
 
 vi.mock('@conduit-protocol/sdk', () => ({
+  // `StreamFiProvider` reads these at module scope, so a partial mock makes
+  // every render throw "No SUPPORTED_NETWORKS export".
+  SUPPORTED_NETWORKS: ['mainnet', 'testnet', 'local'],
+  UnsupportedChainError: class UnsupportedChainError extends Error {},
+  clearServerCache: () => {},
+  clearTokenDecimalsCache: () => {},
   InsufficientBalanceError: class InsufficientBalanceError extends Error {},
 }));
 

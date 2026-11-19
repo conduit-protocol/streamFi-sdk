@@ -54,10 +54,15 @@ async function loadNotesIndexedDB(): Promise<Record<string, StreamNote>> {
       }),
     ]);
     for (let i = 0; i < keys.length; i++) {
+      const key = keys[i];
+      const value = values[i];
+      // `noUncheckedIndexedAccess` widens both to `string | undefined`; a key
+      // without a value cannot be reconstructed, so skip it.
+      if (key === undefined || value === undefined) continue;
       try {
-        const parsed = JSON.parse(values[i]);
+        const parsed = JSON.parse(value);
         if (parsed && typeof parsed === 'object' && 'text' in parsed && 'updatedAt' in parsed) {
-          notes[keys[i]] = parsed as StreamNote;
+          notes[key] = parsed as StreamNote;
         }
       } catch { /* skip */ }
     }

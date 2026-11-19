@@ -19,9 +19,11 @@ export interface GovernorProposal {
 
 export interface UseGovernorProposalsOptions {
   pollIntervalMs?: number;
-  statusFilter?: ProposalStatus[];
-  sortBy?: ProposalSortBy;
-  sortDirection?: ProposalSortDirection;
+  // `exactOptionalPropertyTypes` distinguishes "absent" from "present but
+  // undefined"; the positional-argument form below passes the latter.
+  statusFilter?: ProposalStatus[] | undefined;
+  sortBy?: ProposalSortBy | undefined;
+  sortDirection?: ProposalSortDirection | undefined;
 }
 
 export interface UseGovernorProposalsResult {
@@ -89,12 +91,18 @@ export function useGovernorProposals(
 export function useGovernorProposals(
   pollIntervalMs?: number,
   statusFilter?: ProposalStatus[],
-  options?: { sortBy?: ProposalSortBy; sortDirection?: ProposalSortDirection },
+  options?: {
+    sortBy?: ProposalSortBy | undefined;
+    sortDirection?: ProposalSortDirection | undefined;
+  },
 ): UseGovernorProposalsResult;
 export function useGovernorProposals(
   arg1?: number | UseGovernorProposalsOptions,
   arg2?: ProposalStatus[],
-  arg3?: { sortBy?: ProposalSortBy; sortDirection?: ProposalSortDirection },
+  arg3?: {
+    sortBy?: ProposalSortBy | undefined;
+    sortDirection?: ProposalSortDirection | undefined;
+  },
 ): UseGovernorProposalsResult {
   const options: UseGovernorProposalsOptions =
     typeof arg1 === 'object' && arg1 !== null

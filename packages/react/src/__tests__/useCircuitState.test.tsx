@@ -6,7 +6,10 @@ import {
   recordSuccess,
   resetCircuit,
   getCircuitState,
-} from '../../../../src/rpc-circuit-state.js';
+// Must resolve to the same module instance the hook uses — the hook imports
+// the package entry point, so a direct `src/` import here would create a
+// second copy of the circuit registry and the state would never agree.
+} from '@conduit-protocol/sdk';
 
 describe('useCircuitState (#995)', () => {
   const scope = 'https://horizon-testnet.stellar.org';

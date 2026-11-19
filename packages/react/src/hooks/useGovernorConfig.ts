@@ -29,8 +29,8 @@ export interface UseGovernorConfigResult {
   loading: boolean;
   error: Error | null;
   refetch: () => void;
-  formattedVotingDelay?: string;
-  formattedVotingPeriod?: string;
+  formattedVotingDelay?: string | undefined;
+  formattedVotingPeriod?: string | undefined;
 }
 
 /**

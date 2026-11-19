@@ -6,7 +6,10 @@ import {
   recordSuccess,
   recordFailure,
   type CircuitStatus,
-} from '../../../../src/rpc-circuit-state.js';
+// Import through the package's public entry point rather than reaching into
+// the SDK's source tree: a relative path outside this package's `rootDir`
+// cannot be emitted by `tsc --noEmit`/`--dts` and breaks the build.
+} from '@conduit-protocol/sdk';
 
 export interface UseCircuitStateOptions {
   /** Whether to automatically run a background heartbeat / probe when the circuit enters 'half-open'. Defaults to true. */

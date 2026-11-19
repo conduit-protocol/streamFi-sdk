@@ -180,3 +180,5 @@ export type {
   StreamRowValidationError,
   UseBatchCreateStreamValidationResult,
 } from "./hooks/useBatchCreateStreamValidation.js";
+export { makeHeaderFetch } from "./utils/makeHeaderFetch.js";
+export type { RpcHeaders } from "./types/rpc-headers.js";
