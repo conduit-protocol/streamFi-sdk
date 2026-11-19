@@ -47,21 +47,152 @@ function notifyListeners(scope: string, state: CircuitStatus): void {
 }
 
 /**
- * Listener invoked on every circuit state transition (e.g. closed -> open).
- * `scope` identifies the RPC endpoint whose circuit changed.
+ * Trip and recovery telemetry for one RPC endpoint's circuit (#1077).
+ * Survives {@link resetCircuit}; clear it with {@link resetCircuitMetrics}.
  */
-export type CircuitTransitionListener = (from: CircuitState, to: CircuitState, scope: string) => void;
+export interface CircuitMetrics {
+  scope: string;
+  /** Number of times the circuit opened (from `closed`, or re-opened from `half-open`). */
+  tripCount: number;
+  /** Number of times the circuit closed again after an outage. */
+  recoveryCount: number;
+  /** Epoch ms of the most recent trip. */
+  lastTripAt: number | null;
+  /** Epoch ms of the most recent recovery. */
+  lastRecoveryAt: number | null;
+  /**
+   * Duration of the most recent outage: from the first trip until the circuit
+   * closed again. Re-opening from `half-open` extends the same outage.
+   */
+  lastRecoveryTimeMs: number | null;
+  /** Sum of all completed outage durations. */
+  totalRecoveryTimeMs: number;
+}
+
+interface MetricsEntry extends CircuitMetrics {
+  /** Epoch ms the current outage began, or null while closed. */
+  outageStartedAt: number | null;
+}
+
+const metrics = new Map<string, MetricsEntry>();
+
+function metricsEntry(scope: string): MetricsEntry {
+  let entry = metrics.get(scope);
+  if (!entry) {
+    entry = {
+      scope,
+      tripCount: 0,
+      recoveryCount: 0,
+      lastTripAt: null,
+      lastRecoveryAt: null,
+      lastRecoveryTimeMs: null,
+      totalRecoveryTimeMs: 0,
+      outageStartedAt: null,
+    };
+    metrics.set(scope, entry);
+  }
+  return entry;
+}
+
+function snapshotMetrics(entry: MetricsEntry): CircuitMetrics {
+  const { outageStartedAt: _, ...rest } = entry;
+  return { ...rest };
+}
+
+function recordTransitionMetrics(scope: string, from: CircuitState, to: CircuitState): CircuitMetrics {
+  const entry = metricsEntry(scope);
+  const now = Date.now();
+  if (to === 'open') {
+    entry.tripCount += 1;
+    entry.lastTripAt = now;
+    if (entry.outageStartedAt === null) entry.outageStartedAt = now;
+  } else if (to === 'closed' && from !== 'closed') {
+    entry.recoveryCount += 1;
+    entry.lastRecoveryAt = now;
+    if (entry.outageStartedAt !== null) {
+      const duration = now - entry.outageStartedAt;
+      entry.lastRecoveryTimeMs = duration;
+      entry.totalRecoveryTimeMs += duration;
+      entry.outageStartedAt = null;
+    }
+  }
+  return snapshotMetrics(entry);
+}
+
+/**
+ * Listener invoked on every circuit state transition (e.g. closed -> open).
+ * `scope` identifies the RPC endpoint whose circuit changed; `stats` is that
+ * endpoint's {@link CircuitMetrics} after the transition was counted (#1077).
+ */
+export type CircuitTransitionListener = (
+  from: CircuitState,
+  to: CircuitState,
+  scope: string,
+  stats: CircuitMetrics,
+) => void;
 const transitionListeners = new Set<CircuitTransitionListener>();
 
 function emitTransition(scope: string, from: CircuitState, to: CircuitState): void {
   if (from === to) return;
+  const stats = recordTransitionMetrics(scope, from, to);
   for (const listener of transitionListeners) {
     try {
-      listener(from, to, scope);
+      listener(from, to, scope, stats);
     } catch {
       // Listener errors must not break circuit state management.
     }
   }
+}
+
+/**
+ * Trip/recovery metrics for an RPC endpoint (#1077). Returns zeroed metrics
+ * for an endpoint whose circuit has never transitioned.
+ *
+ * @example
+ * const { tripCount, lastRecoveryTimeMs } = getCircuitMetrics(rpcUrl);
+ */
+export function getCircuitMetrics(scope: string): CircuitMetrics {
+  const entry = metrics.get(scope);
+  if (!entry) {
+    return {
+      scope,
+      tripCount: 0,
+      recoveryCount: 0,
+      lastTripAt: null,
+      lastRecoveryAt: null,
+      lastRecoveryTimeMs: null,
+      totalRecoveryTimeMs: 0,
+    };
+  }
+  return snapshotMetrics(entry);
+}
+
+/** Metrics for every endpoint that has transitioned at least once. */
+export function getAllCircuitMetrics(): CircuitMetrics[] {
+  return Array.from(metrics.values()).map(snapshotMetrics);
+}
+
+/** Clear metrics for one endpoint, or for all endpoints when `scope` is omitted. */
+export function resetCircuitMetrics(scope?: string): void {
+  if (scope === undefined) metrics.clear();
+  else metrics.delete(scope);
+}
+
+/**
+ * Subscribe to state transitions with metrics attached, for telemetry
+ * exporters (#1077). Equivalent to {@link subscribeCircuitTransitions};
+ * returns an unsubscribe function.
+ *
+ * @example
+ * onStateTransition((from, to, stats) => {
+ *   telemetry.gauge('rpc.circuit.trips', stats.tripCount, { scope: stats.scope });
+ *   if (to === 'closed') telemetry.timing('rpc.circuit.recovery_ms', stats.lastRecoveryTimeMs);
+ * });
+ */
+export function onStateTransition(
+  listener: (from: CircuitState, to: CircuitState, stats: CircuitMetrics) => void,
+): () => void {
+  return subscribeCircuitTransitions((from, to, _scope, stats) => listener(from, to, stats));
 }
 
 /**

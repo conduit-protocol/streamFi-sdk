@@ -129,6 +129,7 @@ export {
   WalletTimeoutError,
   AlbedoInvalidSignatureError,
   isRecoverableError,
+  StreamFiError,
   IndexerMaxPagesExceededError,
   isConduitError,
   SUPPORTED_NETWORKS,
@@ -164,6 +165,8 @@ export {
   DEFAULT_INSTRUCTIONS_PER_BATCH_ITEM,
   DEFAULT_BATCH_FIXED_OVERHEAD_INSTRUCTIONS,
   DEFAULT_BATCH_WARN_THRESHOLD,
+  DEFAULT_FEE_MULTIPLIER,
+  DEFAULT_FEE_CACHE_TTL_MS,
 } from "./fee-estimator.js";
 export type {
   FeeEstimatorOptions,
@@ -173,16 +176,20 @@ export type {
   BatchFootprintOptions,
   ResourceEstimate,
 } from "./fee-estimator.js";
-export { coalesceAsync, coalesceInFlight } from "./coalesce-async.js";
+export { coalesceAsync, coalesceInFlight, CoalesceQueueFullError } from "./coalesce-async.js";
+export type { CoalesceOptions } from "./coalesce-async.js";
 export { WebSocketRelayer } from "./relayer/WebSocketRelayer.js";
 export {
   ErrorMapper,
   DEFAULT_ERROR_MESSAGE_TYPE_MAP,
   extractDiagnosticMessage,
+  describeContractError,
+  humanizeContractRevert,
 } from "./relayer/ErrorMapper.js";
 export type {
   MappedErrorHandler,
   ErrorMessageTypeMap,
+  DescribedContractError,
 } from "./relayer/ErrorMapper.js";
 
 // Utils are exported via the /utils subpath export, but also available here
@@ -207,7 +214,9 @@ export {
   validateAndNormalizeAddress,
   isValidAddress,
   formatTokenAmount,
+  divWithRounding,
 } from "./utils.js";
+export type { DivRoundingMode } from "./utils.js";
 
 // Constants
 export {
@@ -225,7 +234,7 @@ export type {
   ContractRole,
 } from "./constants.js";
 
-export { TokenModule } from "./token.js";
+export { TokenModule, formatTokenAmount as formatLocalizedTokenAmount } from "./token.js";
 
 // RPC server lifecycle
 export { getServer, clearServerCache, resolveFee } from "./soroban.js";
@@ -247,6 +256,13 @@ export {
 } from "./soroban.js";
 export { getLatestLedgerInfo, clearLedgerInfoCache } from "./soroban.js";
 export type { LedgerInfo } from "./soroban.js";
+export { decodeDiagnosticEvents, submitSignedTransaction } from "./soroban.js";
+export type {
+  SignedTransactionStatus,
+  SignedTransactionResult,
+  SubmitSignedTransactionOptions,
+} from "./soroban.js";
+export { validateStreamSchedule, scheduleEndTime, InvalidScheduleError } from "./schedule.js";
 export {
   getCircuitState,
   recordSuccess,
@@ -256,6 +272,11 @@ export {
   onCircuitChange,
   onCircuitStateChange,
   subscribeCircuitTransitions,
+  onStateTransition,
+  getCircuitMetrics,
+  getAllCircuitMetrics,
+  resetCircuitMetrics,
+  type CircuitMetrics,
   type CircuitTransitionListener,
   type CircuitState,
   type CircuitStatus,
@@ -267,7 +288,13 @@ export {
   formatTimestamp,
   exportTransactionsToCsv,
   exportTransactionsToJson,
+  createTransactionHistoryPager,
   type ExportTransactionsOptions,
+  type StreamTransaction,
+  type RawTransactionPage,
+  type TransactionPageFetcher,
+  type TransactionHistoryPage,
+  type TransactionHistoryPager,
 } from "./dashboard/transaction-history.js";
 
 export { Module36 } from "./module36.js";
@@ -332,6 +359,7 @@ export {
   ProposalState,
   parseProposalState,
   formatProposalState,
+  isVotingActive,
 } from "./governor.js";
 export type {
   StreamHistoryEntry,
@@ -345,4 +373,5 @@ export type {
   GovernorProposal,
   ExecuteProposalResult,
   ExecuteProposalsOptions,
+  ProposalDetails,
 } from "./governor.js";

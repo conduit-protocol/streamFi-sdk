@@ -98,3 +98,58 @@ describe('mapWithAdaptiveConcurrency (#978)', () => {
     ).rejects.toThrow('boom');
   });
 });
+
+describe('mapWithAdaptiveConcurrency moving-average latency (#1076)', () => {
+  // Five fast calls, one slow outlier, then fast again.
+  const delays = [1, 1, 1, 1, 1, 120, 1, 1, 1, 1];
+
+  async function run(latencySmoothing: number) {
+    const limits: number[] = [];
+    await mapWithAdaptiveConcurrency(
+      delays,
+      {
+        initial: 2,
+        min: 1,
+        max: 2,
+        targetLatencyMs: 50,
+        latencySmoothing,
+        onLimitChange: (limit) => limits.push(limit),
+      },
+      async (ms) => {
+        await sleep(ms);
+        return ms;
+      },
+    );
+    return limits;
+  }
+
+  it('does not halve the limit for a single slow outlier with the default smoothing', async () => {
+    const limits = await run(0.3);
+    expect(limits).not.toContain(1);
+  });
+
+  it('reacts to every sample when latencySmoothing is 1', async () => {
+    const limits = await run(1);
+    expect(limits).toContain(1);
+  });
+
+  it('reports each limit change with the current average latency', async () => {
+    const seen: Array<[number, number]> = [];
+    await mapWithAdaptiveConcurrency(
+      range(10),
+      { initial: 1, min: 1, max: 3, targetLatencyMs: 60_000, onLimitChange: (l, avg) => seen.push([l, avg]) },
+      async (n) => {
+        await sleep(1);
+        return n;
+      },
+    );
+
+    expect(seen.map(([l]) => l)).toEqual([2, 3]);
+    for (const [, avg] of seen) expect(avg).toBeGreaterThanOrEqual(0);
+  });
+
+  it('ignores an out-of-range latencySmoothing and uses the default', async () => {
+    const out = await mapWithAdaptiveConcurrency([1, 2, 3], { latencySmoothing: 5 }, async (n) => n);
+    expect(out).toEqual([1, 2, 3]);
+  });
+});

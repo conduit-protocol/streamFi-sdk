@@ -6,8 +6,11 @@ import type {
   BatchWithdrawResult,
   FeeEstimate,
   StreamInfo,
+  BatchStreamCreationPayload,
+  BatchCreateStreamResult,
 } from '../types/index.js';
 import type { StreamEvent } from '../events.js';
+import type { WalletAdapter } from '../adapters/types.js';
 import { streamedTotalLocal } from '../utils.js';
 import { calculateVestedPercentage } from '../streams.js';
 import { useConduitClient } from './context.js';
@@ -378,4 +381,250 @@ export function useStreamEvents(
   }, [client, streamId, enabled]);
 
   return { error };
+}
+
+// ── 5. useWallet (#1093) ─────────────────────────────────────────────────────
+
+/** localStorage key {@link useWallet} remembers the connected wallet under. */
+export const WALLET_STORAGE_KEY = 'streamfi:wallet';
+
+export interface UseWalletOptions extends HookOptions {
+  /**
+   * Adapters the user can pick from, keyed by a stable id (e.g.
+   * `{ freighter: new FreighterWalletAdapter() }`). The id is what gets
+   * persisted, so it must stay the same across page loads.
+   */
+  adapters: Record<string, WalletAdapter>;
+  /** Re-attach the last connected wallet on mount. Defaults to `true`. */
+  autoReconnect?: boolean;
+  /** Override {@link WALLET_STORAGE_KEY}. */
+  storageKey?: string;
+}
+
+export interface UseWalletResult {
+  publicKey: string | null;
+  walletId: string | null;
+  isConnected: boolean;
+  isConnecting: boolean;
+  /** True while the remembered wallet is being re-attached after a reload. */
+  isReconnecting: boolean;
+  error: Error | null;
+  connect: (walletId: string) => Promise<string>;
+  disconnect: () => Promise<void>;
+}
+
+function walletStorage(): Storage | null {
+  try {
+    return typeof window !== 'undefined' && window.localStorage ? window.localStorage : null;
+  } catch {
+    return null;
+  }
+}
+
+/**
+ * Connects a wallet adapter to the client and remembers the choice in
+ * localStorage, so the session is re-hydrated after a page reload instead of
+ * being lost. Only the adapter id is stored — never keys or signatures.
+ */
+export function useWallet(options: UseWalletOptions): UseWalletResult {
+  const client = useConduitClient(options.client);
+  const storageKey = options.storageKey ?? WALLET_STORAGE_KEY;
+  const autoReconnect = options.autoReconnect ?? true;
+  const adaptersRef = useRef(options.adapters);
+  adaptersRef.current = options.adapters;
+
+  const [publicKey, setPublicKey] = useState<string | null>(null);
+  const [walletId, setWalletId] = useState<string | null>(null);
+  const [isConnecting, setIsConnecting] = useState(false);
+  const [isReconnecting, setIsReconnecting] = useState(false);
+  const [error, setError] = useState<Error | null>(null);
+
+  const connect = useCallback(
+    async (id: string): Promise<string> => {
+      const adapter = adaptersRef.current[id];
+      if (!adapter) {
+        const e = new Error(`Unknown wallet "${id}"`);
+        setError(e);
+        throw e;
+      }
+      setIsConnecting(true);
+      setError(null);
+      try {
+        const key = adapter.connect ? await adapter.connect() : await adapter.getPublicKey();
+        client.setWallet(adapter);
+        walletStorage()?.setItem(storageKey, id);
+        setPublicKey(key);
+        setWalletId(id);
+        return key;
+      } catch (err) {
+        const e = err instanceof Error ? err : new Error(String(err));
+        setError(e);
+        throw e;
+      } finally {
+        setIsConnecting(false);
+      }
+    },
+    [client, storageKey],
+  );
+
+  const disconnect = useCallback(async (): Promise<void> => {
+    const adapter = walletId ? adaptersRef.current[walletId] : undefined;
+    walletStorage()?.removeItem(storageKey);
+    setPublicKey(null);
+    setWalletId(null);
+    setError(null);
+    await adapter?.disconnect?.();
+  }, [walletId, storageKey]);
+
+  useEffect(() => {
+    if (!autoReconnect) return;
+    const storage = walletStorage();
+    const savedId = storage?.getItem(storageKey) ?? null;
+    if (!savedId) return;
+    const adapter = adaptersRef.current[savedId];
+    if (!adapter || adapter.isConnected?.() === false) {
+      // The remembered wallet is gone or has revoked the session: forget it
+      // rather than prompting the user on every load.
+      storage?.removeItem(storageKey);
+      return;
+    }
+
+    let isMounted = true;
+    setIsReconnecting(true);
+    Promise.resolve(adapter.getPublicKey())
+      .then(key => {
+        if (!isMounted) return;
+        client.setWallet(adapter);
+        setPublicKey(key);
+        setWalletId(savedId);
+      })
+      .catch(() => {
+        storage?.removeItem(storageKey);
+      })
+      .finally(() => {
+        if (isMounted) setIsReconnecting(false);
+      });
+
+    return () => {
+      isMounted = false;
+    };
+  }, [client, storageKey, autoReconnect]);
+
+  return {
+    publicKey,
+    walletId,
+    isConnected: publicKey !== null,
+    isConnecting,
+    isReconnecting,
+    error,
+    connect,
+    disconnect,
+  };
+}
+
+// ── 6. useBatchStreams (#1094) ───────────────────────────────────────────────
+
+export type BatchStatus = 'idle' | 'pending' | 'success' | 'partial' | 'error';
+
+export interface BatchProgress {
+  status: BatchStatus;
+  /** Items in the batch currently (or last) submitted. */
+  total: number;
+  succeeded: number;
+  failed: number;
+}
+
+export interface UseBatchStreamsResult {
+  createBatch: (configs: BatchStreamCreationPayload[]) => Promise<BatchCreateStreamResult[]>;
+  withdrawBatch: (withdrawals: BatchWithdrawItem[]) => Promise<BatchWithdrawResult[]>;
+  progress: BatchProgress;
+  isPending: boolean;
+  error: Error | null;
+  createResults: BatchCreateStreamResult[];
+  withdrawResults: BatchWithdrawResult[];
+  reset: () => void;
+}
+
+const IDLE_PROGRESS: BatchProgress = { status: 'idle', total: 0, succeeded: 0, failed: 0 };
+
+function settledProgress(results: Array<{ success: boolean }>): BatchProgress {
+  const succeeded = results.filter(r => r.success).length;
+  const failed = results.length - succeeded;
+  const status: BatchStatus = failed === 0 ? 'success' : succeeded === 0 ? 'error' : 'partial';
+  return { status, total: results.length, succeeded, failed };
+}
+
+/**
+ * Declarative wrapper around `client.streams.createBatchStreams` and
+ * `client.streams.batchWithdraw` for payroll-style batch operations. Each
+ * item's outcome is reported individually (`partial` when some fail), since
+ * the client isolates per-item failures instead of failing the whole batch.
+ */
+export function useBatchStreams(options?: HookOptions): UseBatchStreamsResult {
+  const client = useConduitClient(options?.client);
+  const [progress, setProgress] = useState<BatchProgress>(IDLE_PROGRESS);
+  const [error, setError] = useState<Error | null>(null);
+  const [createResults, setCreateResults] = useState<BatchCreateStreamResult[]>([]);
+  const [withdrawResults, setWithdrawResults] = useState<BatchWithdrawResult[]>([]);
+
+  const createBatch = useCallback(
+    async (configs: BatchStreamCreationPayload[]): Promise<BatchCreateStreamResult[]> => {
+      setProgress({ status: 'pending', total: configs.length, succeeded: 0, failed: 0 });
+      setError(null);
+      try {
+        const results = await client.streams.createBatchStreams(configs);
+        setCreateResults(results);
+        setProgress(settledProgress(results));
+        return results;
+      } catch (err) {
+        const e = err instanceof Error ? err : new Error(String(err));
+        setError(e);
+        setProgress({ status: 'error', total: configs.length, succeeded: 0, failed: configs.length });
+        throw e;
+      }
+    },
+    [client],
+  );
+
+  const withdrawBatch = useCallback(
+    async (withdrawals: BatchWithdrawItem[]): Promise<BatchWithdrawResult[]> => {
+      setProgress({ status: 'pending', total: withdrawals.length, succeeded: 0, failed: 0 });
+      setError(null);
+      try {
+        const results = await client.streams.batchWithdraw(withdrawals);
+        setWithdrawResults(results);
+        setProgress(settledProgress(results));
+        return results;
+      } catch (err) {
+        const e = err instanceof Error ? err : new Error(String(err));
+        setError(e);
+        setProgress({
+          status: 'error',
+          total: withdrawals.length,
+          succeeded: 0,
+          failed: withdrawals.length,
+        });
+        throw e;
+      }
+    },
+    [client],
+  );
+
+  const reset = useCallback(() => {
+    setProgress(IDLE_PROGRESS);
+    setError(null);
+    setCreateResults([]);
+    setWithdrawResults([]);
+  }, []);
+
+  return {
+    createBatch,
+    withdrawBatch,
+    progress,
+    isPending: progress.status === 'pending',
+    error,
+    createResults,
+    withdrawResults,
+    reset,
+  };
 }

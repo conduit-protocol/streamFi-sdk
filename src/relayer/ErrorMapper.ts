@@ -1,6 +1,13 @@
 import { SorobanRpc } from '@stellar/stellar-sdk';
 import type { WebSocketRelayer, WebSocketMessage, MessageHandler } from './WebSocketRelayer.js';
-import { ConduitError, SorobanRpcError, type ConduitContract } from '../errors.js';
+import {
+  ConduitError,
+  FactoryErrorCode,
+  GovernorErrorCode,
+  SorobanRpcError,
+  StreamErrorCode,
+  type ConduitContract,
+} from '../errors.js';
 
 /**
  * Maps a raw Horizon transaction-submission error (`extras.result_codes`,
@@ -108,6 +115,56 @@ export class ErrorMapper {
     this.isDisposed = true;
     this.detach();
   }
+}
+
+/**
+ * Numeric enums carry a reverse mapping (`StreamErrorCode[5] === 'StreamEnded'`),
+ * so each contract's enum doubles as its code → name dictionary (#1057).
+ */
+const ERROR_CODE_NAMES: Record<ConduitContract, Record<number, string>> = {
+  stream: StreamErrorCode as unknown as Record<number, string>,
+  factory: FactoryErrorCode as unknown as Record<number, string>,
+  governor: GovernorErrorCode as unknown as Record<number, string>,
+};
+
+/** A contract revert code resolved to its name and descriptive message. */
+export interface DescribedContractError {
+  contract: ConduitContract;
+  code: number;
+  /** The contract's error variant name, e.g. `StreamEnded`. */
+  name: string;
+  /** The SDK's descriptive message for the code, e.g. `Stream has passed its end time.` */
+  message: string;
+}
+
+/**
+ * Maps a contract revert code to its variant name and descriptive message
+ * (#1057), so `Error(Contract, #5)` on the stream contract reads as
+ * `StreamEnded` instead of a bare number.
+ *
+ * Codes are contract-scoped — pass the contract that produced the error.
+ * Returns `undefined` for a code the SDK's catalogue does not know.
+ */
+export function describeContractError(
+  contract: ConduitContract,
+  code: number,
+): DescribedContractError | undefined {
+  const name = ERROR_CODE_NAMES[contract][code];
+  if (typeof name !== 'string') return undefined;
+  return { contract, code, name, message: new ConduitError(contract, code).message };
+}
+
+/**
+ * Rewrites a raw revert string such as `HostError: Error(Contract, #5)` into
+ * `StreamEnded: Stream has passed its end time.` (#1057). Strings without a
+ * recognisable contract code, or with a code unknown for `contract`, are
+ * returned unchanged.
+ */
+export function humanizeContractRevert(contract: ConduitContract, raw: string): string {
+  const match = /Error\(Contract,\s*#(\d+)\)/.exec(raw);
+  if (!match?.[1]) return raw;
+  const described = describeContractError(contract, Number(match[1]));
+  return described ? `${described.name}: ${described.message}` : raw;
 }
 
 /**

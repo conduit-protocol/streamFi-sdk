@@ -13,6 +13,39 @@
  */
 
 /**
+ * Thrown when starting another fetch would exceed `maxQueueDepth` (#1075).
+ * Callers asking for a key that is already in flight still join it; only a
+ * *new* key is refused, so a stalled backend can't grow the map without bound.
+ */
+export class CoalesceQueueFullError extends Error {
+  constructor(public readonly maxQueueDepth: number) {
+    super(`coalesce queue is full: ${maxQueueDepth} requests already pending`);
+    this.name = 'CoalesceQueueFullError';
+  }
+}
+
+/** Options for {@link coalesceAsync}. */
+export interface CoalesceOptions {
+  /** See the `windowMs` parameter of {@link coalesceAsync}. */
+  windowMs?: number | undefined;
+  /**
+   * Maximum number of distinct fetches allowed in flight at once for this
+   * cache. Starting one more rejects with {@link CoalesceQueueFullError}.
+   * Omitted, or a non-finite or non-positive value, means no limit.
+   */
+  maxQueueDepth?: number | undefined;
+}
+
+/** In-flight (not yet settled) promises per cache map, for `maxQueueDepth`. */
+const pendingByCache = new WeakMap<Map<unknown, unknown>, Set<Promise<unknown>>>();
+
+function queueLimit(maxQueueDepth: number | undefined): number | undefined {
+  return maxQueueDepth !== undefined && Number.isFinite(maxQueueDepth) && maxQueueDepth > 0
+    ? Math.trunc(maxQueueDepth) || 1
+    : undefined;
+}
+
+/**
  * Returns the cached in-flight promise for `key` when present, otherwise
  * starts `fn()` and stores its promise in `cache`.
  *
@@ -24,21 +57,47 @@
  * resolves, so calls from separate render cycles inside that window share the
  * value instead of refetching. Omitted, zero, negative or non-finite values
  * keep the entry until the caller removes it, as before.
+ *
+ * The fourth argument may instead be a {@link CoalesceOptions} object, which
+ * also accepts `maxQueueDepth` (#1075) to cap how many distinct fetches may be
+ * pending at once.
  */
 export async function coalesceAsync<K, V>(
   cache: Map<K, Promise<V>>,
   key: K,
   fn: () => Promise<V>,
-  windowMs?: number,
+  windowMsOrOptions?: number | CoalesceOptions,
 ): Promise<V> {
+  const options: CoalesceOptions =
+    typeof windowMsOrOptions === 'object' && windowMsOrOptions !== null
+      ? windowMsOrOptions
+      : { windowMs: windowMsOrOptions };
+  const { windowMs } = options;
+
   const cached = cache.get(key);
   if (cached) {
     return cached;
   }
 
+  const limit = queueLimit(options.maxQueueDepth);
+  let pending = pendingByCache.get(cache as Map<unknown, unknown>);
+  if (limit !== undefined && pending && pending.size >= limit) {
+    throw new CoalesceQueueFullError(limit);
+  }
+
   const promise = fn();
 
   cache.set(key, promise);
+  if (!pending) {
+    pending = new Set();
+    pendingByCache.set(cache as Map<unknown, unknown>, pending);
+  }
+  const tracked = pending;
+  tracked.add(promise);
+  const untrack = () => {
+    tracked.delete(promise);
+  };
+  promise.then(untrack, untrack);
   promise.then(
     () => {
       if (windowMs === undefined || !Number.isFinite(windowMs) || windowMs <= 0) return;
@@ -63,14 +122,23 @@ export async function coalesceAsync<K, V>(
  * failure, so later calls always fetch fresh data. Used to collapse
  * concurrent identical reads (e.g. several components calling
  * `streams.get(id)` during the same render) into one network request.
+ *
+ * `maxQueueDepth` (#1075) caps how many distinct keys may be in flight at
+ * once; starting one more rejects with {@link CoalesceQueueFullError}.
  */
 export function coalesceInFlight<K, V>(
   inFlight: Map<K, Promise<V>>,
   key: K,
   fn: () => Promise<V>,
+  options: Pick<CoalesceOptions, 'maxQueueDepth'> = {},
 ): Promise<V> {
   const existing = inFlight.get(key);
   if (existing) return existing;
+
+  const limit = queueLimit(options.maxQueueDepth);
+  if (limit !== undefined && inFlight.size >= limit) {
+    return Promise.reject(new CoalesceQueueFullError(limit));
+  }
 
   const promise = fn();
   inFlight.set(key, promise);

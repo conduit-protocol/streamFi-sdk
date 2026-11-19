@@ -70,6 +70,20 @@ const DEFAULT_PRIORITY_MULTIPLIERS: Record<FeePriority, number> = {
 
 const DEFAULT_HORIZON_URL = 'https://horizon.stellar.org';
 
+/**
+ * Default inclusion-fee headroom (#1073): fees can rise between estimation and
+ * submission during busy ledgers, so estimates carry a 20% buffer unless the
+ * caller opts out with `feeMultiplier: 1`.
+ */
+export const DEFAULT_FEE_MULTIPLIER = 1.2;
+
+/**
+ * Default lifetime of a cached fee estimate (#1074). Several transactions
+ * assembled together reuse one network fee lookup instead of each issuing
+ * its own request.
+ */
+export const DEFAULT_FEE_CACHE_TTL_MS = 5_000;
+
 /** Soroban's per-transaction CPU instruction ceiling on Stellar mainnet. */
 export const DEFAULT_CPU_INSTRUCTION_LIMIT = 100_000_000;
 
@@ -214,12 +228,19 @@ export interface FeeEstimatorOptions {
    */
   minRefetchIntervalMs?: number;
   /**
-   * Inclusion-fee buffer multiplier applied to every estimated fee to resist
-   * out-bidding during high-congestion ledger periods. A value of `1` (default)
-   * disables the buffer; e.g. `1.2` adds a 20% safety margin so urgent stream
-   * creations are included without delay. Must be a finite number `>= 1`.
+   * Inclusion-fee buffer multiplier applied to dynamic and percentile fee
+   * estimates to resist out-bidding during high-congestion ledger periods.
+   * Defaults to {@link DEFAULT_FEE_MULTIPLIER} (`1.2`, a 20% margin); pass `1`
+   * to disable the buffer. Must be a finite number `>= 1`.
    */
   feeMultiplier?: number;
+  /**
+   * How long, in milliseconds, a fetched fee estimate is reused before the
+   * network is queried again. Defaults to {@link DEFAULT_FEE_CACHE_TTL_MS}
+   * (5s). `0` disables result caching (concurrent calls are still
+   * de-duplicated). Must be a finite number `>= 0`.
+   */
+  cacheTtlMs?: number;
 }
 
 /**
@@ -249,7 +270,7 @@ export class FeeEstimator {
   private lastSuccessfulFetchAtValue: number | null = null;
   private lastErrorValue: Error | null = null;
   private readonly cache = new Map<string, { fee: bigint; fetchedAt: number }>();
-  private readonly cacheTtlMs = 3_000;
+  private readonly cacheTtlMs: number;
   private readonly horizonUrl: string;
   private readonly fetchImpl: typeof fetch | undefined;
   private readonly priorityMultipliers: Record<FeePriority, number>;
@@ -269,11 +290,16 @@ export class FeeEstimator {
     this.horizonUrl = (options?.horizonUrl ?? DEFAULT_HORIZON_URL).replace(/\/+$/, '');
     this.fetchImpl = options?.fetch;
     this.priorityMultipliers = { ...DEFAULT_PRIORITY_MULTIPLIERS, ...options?.priorityMultipliers };
-    const feeMultiplier = options?.feeMultiplier ?? 1;
+    const feeMultiplier = options?.feeMultiplier ?? DEFAULT_FEE_MULTIPLIER;
     if (!Number.isFinite(feeMultiplier) || feeMultiplier < 1) {
       throw new Error(`Invalid feeMultiplier: must be a finite number >= 1, got ${String(feeMultiplier)}`);
     }
     this.feeMultiplier = feeMultiplier;
+    const cacheTtlMs = options?.cacheTtlMs ?? DEFAULT_FEE_CACHE_TTL_MS;
+    if (!Number.isFinite(cacheTtlMs) || cacheTtlMs < 0) {
+      throw new Error(`Invalid cacheTtlMs: must be a finite number >= 0, got ${String(cacheTtlMs)}`);
+    }
+    this.cacheTtlMs = cacheTtlMs;
   }
 
   /**
@@ -317,7 +343,7 @@ export class FeeEstimator {
    * ledgers from Horizon's `/fee_stats` (#960), as an alternative to
    * {@link getDynamicFee}'s fixed-multiplier-on-modal-fee approach.
    *
-   * Cached for `cacheTtlMs` (3s, shared with `estimateFee`'s default
+   * Cached for `cacheTtlMs` (default 5s, shared with `estimateFee`'s
    * caching window) and request-deduplicated the same way `estimateFee`
    * is — concurrent callers during a cold cache share one Horizon request
    * instead of issuing one each. On a network error, falls back to the

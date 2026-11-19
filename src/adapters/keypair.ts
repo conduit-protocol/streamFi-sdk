@@ -54,6 +54,14 @@ export class KeypairWalletAdapter implements WalletAdapter {
     this.zeroize();
   }
 
+  /**
+   * Alias for {@link zeroize} (#1081): wipe the secret key from memory once
+   * the adapter is no longer needed, e.g. at the end of a signing job.
+   */
+  wipe(): void {
+    this.zeroize();
+  }
+
   /** True once {@link destroy} has been called. */
   get isDestroyed(): boolean {
     return this.keypair === null;

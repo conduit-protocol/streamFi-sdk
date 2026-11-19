@@ -815,9 +815,19 @@ export interface ExportTransactionsOptions {
   pretty?: boolean;
 }
 
+/** Leading characters spreadsheet apps treat as the start of a formula. */
+const CSV_FORMULA_PREFIX = /^[=+\-@\t\r]/;
+const CSV_PLAIN_NUMBER = /^[+-]?\d+(\.\d+)?$/;
+
 function escapeCsvCell(value: unknown): string {
   if (value === null || value === undefined) return '';
-  const str = String(value);
+  let str = String(value);
+  // These files are opened in Excel/Sheets by accounting (#1083); a cell such
+  // as `=HYPERLINK(...)` from an indexer-supplied field would otherwise run as
+  // a formula. Prefix a quote so it is shown as text (OWASP CSV injection).
+  if (CSV_FORMULA_PREFIX.test(str) && !CSV_PLAIN_NUMBER.test(str)) {
+    str = `'${str}`;
+  }
   if (str.includes(',') || str.includes('"') || str.includes('\n') || str.includes('\r')) {
     return `"${str.replace(/"/g, '""')}"`;
   }
@@ -954,3 +964,97 @@ export function exportTransactionsToJson(
   return pretty ? JSON.stringify(exported, null, 2) : JSON.stringify(exported);
 }
 
+
+// ---------------------------------------------------------------------------
+// Cursor pagination (#1084)
+// ---------------------------------------------------------------------------
+
+/** Alias used by the dashboard docs for a normalised history row. */
+export type StreamTransaction = TransactionRecord;
+
+/**
+ * One raw page returned by the caller's fetcher. `items` may be anything
+ * {@link normalizeTransactions} accepts (an array, `{ edges }`, …).
+ * `pageInfo` follows the Relay shape the indexer already uses.
+ */
+export interface RawTransactionPage {
+  items: unknown;
+  pageInfo?: { hasNextPage?: boolean; endCursor?: string | null } | null;
+}
+
+/** Fetches the page that starts after `cursor` (the first page when undefined). */
+export type TransactionPageFetcher = (cursor: string | undefined) => Promise<RawTransactionPage>;
+
+export interface TransactionHistoryPage {
+  /** Rows of this page, normalised and with rows already seen dropped. */
+  transactions: TransactionRecord[];
+  /** Cursor for the following page, or `null` at the end of the history. */
+  nextCursor: string | null;
+  hasNextPage: boolean;
+}
+
+export interface TransactionHistoryPager {
+  /**
+   * Fetches the page after `cursor`. Without an argument it continues from
+   * the last page this pager returned, so repeated calls walk the history.
+   * After the last page it resolves to an empty page without fetching.
+   */
+  fetchNextPage(cursor?: string): Promise<TransactionHistoryPage>;
+  /** False once the last page has been fetched. */
+  readonly hasNextPage: boolean;
+  /** Forgets the position and the rows already seen. */
+  reset(): void;
+}
+
+/**
+ * Cursor-based pager for transaction logs (#1084). Unlike page-offset
+ * queries, a cursor stays stable while new rows arrive, and rows repeated
+ * across a page boundary are dropped by id, so callers never see duplicates.
+ */
+export function createTransactionHistoryPager(
+  fetchPage: TransactionPageFetcher,
+  walletAddress?: string,
+): TransactionHistoryPager {
+  let nextCursor: string | undefined;
+  let done = false;
+  let seen = new Set<string>();
+
+  return {
+    get hasNextPage() {
+      return !done;
+    },
+
+    reset() {
+      nextCursor = undefined;
+      done = false;
+      seen = new Set<string>();
+    },
+
+    async fetchNextPage(cursor?: string): Promise<TransactionHistoryPage> {
+      const requested = cursor ?? nextCursor;
+      if (cursor === undefined && done) {
+        return { transactions: [], nextCursor: null, hasNextPage: false };
+      }
+
+      const page = await fetchPage(requested);
+      const transactions = normalizeTransactions(page?.items, walletAddress).filter((tx) => {
+        if (seen.has(tx.id)) return false;
+        seen.add(tx.id);
+        return true;
+      });
+
+      const endCursor = page?.pageInfo?.endCursor;
+      // A page that claims more data but returns no usable or no new cursor
+      // would make callers loop forever on the same page; treat it as the end.
+      const next =
+        typeof endCursor === 'string' && endCursor.length > 0 && endCursor !== requested
+          ? endCursor
+          : undefined;
+      const hasNextPage = page?.pageInfo?.hasNextPage === true && next !== undefined;
+
+      nextCursor = hasNextPage ? next : undefined;
+      done = !hasNextPage;
+      return { transactions, nextCursor: nextCursor ?? null, hasNextPage };
+    },
+  };
+}

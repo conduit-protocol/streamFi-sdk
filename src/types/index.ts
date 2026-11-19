@@ -159,6 +159,43 @@ export enum StreamScheduleType {
   ExponentialDecay = 2,
 }
 
+// ── Stream schedule configuration (#1097) ────────────────────────────────────
+// A discriminated union replacing loose, unvalidated schedule option objects.
+// All times are Unix timestamps in seconds. Validate with
+// `validateStreamSchedule` (src/schedule.ts) before building a transaction.
+
+/** Funds vest at a constant rate from `startTime` to `endTime`. */
+export interface LinearSchedule {
+  kind: "linear";
+  startTime: number;
+  endTime: number;
+}
+
+/**
+ * Nothing vests before `cliffTime`; at the cliff everything accrued since
+ * `startTime` unlocks, then vesting continues linearly until `endTime`.
+ */
+export interface CliffSchedule {
+  kind: "cliff";
+  startTime: number;
+  cliffTime: number;
+  endTime: number;
+}
+
+/**
+ * Funds unlock in `steps` equal tranches, one every `stepDurationSeconds`,
+ * starting at `startTime + stepDurationSeconds`.
+ */
+export interface SteppedSchedule {
+  kind: "stepped";
+  startTime: number;
+  stepDurationSeconds: number;
+  steps: number;
+}
+
+/** Vesting schedule for a stream: linear, cliff, or stepped. */
+export type StreamScheduleConfig = LinearSchedule | CliffSchedule | SteppedSchedule;
+
 export interface ConduitConfig {
   /** Network to connect to */
   network: Network;
@@ -717,3 +754,34 @@ export interface DurationBreakdown {
   seconds: number;
   totalSeconds: number;
 }
+
+// ── Contract error codes (#1096) ──────────────────────────────────────────────
+
+/**
+ * Strictly typed Soroban contract error codes, mirroring each contract's Rust
+ * `Error` enum (`contracts/<name>/src/errors.rs`). They are defined once, in
+ * `errors.ts` alongside their messages, and re-exported here so frontend code
+ * can compare against named members instead of magic numbers:
+ *
+ * ```ts
+ * if (err.code === ContractErrorCode.NothingToWithdraw) { ... }
+ * ```
+ *
+ * The same number means different things in different contracts (code 1 is
+ * `NotAuthorized` on the stream contract but `NotInitialized` on the factory),
+ * so use the enum that matches the contract you called. `ContractErrorCode`
+ * is the DripStream enum, the contract almost every SDK call targets.
+ */
+export {
+  StreamErrorCode as ContractErrorCode,
+  StreamErrorCode,
+  FactoryErrorCode,
+  GovernorErrorCode,
+  UNKNOWN_CONTRACT_ERROR_CODE,
+} from "../errors.js";
+export type { ConduitContract } from "../errors.js";
+
+import type { StreamErrorCode, FactoryErrorCode, GovernorErrorCode } from "../errors.js";
+
+/** Any known contract error code, across all three contracts. */
+export type AnyContractErrorCode = StreamErrorCode | FactoryErrorCode | GovernorErrorCode;

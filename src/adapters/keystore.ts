@@ -38,7 +38,15 @@ export interface Keystore {
 }
 
 export interface ExportKeystoreOptions {
-  /** PBKDF2 iteration count. Defaults to {@link DEFAULT_KEYSTORE_ITERATIONS}. */
+  /**
+   * PBKDF2 iteration count (#1082). Lower it to trade brute-force resistance
+   * for speed on low-power devices; raise it for long-lived keystores.
+   * Defaults to {@link DEFAULT_KEYSTORE_ITERATIONS}. The value is stored in
+   * the keystore, so decryption always uses the count it was written with.
+   * Takes precedence over `iterations` when both are set.
+   */
+  kdfIterations?: number;
+  /** Same as {@link kdfIterations}; kept for backwards compatibility. */
   iterations?: number;
 }
 
@@ -97,9 +105,9 @@ export async function encryptKeystore(
   if (!keypair.canSign()) {
     throw new Error('Cannot export a keystore: this Keypair has no secret key (public-key only)');
   }
-  const iterations = opts.iterations ?? DEFAULT_KEYSTORE_ITERATIONS;
+  const iterations = opts.kdfIterations ?? opts.iterations ?? DEFAULT_KEYSTORE_ITERATIONS;
   if (!Number.isInteger(iterations) || iterations < 1) {
-    throw new Error('iterations must be a positive integer');
+    throw new Error('kdfIterations must be a positive integer');
   }
 
   const salt = globalThis.crypto.getRandomValues(new Uint8Array(SALT_BYTES));
