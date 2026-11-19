@@ -47,7 +47,44 @@ const TOPIC = {
   RECIPIENT_TRANSFERRED: 'xfer_rec',
   OPERATOR_SET:          'set_op',
   OPERATOR_REVOKED:      'rm_op',
+  STREAM_CLIFF_REACHED:   'cliff_rch',
+  STREAM_TOP_UP_EXTENDED: 'topup_ext',
 } as const;
+
+export interface StreamCliffReachedEvent extends CliffReachedEvent {
+  recipient?: string;
+  sequence?: bigint;
+}
+
+export interface StreamTopUpExtendedEvent {
+  sender: string;
+  amount: bigint;
+  newBalance: bigint;
+  newEndTime: number;
+  sequence?: bigint;
+}
+
+export interface StreamEventMap {
+  Cancelled: CancelEvent;
+  CliffReached: CliffReachedEvent;
+  StreamCliffReached: StreamCliffReachedEvent;
+  StreamTopUpExtended: StreamTopUpExtendedEvent;
+  Withdrawn: WithdrawEvent;
+  Paused: PauseEvent;
+  Resumed: ResumeEvent;
+  ToppedUp: StreamTopUpEvent;
+  Clawback: StreamClawbackedEvent;
+  Created: CreatedEvent;
+  ForceCancelled: ForceCancelEvent;
+  RecipientTransferred: RecipientTransferEvent;
+  OperatorSet: OperatorSetEvent;
+  OperatorRevoked: OperatorRevokedEvent;
+}
+
+export type TypedStreamEventHandlers = StreamEventHandlers & {
+  onStreamCliffReached?: (event: StreamCliffReachedEvent) => void;
+  onStreamTopUpExtended?: (event: StreamTopUpExtendedEvent) => void;
+};
 
 // ── Parser helpers ────────────────────────────────────────────────────────────
 
@@ -453,12 +490,39 @@ export function onStreamEvent(
 export function onStreamEvent(
   rpcUrl: string,
   streamAddress: string,
-  type: 'CliffReached' | 'Cancelled',
-  callback: (event: CancelEvent | CliffReachedEvent) => void,
+  type: 'StreamCliffReached',
+  callback: (event: StreamCliffReachedEvent) => void,
+  options?: CliffReachedListenerOptions,
+): Subscription;
+export function onStreamEvent(
+  rpcUrl: string,
+  streamAddress: string,
+  type: 'StreamTopUpExtended',
+  callback: (event: StreamTopUpExtendedEvent) => void,
+): Subscription;
+export function onStreamEvent(
+  rpcUrl: string,
+  streamAddress: string,
+  type: 'CliffReached' | 'Cancelled' | 'StreamCliffReached' | 'StreamTopUpExtended',
+  callback: (event: any) => void,
   options?: CliffReachedListenerOptions,
 ): Subscription {
   if (type === 'Cancelled') {
     return subscribeToStream(rpcUrl, streamAddress, { onCancel: callback });
+  }
+  if (type === 'StreamTopUpExtended') {
+    return subscribeToStream(
+      rpcUrl,
+      streamAddress,
+      { onStreamTopUpExtended: callback } as TypedStreamEventHandlers,
+    );
+  }
+  if (type === 'StreamCliffReached' && (!options || !Number.isFinite(options.cliffTime))) {
+    return subscribeToStream(
+      rpcUrl,
+      streamAddress,
+      { onStreamCliffReached: callback } as TypedStreamEventHandlers,
+    );
   }
 
   if (!options || !Number.isFinite(options.cliffTime)) {
@@ -691,6 +755,39 @@ export function dispatchEvent(
       handlers.onOperatorRevoke(data);
       break;
     }
+
+    case TOPIC.STREAM_CLIFF_REACHED:
+    case 'StreamCliffReached': {
+      const typedHandlers = handlers as TypedStreamEventHandlers;
+      if (!typedHandlers.onStreamCliffReached) break;
+      // data: cliff_time: u64 (either bare u64 scalar or 1-element tuple)
+      const fields = tupleFields(event.value);
+      const cliffTime = fields.length > 0 ? u64Field(fields, 0) : Number(scValToU64(event.value));
+      const data: StreamCliffReachedEvent = {
+        cliffTime,
+        ...(actor ? { recipient: actor } : {}),
+        ...seq,
+      };
+      typedHandlers.onStreamCliffReached(data);
+      break;
+    }
+
+    case TOPIC.STREAM_TOP_UP_EXTENDED:
+    case 'StreamTopUpExtended': {
+      const typedHandlers = handlers as TypedStreamEventHandlers;
+      if (!typedHandlers.onStreamTopUpExtended) break;
+      // data: (amount: i128, new_balance: i128, new_end_time: u64)
+      const fields = tupleFields(event.value);
+      const data: StreamTopUpExtendedEvent = {
+        sender:     actor,
+        amount:     i128Field(fields, 0),
+        newBalance: i128Field(fields, 1),
+        newEndTime: u64Field(fields, 2),
+        ...seq,
+      };
+      typedHandlers.onStreamTopUpExtended(data);
+      break;
+    }
   }
 
   return sequence;
@@ -752,7 +849,9 @@ export type StreamEvent =
   | { kind: 'force_cancelled'; event: ForceCancelEvent }
   | { kind: 'recipient_transferred'; event: RecipientTransferEvent }
   | { kind: 'operator_set'; event: OperatorSetEvent }
-  | { kind: 'operator_revoked'; event: OperatorRevokedEvent };
+  | { kind: 'operator_revoked'; event: OperatorRevokedEvent }
+  | { kind: 'cliff_reached'; event: StreamCliffReachedEvent }
+  | { kind: 'top_up_extended'; event: StreamTopUpExtendedEvent };
 
 /**
  * Parse one raw contract `EventResponse` into a typed {@link StreamEvent}, or
@@ -780,9 +879,11 @@ export function parseStreamEvent(event: SorobanRpc.Api.EventResponse): StreamEve
     onClawback:          (event) => { result = { kind: 'clawback', event }; },
     onForceCancel:       (event) => { result = { kind: 'force_cancelled', event }; },
     onRecipientTransfer: (event) => { result = { kind: 'recipient_transferred', event }; },
-    onOperatorSet:       (event) => { result = { kind: 'operator_set', event }; },
-    onOperatorRevoke:    (event) => { result = { kind: 'operator_revoked', event }; },
-  });
+    onOperatorSet:         (event) => { result = { kind: 'operator_set', event }; },
+    onOperatorRevoke:      (event) => { result = { kind: 'operator_revoked', event }; },
+    onStreamCliffReached:  (event) => { result = { kind: 'cliff_reached', event }; },
+    onStreamTopUpExtended: (event) => { result = { kind: 'top_up_extended', event }; },
+  } as TypedStreamEventHandlers);
   return result;
 }
 

@@ -293,3 +293,35 @@ describe('dispatchEvent — edge cases', () => {
     expect(() => dispatchEvent(event, { onWithdraw: () => { throw new Error('should not fire'); } })).not.toThrow();
   });
 });
+
+describe('dispatchEvent — StreamCliffReached and StreamTopUpExtended (#1067)', () => {
+  it('decodes StreamCliffReached u64 cliff timestamp and sequence', () => {
+    const event = makeEvent('cliff_rch', tuple(u64(1_750_000_000)), 5);
+    let received: unknown;
+    dispatchEvent(event, {
+      onStreamCliffReached: (e: unknown) => { received = e; },
+    } as StreamEventHandlers);
+
+    expect(received).toEqual({
+      recipient: actorAddress,
+      cliffTime: 1_750_000_000,
+      sequence:  5n,
+    });
+  });
+
+  it('decodes StreamTopUpExtended tuple (amount, new_balance, new_end_time)', () => {
+    const event = makeEvent('topup_ext', tuple(i128(50_000n), i128(250_000n), u64(1_800_000_000)), 6);
+    let received: unknown;
+    dispatchEvent(event, {
+      onStreamTopUpExtended: (e: unknown) => { received = e; },
+    } as StreamEventHandlers);
+
+    expect(received).toEqual({
+      sender:     actorAddress,
+      amount:     50_000n,
+      newBalance: 250_000n,
+      newEndTime: 1_800_000_000,
+      sequence:   6n,
+    });
+  });
+});
