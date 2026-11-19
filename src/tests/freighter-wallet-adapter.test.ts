@@ -122,7 +122,7 @@ describe('FreighterWalletAdapter (#805)', () => {
 
   it('rejects with WalletTimeoutError if signTransaction never resolves (#970)', async () => {
     const mockClient: FreighterApi = {
-      signTransaction: vi.fn(() => new Promise(() => {})), // simulates an ignored/open popup
+      signTransaction: vi.fn(() => new Promise<string | { signedTxXdr?: string; error?: string }>(() => {})), // simulates an ignored/open popup
     };
 
     const adapter = new FreighterWalletAdapter({

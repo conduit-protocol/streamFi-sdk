@@ -3,6 +3,8 @@ export {
   StreamsModule,
   validateStreamParameters,
   calculateVestedPercentage,
+  getStreamProgress,
+  getStreamStatus,
   isStreamCancellableByAccount,
   simulateWithdraw,
 } from "./streams.js";
@@ -236,8 +238,30 @@ export type {
 
 export { TokenModule, formatTokenAmount as formatLocalizedTokenAmount } from "./token.js";
 
+export {
+  getEndpointHealth,
+  getRelayerHealth,
+  recordConnectionResult,
+  resetConnectionHealth,
+} from "./connection-health.js";
+export type {
+  ConnectionHealthLevel,
+  ConnectionHealthStatus,
+  EndpointHealth,
+  RelayerHealth,
+} from "./connection-health.js";
+
 // RPC server lifecycle
-export { getServer, clearServerCache, resolveFee } from "./soroban.js";
+export {
+  getServer,
+  clearServerCache,
+  resolveFee,
+  registerRpcEndpointGroup,
+  resolveRpcEndpoint,
+  getRpcEndpointGroup,
+  advanceRpcEndpoint,
+  clearRpcFailoverGroups,
+} from "./soroban.js";
 export {
   DEFAULT_HORIZON,
   getAccountWithFallback,

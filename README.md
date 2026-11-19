@@ -118,11 +118,27 @@ const client = new ConduitClient(config: ConduitConfig);
 | `keypair` | `Keypair` | Optional | Signing keypair (for secret key workflows) |
 | `wallet` | `WalletAdapter` | Optional | Custom wallet adapter (e.g. `WalletConnectAdapter`) |
 | `rpcUrl` | `string` | No | Override default Soroban RPC URL |
+| `rpcUrls` | `string[]` | No | Multiple Soroban RPC endpoints with automatic failover; takes precedence over `rpcUrl` |
+| `rpcUrlFailureThresholdConsecutive` | `number` | No | Consecutive failures before rotating endpoints. Default `3` |
 | `factoryAddress` | `string` | No | Override deployed factory contract ID |
 | `governorAddress` | `string` | No | Override deployed governor contract ID |
 | `fee` | `string` | No | Explicit inclusion fee in stroops (overrides feeMultiplier) |
 | `feeMultiplier` | `number` | No | Multiplier applied to BASE_FEE when fee is not set |
-| `customFetch` | `typeof fetch` | No | `fetch` used for Soroban RPC and fee-estimator requests (edge runtimes, proxies, tracing headers, timeouts). Registered per `rpcUrl`, process-wide |
+| `customFetch` | `typeof fetch` | No | `fetch` used for Soroban RPC and fee-estimator requests (edge runtimes, proxies, tracing headers, timeouts). Registered per configured RPC endpoint, process-wide |
+
+### RPC failover and connection health
+
+Pass `rpcUrls: [primary, backup, ...]` to rotate endpoints automatically on HTTP 429, HTTP 503, network timeouts and open circuits. `getCurrentRpcUrl()` returns the active endpoint. `getConnectionHealth()` returns a synchronous `ConnectionHealthStatus` with connected/status flags, average successful ping latency, packet loss, per-endpoint samples, and relayer heartbeat stats. `refreshConnectionHealth()` performs a live `getLatestLedger()` probe before returning the snapshot.
+
+```typescript
+const client = new ConduitClient({
+  network: 'testnet',
+  rpcUrls: ['https://rpc-primary.example', 'https://rpc-backup.example'],
+});
+
+const health = client.getConnectionHealth();
+console.log(health.status, health.latencyMs, health.packetLossRate, health.activeRpcUrl);
+```
 
 ### Fee Precedence
 
@@ -361,6 +377,16 @@ const result = await client.streams.create({
 - `durationSeconds >= 3600` (1 hour minimum)
 - `startTime >= now`
 - Either `ratePerSecond` or `durationSeconds` must be provided (not both)
+
+---
+
+#### `simulateCreateStream(params)`
+
+Dry-run stream creation and return estimated resource fees, storage/rent estimate, CPU/read/write usage, and the required balance. No wallet prompt, signing, or transaction submission occurs.
+
+#### `getStreamProgress(stream, currentTimestamp?)`
+
+Pure local helper returning percentage progress, elapsed/remaining seconds, lifecycle status, cumulative `streamed`, `withdrawable`, and display strings. `getStreamStatus()` is an alias.
 
 ---
 

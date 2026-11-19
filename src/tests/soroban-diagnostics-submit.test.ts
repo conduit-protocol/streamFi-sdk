@@ -141,7 +141,7 @@ describe('submitSignedTransaction (#1099)', () => {
 
     await expect(promise).resolves.toMatchObject({ hash: 'h1', status: 'success' });
     expect(statuses).toEqual(['submitted', 'success']);
-    expect(mockSendTransaction.mock.calls[0][0].toXDR()).toBe(signedXdr);
+    expect(mockSendTransaction.mock.calls[0]![0].toXDR()).toBe(signedXdr);
   });
 
   it('resolves `failed` instead of throwing so the caller keeps the hash', async () => {

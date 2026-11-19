@@ -134,6 +134,17 @@ export interface BatchSimulationResult {
   error?: string;
 }
 
+export interface BatchPayload {
+  operations: BuildableOperation[];
+  context: BatchTransactionContext;
+}
+
+export interface BatchSimulationSummary {
+  success: boolean;
+  results: BatchSimulationResult[];
+  invalidIndices: number[];
+}
+
 export class BatchBuildError extends Error {
   constructor(message: string) {
     super(message);
@@ -398,6 +409,16 @@ export async function preBatchSimulate(
     return { index, method: operation.method, success: true } satisfies BatchSimulationResult;
   }));
   return results;
+}
+
+export async function simulateBatch(payload: BatchPayload): Promise<BatchSimulationSummary> {
+  const results = await preBatchSimulate(payload.operations, payload.context);
+  const invalidIndices = results.filter((result) => !result.success).map((result) => result.index);
+  return {
+    success: invalidIndices.length === 0,
+    results,
+    invalidIndices,
+  };
 }
 
 /**

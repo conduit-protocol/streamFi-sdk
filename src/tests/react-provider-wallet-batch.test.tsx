@@ -71,7 +71,7 @@ describe('StreamFiProvider & useStreamFiContext (#1095)', () => {
 
   it('keeps the same client across re-renders with a new inline config', () => {
     const wrapper = ({ children }: { children: React.ReactNode }) => (
-      <StreamFiProvider config={{ network: 'testnet' }}>{children}</StreamFiProvider>
+      <StreamFiProvider config={{ network: 'testnet', factoryAddress: 'CFACTORYPLACEHOLDER' }}>{children}</StreamFiProvider>
     );
     const { result, rerender } = renderHook(() => useStreamFiContext().client, { wrapper });
     const first = result.current;

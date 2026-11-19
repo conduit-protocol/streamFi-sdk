@@ -1,4 +1,4 @@
-import { SorobanRpc, xdr } from '@stellar/stellar-sdk';
+import { xdr } from '@stellar/stellar-sdk';
 
 /**
  * Each of the three Conduit contracts defines its own `Error` enum in Rust —
@@ -819,6 +819,7 @@ export class RateLimitError extends StreamFiError {
    * error, so callers can fall back to their existing error handling.
    */
   static fromRpcError(raw: unknown): RateLimitError | RpcServiceUnavailableError | null {
+    if (raw instanceof RateLimitError) return raw;
     if (!raw || typeof raw !== 'object') return null;
 
     const response = (raw as { response?: { status?: number; headers?: Record<string, unknown> } }).response;

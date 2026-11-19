@@ -1050,7 +1050,7 @@ export class GraphQLIndexer {
     let cursor: string | null | undefined = undefined;
     let pagesFetched = 0;
 
-    while (true) {
+    for (;;) {
       if (pagesFetched >= maxPages) {
         throw new IndexerMaxPagesExceededError(pagesFetched, maxPages);
       }

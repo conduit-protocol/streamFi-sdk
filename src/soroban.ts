@@ -33,7 +33,8 @@ import {
 } from "./errors.js";
 import { withRetry } from "./with-retry.js";
 import { coalesceAsync } from "./coalesce-async.js";
-import { recordSuccess, recordFailure } from "./rpc-circuit-state.js";
+import { recordSuccess, recordFailure, getCircuitState } from "./rpc-circuit-state.js";
+import { recordConnectionResult } from "./connection-health.js";
 
 // ── RPC Server cache ─────────────────────────────────────────────────────────
 // Reusing SorobanRpc.Server instances avoids creating a new HTTP agent per
@@ -48,6 +49,18 @@ const _serverCache = new Map<string, SorobanRpc.Server>();
  * eliminating per-call HTTP agent creation overhead.
  */
 export function getServer(rpcUrl: string): SorobanRpc.Server {
+  const activeUrl = resolveRpcEndpoint(rpcUrl);
+  let server = _serverCache.get(activeUrl);
+  if (!server) {
+    server = new SorobanRpc.Server(activeUrl, {
+      allowHttp: activeUrl.startsWith("http://"),
+    });
+    _serverCache.set(activeUrl, server);
+  }
+  return server;
+}
+
+function getServerForEndpoint(rpcUrl: string): SorobanRpc.Server {
   let server = _serverCache.get(rpcUrl);
   if (!server) {
     server = new SorobanRpc.Server(rpcUrl, {
@@ -101,6 +114,76 @@ export function getConsecutiveTimeouts(url: string): number {
 
 export function clearRpcEndpointStates(): void {
   _endpointStates.clear();
+}
+
+interface RpcEndpointGroup {
+  urls: string[];
+  activeIndex: number;
+  failureThreshold: number;
+}
+
+const _endpointGroups = new Map<string, RpcEndpointGroup>();
+
+function findEndpointGroup(url: string): RpcEndpointGroup | undefined {
+  const direct = _endpointGroups.get(url);
+  if (direct) return direct;
+  for (const group of _endpointGroups.values()) {
+    if (group.urls.includes(url)) return group;
+  }
+  return undefined;
+}
+
+export function registerRpcEndpointGroup(
+  urls: string[],
+  options: { failureThreshold?: number } = {},
+): string[] {
+  const unique = [...new Set(urls.map((url) => url.trim()).filter((url) => url.length > 0))];
+  if (unique.length === 0) return [];
+  const key = unique[0];
+  if (key === undefined) return [];
+  const existing = _endpointGroups.get(key);
+  if (existing) {
+    existing.urls = unique;
+    existing.activeIndex = 0;
+    existing.failureThreshold = options.failureThreshold ?? existing.failureThreshold;
+  } else {
+    _endpointGroups.set(key, {
+      urls: unique,
+      activeIndex: 0,
+      failureThreshold: Math.max(1, Math.floor(options.failureThreshold ?? 3)),
+    });
+  }
+  return unique;
+}
+
+export function clearRpcFailoverGroups(): void {
+  _endpointGroups.clear();
+}
+
+export function resolveRpcEndpoint(url: string): string {
+  const group = findEndpointGroup(url);
+  return group?.urls[group.activeIndex] ?? url;
+}
+
+export function getRpcEndpointGroup(url: string): readonly string[] | undefined {
+  return findEndpointGroup(url)?.urls;
+}
+
+export function advanceRpcEndpoint(
+  url: string,
+  attempted: ReadonlySet<string>,
+): string | undefined {
+  const group = findEndpointGroup(url);
+  if (!group) return undefined;
+  for (let offset = 1; offset <= group.urls.length; offset += 1) {
+    const index = (group.activeIndex + offset) % group.urls.length;
+    const candidate = group.urls[index];
+    if (candidate !== undefined && !attempted.has(candidate)) {
+      group.activeIndex = index;
+      return candidate;
+    }
+  }
+  return undefined;
 }
 
 // ── Ledger info cache ───────────────────────────────────────────────────────
@@ -162,10 +245,13 @@ export async function getLatestLedgerInfo(rpcUrl: string): Promise<LedgerInfo> {
     throw RateLimitError.fromRpcError(err) ?? err;
   }
 
+  const ledgerWithTime = ledger as typeof ledger & { closedAt?: string };
+  const closedAt = ledgerWithTime.closedAt ?? new Date(0).toISOString();
+
   const info: CachedLedgerInfo = {
     sequence: ledger.sequence,
-    timestamp: Math.floor(new Date(ledger.closedAt).getTime() / 1000),
-    closedAt: ledger.closedAt,
+    timestamp: Math.floor(new Date(closedAt).getTime() / 1000),
+    closedAt,
     cachedAt: now,
   };
 
@@ -417,58 +503,122 @@ export function isRetryableReadError(err: unknown): boolean {
   return hasNetworkErrorCode(err);
 }
 
+function isImmediateFailoverError(err: unknown): boolean {
+  return (
+    err instanceof RateLimitError ||
+    err instanceof RpcServiceUnavailableError ||
+    err instanceof StreamFiNetworkError ||
+    err instanceof CircuitOpenError ||
+    (err instanceof TypeError && NETWORK_TYPE_ERROR_MESSAGES.has(err.message)) ||
+    hasNetworkErrorCode(err)
+  );
+}
+
+function recordRpcOutcome(
+  endpoint: string,
+  ok: boolean,
+  startedAt: number,
+): void {
+  const durationMs = Date.now() - startedAt;
+  if (ok) {
+    recordRpcSuccess(endpoint);
+    recordSuccess(endpoint);
+  } else {
+    recordRpcTimeout(endpoint);
+    recordFailure(endpoint);
+  }
+  recordConnectionResult(endpoint, ok, durationMs, "rpc");
+}
+
 export function createRpcServer(rpcUrl: string): SorobanRpc.Server {
   const cached = _proxiedServerCache.get(rpcUrl);
   if (cached) return cached;
 
-  const server = getServer(rpcUrl);
-
+  const initialEndpoint = resolveRpcEndpoint(rpcUrl);
   const EXCLUDED_METHODS = ["constructor"];
 
-  const proxied = new Proxy(server, {
-    get(target, propKey, receiver) {
-      const origMethod = Reflect.get(target, propKey, receiver) as unknown;
+  const proxied = new Proxy(getServerForEndpoint(initialEndpoint), {
+    get(target, propKey) {
+      const currentEndpoint = resolveRpcEndpoint(rpcUrl);
+      const currentServer = getServerForEndpoint(currentEndpoint);
+      const origMethod = Reflect.get(currentServer, propKey, currentServer);
       if (
-        typeof origMethod === "function" &&
-        typeof propKey === "string" &&
-        !EXCLUDED_METHODS.includes(propKey)
+        typeof origMethod !== "function" ||
+        typeof propKey !== "string" ||
+        EXCLUDED_METHODS.includes(propKey)
       ) {
-        return async function (...args: unknown[]) {
-          return withRetry(
-            () =>
-              (origMethod as (...a: unknown[]) => Promise<unknown>).apply(
-                target,
-                args,
-              ),
-            {
+        return Reflect.get(target, propKey, target);
+      }
+
+      return async function (...args: unknown[]) {
+        const group = findEndpointGroup(rpcUrl);
+        if (!group || group.urls.length <= 1) {
+          const server = getServerForEndpoint(resolveRpcEndpoint(rpcUrl));
+          const method = Reflect.get(server, propKey, server) as (
+            ...a: unknown[]
+          ) => Promise<unknown>;
+          const startedAt = Date.now();
+          try {
+            const result = await withRetry(() => method.apply(server, args), {
               maxRetries: 3,
               baseDelayMs: 500,
               backoffFactor: 2,
+              jitter: "none",
               circuitScope: rpcUrl,
               ...(IDEMPOTENT_RPC_METHODS.has(propKey)
                 ? { shouldRetry: isRetryableReadError }
                 : {}),
-            },
-          )
-            .then((result) => {
-              recordRpcSuccess(rpcUrl);
-              recordSuccess(rpcUrl);
-              return result;
-            })
-            .catch((err) => {
-              // A CircuitOpenError means withRetry failed fast without ever
-              // attempting the operation — it isn't a new failure, so don't
-              // record one (that would keep resetting the cooldown and the
-              // circuit would never move to 'half-open').
-              if (!(err instanceof CircuitOpenError)) {
-                recordRpcTimeout(rpcUrl);
-                recordFailure(rpcUrl);
-              }
-              throw err;
             });
-        };
-      }
-      return Reflect.get(target, propKey, receiver);
+            recordRpcOutcome(rpcUrl, true, startedAt);
+            return result;
+          } catch (err) {
+            if (!(err instanceof CircuitOpenError)) {
+              recordRpcOutcome(rpcUrl, false, startedAt);
+            }
+            throw err;
+          }
+        }
+
+        const attempted = new Set<string>();
+        let lastError: unknown = new Error("All RPC endpoints failed");
+        while (attempted.size < group.urls.length) {
+          const endpoint = resolveRpcEndpoint(rpcUrl);
+          if (attempted.has(endpoint)) {
+            const next = advanceRpcEndpoint(rpcUrl, attempted);
+            if (next === undefined) break;
+            continue;
+          }
+          attempted.add(endpoint);
+          const server = getServerForEndpoint(endpoint);
+          const method = Reflect.get(server, propKey, server) as (
+            ...a: unknown[]
+          ) => Promise<unknown>;
+          const startedAt = Date.now();
+          try {
+            const result = await withRetry(() => method.apply(server, args), {
+              maxRetries: 0,
+              circuitScope: endpoint,
+              ...(IDEMPOTENT_RPC_METHODS.has(propKey)
+                ? { shouldRetry: isRetryableReadError }
+                : {}),
+            });
+            recordRpcOutcome(endpoint, true, startedAt);
+            return result;
+          } catch (err) {
+            lastError = err;
+            if (!(err instanceof CircuitOpenError)) {
+              recordRpcOutcome(endpoint, false, startedAt);
+            }
+            const shouldAdvance =
+              isImmediateFailoverError(err) ||
+              getConsecutiveTimeouts(endpoint) >= group.failureThreshold ||
+              getCircuitState(endpoint).state === "open";
+            if (!shouldAdvance) throw err;
+            if (advanceRpcEndpoint(rpcUrl, attempted) === undefined) break;
+          }
+        }
+        throw lastError;
+      };
     },
   });
 

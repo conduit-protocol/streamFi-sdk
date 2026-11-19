@@ -1,3 +1,5 @@
+import { recordConnectionResult } from "../connection-health.js";
+
 export interface WebSocketMessage {
   type: string;
   payload: unknown;
@@ -78,6 +80,7 @@ export class WebSocketRelayer {
   private heartbeatInterval: ReturnType<typeof setInterval> | null = null;
   private heartbeatTimeout: ReturnType<typeof setTimeout> | null = null;
   private awaitingPong = false;
+  private heartbeatSentAt: number | null = null;
   private dedupeWindowSize: number;
   /** Insertion-ordered set of recently processed message ids (#1056). */
   private seenMessageIds: Map<string, true> = new Map();
@@ -134,6 +137,11 @@ export class WebSocketRelayer {
     if (this.stateTransition === transition) return;
 
     this.stateTransition = transition;
+    if (transition === "connected") {
+      recordConnectionResult(this.url, true, 0, "relayer");
+    } else if (transition === "disconnected" || transition === "destroyed") {
+      recordConnectionResult(this.url, false, 0, "relayer");
+    }
     const state = this.state;
     for (const handler of this.stateChangeHandlers) {
       try {
@@ -232,7 +240,11 @@ export class WebSocketRelayer {
         ws.onmessage = (event: MessageEvent) => {
           // Any inbound frame proves the link is alive, not just a pong.
           if (this.awaitingPong) {
+            const latencyMs =
+              this.heartbeatSentAt === null ? 0 : Date.now() - this.heartbeatSentAt;
+            recordConnectionResult(this.url, true, latencyMs, "relayer");
             this.awaitingPong = false;
+            this.heartbeatSentAt = null;
             this.clearHeartbeatTimeout();
           }
           this.handleMessageSafe(event.data);
@@ -296,7 +308,11 @@ export class WebSocketRelayer {
 
     // Handle pong responses for heartbeat ping
     if (parsed.type === 'pong' && this.awaitingPong) {
+      const latencyMs =
+        this.heartbeatSentAt === null ? 0 : Date.now() - this.heartbeatSentAt;
+      recordConnectionResult(this.url, true, latencyMs, "relayer");
       this.awaitingPong = false;
+      this.heartbeatSentAt = null;
       this.clearHeartbeatTimeout();
       return;
     }
@@ -342,6 +358,7 @@ export class WebSocketRelayer {
         try {
           this.ws.send(JSON.stringify({ type: 'ping' }));
           this.awaitingPong = true;
+          this.heartbeatSentAt = Date.now();
           this.heartbeatTimeout = setTimeout(() => {
             if (this.awaitingPong && this.ws) {
               this.handleHeartbeatTimeout();
@@ -390,6 +407,7 @@ export class WebSocketRelayer {
       this.heartbeatInterval = null;
     }
     this.awaitingPong = false;
+    this.heartbeatSentAt = null;
   }
 
   private clearHeartbeatTimeout(): void {

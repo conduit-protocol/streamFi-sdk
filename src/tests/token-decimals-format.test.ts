@@ -49,7 +49,7 @@ describe('TokenModule.decimals (#1085)', () => {
     const tokens = new TokenModule({ network: 'testnet', keypair: owner });
 
     await tokens.decimals(customToken);
-    expect(mockGetTokenDecimals.mock.calls[0][2]).toBe(owner.publicKey());
+    expect(mockGetTokenDecimals.mock.calls[0]![2]).toBe(owner.publicKey());
   });
 
   it('skips the RPC for registered tokens and validates the value', async () => {
