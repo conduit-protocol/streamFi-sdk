@@ -548,3 +548,56 @@ export function formatTokenAmount(
   // This matches the expected behavior for token display
   return `${neg ? '-' : ''}${wholeWithCarry.toString()}.${fracStr}`;
 }
+
+/** Rounding mode for {@link divWithRounding}. */
+export type DivRoundingMode = 'floor' | 'ceil' | 'round';
+
+/**
+ * Integer division with explicit rounding (#1102).
+ *
+ * Native `BigInt` division truncates toward zero, which silently under-counts
+ * when distributing a deposit over a duration (and rounds negative results the
+ * "wrong" way). This makes the direction explicit:
+ *
+ * - `'floor'` rounds toward negative infinity.
+ * - `'ceil'` rounds toward positive infinity.
+ * - `'round'` rounds to the nearest integer, with halves rounded away from zero.
+ *
+ * @throws {RangeError} When `denominator` is `0n`.
+ *
+ * @example
+ * ```ts
+ * divWithRounding(10n, 3n, 'floor'); // 3n
+ * divWithRounding(10n, 3n, 'ceil');  // 4n
+ * divWithRounding(5n, 2n, 'round');  // 3n
+ * ```
+ */
+export function divWithRounding(
+  numerator: bigint,
+  denominator: bigint,
+  mode: DivRoundingMode = 'floor',
+): bigint {
+  if (denominator === 0n) {
+    throw new RangeError('divWithRounding: division by zero');
+  }
+  const quotient = numerator / denominator;
+  const remainder = numerator % denominator;
+  if (remainder === 0n) return quotient;
+
+  // Truncation moved a negative result toward zero, i.e. up.
+  const negative = (numerator < 0n) !== (denominator < 0n);
+  switch (mode) {
+    case 'floor':
+      return negative ? quotient - 1n : quotient;
+    case 'ceil':
+      return negative ? quotient : quotient + 1n;
+    case 'round': {
+      const absRemainder = remainder < 0n ? -remainder : remainder;
+      const absDenominator = denominator < 0n ? -denominator : denominator;
+      if (absRemainder * 2n < absDenominator) return quotient;
+      return negative ? quotient - 1n : quotient + 1n;
+    }
+    default:
+      throw new RangeError(`divWithRounding: unknown rounding mode "${String(mode)}"`);
+  }
+}

@@ -3,6 +3,7 @@ import {
   isRecoverableError, RateLimitError, RpcServiceUnavailableError, StreamFiNetworkError,
   IndexerTimeoutError, ConfirmationTimeoutError, CircuitOpenError, OperationAbortedError,
   SignatureTimeoutError, ValidationError, InsufficientBalanceError,
+  StreamFiError, StreamNotFoundError,
 } from '../errors.js';
 
 describe('isRecoverableError', () => {
@@ -42,5 +43,53 @@ describe('isRecoverableError', () => {
     expect(isRecoverableError(null)).toBe(false);
     expect(isRecoverableError('boom')).toBe(false);
     expect(isRecoverableError(new Error('generic'))).toBe(false);
+  });
+});
+
+describe('StreamFiError.isRecoverable (#1101)', () => {
+  it('is true for transient SDK errors, so a UI can offer "Retry"', () => {
+    const transient: StreamFiError[] = [
+      new RateLimitError('slow down'),
+      new RpcServiceUnavailableError('down'),
+      new StreamFiNetworkError('net'),
+      new IndexerTimeoutError('http://x', 10),
+      new ConfirmationTimeoutError('h', 3, 100),
+      new CircuitOpenError('http://x', null),
+    ];
+    for (const err of transient) {
+      expect(err).toBeInstanceOf(StreamFiError);
+      expect(err).toBeInstanceOf(Error);
+      expect(err.isRecoverable).toBe(true);
+    }
+  });
+
+  it('is false for logic, auth, validation and cancellation errors', () => {
+    const permanent: StreamFiError[] = [
+      new OperationAbortedError('op'),
+      new SignatureTimeoutError(1),
+      new ValidationError(['bad']),
+      new InsufficientBalanceError(1n, 2n),
+      new StreamNotFoundError(7n),
+    ];
+    for (const err of permanent) {
+      expect(err).toBeInstanceOf(StreamFiError);
+      expect(err.isRecoverable).toBe(false);
+    }
+  });
+
+  it('always agrees with isRecoverableError', () => {
+    const errors: StreamFiError[] = [
+      new RateLimitError('slow down'),
+      new ValidationError(['bad']),
+      new StreamNotFoundError(1n),
+    ];
+    for (const err of errors) {
+      expect(err.isRecoverable).toBe(isRecoverableError(err));
+    }
+  });
+
+  it('is not an own enumerable property, so serialised errors are unchanged', () => {
+    const err = new RateLimitError('slow down');
+    expect(Object.keys(err)).not.toContain('isRecoverable');
   });
 });
