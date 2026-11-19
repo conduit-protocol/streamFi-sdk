@@ -164,15 +164,26 @@ export class StreamBuilder {
     }
     if (typeof normalized === 'bigint') {
       if (normalized <= 0n) {
-        throw new Error('Invalid StreamBuilder parameter: amount must be a positive value');
+        throw new ValidationError(['Invalid StreamBuilder parameter: amount must be a positive value']);
       }
     } else {
       if (!Number.isFinite(normalized) || normalized <= 0) {
-        throw new Error('Invalid StreamBuilder parameter: amount must be a positive finite number');
+        throw new ValidationError(['Invalid StreamBuilder parameter: amount must be a positive finite number']);
       }
     }
     this._amount = normalized;
     return this;
+  }
+
+  /**
+   * Sets the deposit amount of tokens to stream.
+   * Strictly validates that the deposit amount is greater than zero (`> 0n`).
+   * @param val - The deposit amount in the token's smallest unit.
+   * @returns The builder instance for chaining.
+   * @throws {ValidationError} If the deposit amount is zero or negative.
+   */
+  depositAmount(val: number | bigint | string): this {
+    return this.amount(val);
   }
 
   /**
@@ -334,6 +345,12 @@ export class StreamBuilder {
     }
     if (this._amount === undefined || this._amount === null) {
       issues.push('amount is required');
+    } else if (
+      typeof this._amount === 'bigint'
+        ? this._amount <= 0n
+        : !Number.isFinite(Number(this._amount)) || Number(this._amount) <= 0
+    ) {
+      issues.push('Invalid StreamBuilder parameter: amount must be a positive value');
     }
 
     return issues;

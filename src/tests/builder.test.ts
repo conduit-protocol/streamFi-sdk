@@ -251,3 +251,26 @@ describe('StreamBuilder', () => {
     expect(args).toHaveLength(8);
   });
 });
+
+describe('StreamBuilder non-zero deposit amount validation (#1066)', () => {
+  const TOKEN = 'CAAQCAIBAEAQCAIBAEAQCAIBAEAQCAIBAEAQCAIBAEAQCAIBAEAQC526';
+  const SENDER = 'GAAQCAIBAEAQCAIBAEAQCAIBAEAQCAIBAEAQCAIBAEAQCAIBAEAQDZ7H';
+  const RECIPIENT = 'GABAEAQCAIBAEAQCAIBAEAQCAIBAEAQCAIBAEAQCAIBAEAQCAIBAEJXA';
+
+  it('throws ValidationError when depositAmount or amount is 0n or -100n', () => {
+    expect(() => new StreamBuilder().depositAmount(0n)).toThrow(ValidationError);
+    expect(() => new StreamBuilder().depositAmount(-100n)).toThrow(ValidationError);
+    expect(() => new StreamBuilder().amount(0n)).toThrow(ValidationError);
+    expect(() => new StreamBuilder().amount(-100n)).toThrow(ValidationError);
+  });
+
+  it('throws ValidationError on build() if a zero or negative bigint deposit amount is present', () => {
+    const zeroBuilder = new StreamBuilder().token(TOKEN).sender(SENDER).recipient(RECIPIENT);
+    (zeroBuilder as unknown as { _amount: bigint })._amount = 0n;
+    expect(() => zeroBuilder.build()).toThrow(ValidationError);
+
+    const negBuilder = new StreamBuilder().token(TOKEN).sender(SENDER).recipient(RECIPIENT);
+    (negBuilder as unknown as { _amount: bigint })._amount = -100n;
+    expect(() => negBuilder.build()).toThrow(ValidationError);
+  });
+});
