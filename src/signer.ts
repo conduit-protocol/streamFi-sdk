@@ -183,10 +183,18 @@ export class LedgerSigner implements Signer {
       // optional deps (which may be absent from the dependency tree).
       const ledgerAppModule = '@ledgerhq/hw-app-str';
       const ledgerTransportModule = '@ledgerhq/hw-transport-webusb';
-      const hwApp: any = await import(ledgerAppModule);
-      const transportMod: any = await import(ledgerTransportModule);
-      const TransportWebUSB = transportMod.default ?? transportMod;
-      const t: unknown = await TransportWebUSB.create();
+      const hwApp = (await import(ledgerAppModule)) as {
+        default: new (transport: unknown) => LedgerDevice;
+      };
+      const transportMod = (await import(ledgerTransportModule)) as {
+        default?: { create: () => Promise<unknown> };
+        create?: () => Promise<unknown>;
+      };
+      const transportFactory = transportMod.default ?? transportMod;
+      if (!transportFactory.create) {
+        throw new Error('Ledger WebUSB transport does not expose create()');
+      }
+      const t = await transportFactory.create();
       const app = new hwApp.default(t);
       return {
         getPublicKey: (path: string) => app.getPublicKey(path),

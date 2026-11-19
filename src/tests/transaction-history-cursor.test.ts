@@ -86,7 +86,7 @@ describe('createTransactionHistoryPager (#1084)', () => {
     expect(page.nextCursor).toBe('c10');
   });
 
-  const loopCases: Array<[string, RawTransactionPage['pageInfo']]> = [
+  const loopCases: Array<[string, NonNullable<RawTransactionPage['pageInfo']>]> = [
     ['a missing cursor', { hasNextPage: true }],
     ['an empty cursor', { hasNextPage: true, endCursor: '' }],
     ['the same cursor again', { hasNextPage: true, endCursor: 'c1' }],

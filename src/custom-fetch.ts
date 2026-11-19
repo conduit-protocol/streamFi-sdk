@@ -130,15 +130,20 @@ async function fetchAdapter(config: RequestConfig): Promise<unknown> {
   const registration = registry.get(stripTrailingSlash(url));
   if (!registration) throw new Error(`No custom fetch registered for ${url}`);
 
-  const send = () => sendOnce(config, url, customFetch);
+  const send = () => sendOnce(config, url, registration.fetch);
   return isIdempotentRequest(config) ? retryGatewayErrors(send, config.signal) : send();
 }
 
 async function sendOnce(config: RequestConfig, url: string, customFetch: typeof fetch): Promise<unknown> {
-  const signals: AbortSignal[] = [];
-  if (config.signal) signals.push(config.signal);
-  if (config.timeout && config.timeout > 0 && typeof AbortSignal.timeout === 'function') {
-    signals.push(AbortSignal.timeout(config.timeout));
+  const controller = new AbortController();
+  let timer: ReturnType<typeof setTimeout> | undefined;
+  const onCallerAbort = () => controller.abort(config.signal?.reason);
+  if (config.signal) {
+    if (config.signal.aborted) controller.abort(config.signal.reason);
+    else config.signal.addEventListener('abort', onCallerAbort, { once: true });
+  }
+  if (config.timeout && config.timeout > 0) {
+    timer = setTimeout(() => controller.abort(new Error('RPC request timed out')), config.timeout);
   }
 
   const init: RequestInit = {
@@ -151,7 +156,7 @@ async function sendOnce(config: RequestConfig, url: string, customFetch: typeof 
   let res: Response;
   let text: string;
   try {
-    res = await registration.fetch(url, init);
+    res = await customFetch(url, init);
     text = await res.text();
   } finally {
     if (timer !== undefined) clearTimeout(timer);

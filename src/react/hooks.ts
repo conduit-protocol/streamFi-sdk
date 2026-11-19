@@ -413,9 +413,18 @@ export interface UseWalletResult {
   disconnect: () => Promise<void>;
 }
 
-function walletStorage(): Storage | null {
+interface WalletStorage {
+  getItem(key: string): string | null;
+  setItem(key: string, value: string): void;
+  removeItem(key: string): void;
+}
+
+function walletStorage(): WalletStorage | null {
   try {
-    return typeof window !== 'undefined' && window.localStorage ? window.localStorage : null;
+    const globalWithWindow = globalThis as typeof globalThis & {
+      window?: { localStorage?: WalletStorage };
+    };
+    return globalWithWindow.window?.localStorage ?? null;
   } catch {
     return null;
   }

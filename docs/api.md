@@ -17,6 +17,8 @@ new ConduitClient(config: ConduitConfig)
 | `network` | `'mainnet' \| 'testnet' \| 'local'` | ✓ | — |
 | `keypair` | `Keypair` | For writes | — |
 | `rpcUrl` | `string` | | Network default |
+| `rpcUrls` | `string[]` | | Fallback RPC endpoints; takes precedence over `rpcUrl` |
+| `rpcUrlFailureThresholdConsecutive` | `number` | | Consecutive failures before rotating endpoints. Default `3` |
 | `factoryAddress` | `string` | | Deployed factory |
 | `governorAddress` | `string` | | Deployed governor |
 | `wallet` | `WalletAdapter` | | — |
@@ -38,6 +40,11 @@ new ConduitClient(config: ConduitConfig)
 
 * `pauseStream(streamId: string) → Promise<string>` — equivalent to `client.streams.pause(streamId)`.
 * `unpauseStream(streamId: string) → Promise<string>` — equivalent to `client.streams.resume(streamId)`.
+* `getConnectionHealth(): ConnectionHealthStatus` — synchronous snapshot of active RPC and relayer health: `connected`, `status`, average successful `latencyMs`, `packetLossRate`, `activeRpcUrl`, per-endpoint samples, and relayer heartbeat stats.
+* `refreshConnectionHealth(): Promise<ConnectionHealthStatus>` — performs a lightweight `getLatestLedger()` probe and returns the updated snapshot.
+* `getCurrentRpcUrl(): string` — the endpoint currently selected by the failover group.
+* `getStreamProgress(stream, currentTimestamp?)` / `getStreamStatus(stream, currentTimestamp?)` — formatted local progress and remaining time; no RPC call.
+* `simulateCreateStream(params): Promise<StreamSimulationResult>` — dry-run stream creation to preview resource fees, storage/rent estimate, and required balance without signing or submitting.
 * `setWallet(wallet: WalletAdapter): void` — dynamically attach or change the active wallet adapter. Throws `UnsupportedChainError` if the wallet's `chainId` is on a different network than the client was configured for. See [Wallet Adapters](#wallet-adapters) below. Propagates to `client.streams` and `client.tokens`, and to an already-constructed `client.factory` (whose read simulations are sourced from the active wallet). `client.governor` is read-only, uses `config.keypair` for simulation fee sourcing, and is unaffected.
 
 ---
@@ -103,6 +110,18 @@ const factory = getContractId('standalone', 'factory') ?? myLocalFactoryAddress;
 | `ratePerSecond` | `string?` | Stroops/s; exclusive with `durationSeconds` |
 
 **Throws:** `ConduitError` with `contract: 'factory'` — `FactoryErrorCode.InvalidDeposit`, `.InsufficientDeposit`, `.BackdatedStream`, `.InvalidTimeRange`, `.RateExceedsMax`, `.DurationTooShort`
+
+---
+
+### `simulateCreateStream(params) → Promise<StreamSimulationResult>`
+
+Runs the same `create_stream` simulation as `create()` but never signs or submits a transaction. Returns `minResourceFee`, `resourceFee`, `storageDeposit`, `depositAmount`, `requiredBalance`, `inclusionFee`, `totalFee`, CPU/read/write usage, and `storageEntries`. `storageDeposit` is the best available Soroban resource-fee estimate; the RPC does not expose a separate rent amount.
+
+---
+
+### `getStreamProgress(stream, currentTimestamp?)` / `getStreamStatus(stream, currentTimestamp?)`
+
+Pure helpers returning `StreamProgress`: ratio and percentage complete, elapsed/remaining seconds, lifecycle status, cumulative `streamed`, `withdrawable`, and display strings such as `"45%"` and `"1h 30m"`. Open-ended streams report `durationSeconds: null` and `formattedRemaining: "Open-ended"`.
 
 ---
 
@@ -756,6 +775,14 @@ clearServerCache();
 > gives you the cached-but-unwrapped instance — no automatic retry — so you do not need to call
 > it yourself unless you are using the low-level Soroban helpers directly and want to manage
 > retries on your own.
+
+### Multi-endpoint failover
+
+When `rpcUrls` contains more than one endpoint, the SDK registers a process-wide failover group keyed by the first URL. A call is attempted against the active endpoint with no same-endpoint retries: HTTP 429, HTTP 503, transport timeouts/network errors, and open circuits immediately rotate to the next untried endpoint. `rpcUrlFailureThresholdConsecutive` also rotates after that many generic consecutive failures. `getCurrentRpcUrl()` reports the active endpoint, and `getConnectionHealth()` reports latency and packet loss for every configured endpoint.
+
+### Connection health
+
+`recordConnectionResult(scope, ok, durationMs, kind)` and the exported `getEndpointHealth(url)` / `getRelayerHealth()` track a rolling 60-second window (max 200 samples). Relayer heartbeat ping/pong results are recorded under the relayer scope; RPC calls record successes and failures under their endpoint URL. `ConnectionHealthStatus.status` is `'healthy'` while the last sample succeeded and fewer than half the recent samples failed, `'degraded'` when the last sample succeeded but packet loss is at least 50%, and `'disconnected'` when the last sample failed or none exist.
 
 ### `getTokenDecimals(rpcUrl, passphrase, callerAddr, tokenId) → Promise<number>`
 

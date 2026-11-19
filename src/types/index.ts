@@ -297,6 +297,22 @@ export interface ConduitConfig {
   requestTimeoutMs?: number;
 }
 
+export enum StreamStatus {
+  Created = "Created",
+  Active = "Active",
+  Paused = "Paused",
+  Completed = "Completed",
+  Cancelled = "Cancelled",
+}
+
+export function deriveStreamStatus(stream: StreamInfo, now: number): StreamStatus {
+  if (stream.cancelled) return StreamStatus.Cancelled;
+  if (stream.paused) return StreamStatus.Paused;
+  if (stream.endTime !== 0 && now >= stream.endTime) return StreamStatus.Completed;
+  if (now < stream.startTime) return StreamStatus.Created;
+  return StreamStatus.Active;
+}
+
 export interface StreamInfo {
   id: bigint;
   /** DripStream contract address */
@@ -353,6 +369,36 @@ export interface CreateStreamResult {
   streamId: bigint;
   streamAddress: string;
   txHash: string;
+}
+
+export interface StreamProgress {
+  progress: number;
+  progressRatio: number;
+  elapsedSeconds: number;
+  remainingSeconds: number;
+  durationSeconds: number | null;
+  isOpenEnded: boolean;
+  status: "active" | "paused" | "completed" | "cancelled";
+  streamed: bigint;
+  withdrawable: bigint;
+  currentTimestamp: number;
+  formattedProgress: string;
+  formattedRemaining: string;
+}
+
+export interface StreamSimulationResult {
+  minResourceFee: bigint;
+  resourceFee: bigint;
+  storageDeposit: bigint;
+  depositAmount: bigint;
+  requiredBalance: bigint;
+  inclusionFee: bigint;
+  totalFee: bigint;
+  cpuInstructions: bigint;
+  readBytes: bigint;
+  writeBytes: bigint;
+  storageEntries: number;
+  simulationError?: string;
 }
 
 export interface ListStreamsParams {

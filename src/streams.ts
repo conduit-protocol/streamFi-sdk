@@ -20,7 +20,6 @@ import type {
   StreamEventHandlers,
   StreamInfo,
   Subscription,
-  BatchWithdrawItem,
   BatchWithdrawPayload,
   BatchWithdrawResult,
   BatchCreateStreamResult,
@@ -31,6 +30,9 @@ import type {
   ValidationResult,
   CancelEvent,
   CliffReachedEvent,
+  DurationBreakdown,
+  StreamProgress,
+  StreamSimulationResult,
 } from "./types/index.js";
 import type { WalletAdapter } from "./adapters/types.js";
 import type { Signer } from "./signer.js";
@@ -41,6 +43,10 @@ import {
   calculateRate,
   bigintSafeStringify,
   isValidAddress,
+  streamedTotalLocal,
+  withdrawableLocal,
+  streamStatus,
+  formatDuration,
 } from "./utils.js";
 import {
   buildContractCallTx,
@@ -405,6 +411,50 @@ export function calculateVestedPercentage(
   return ratio > 1 ? 1 : ratio;
 }
 
+export function getStreamProgress(
+  stream: StreamInfo,
+  currentTimestamp: number = Math.floor(Date.now() / 1000),
+): StreamProgress {
+  const isOpenEnded = stream.endTime === 0;
+  const ratio = stream.cancelled
+    ? 0
+    : Math.min(1, Math.max(0, calculateVestedPercentage(stream, currentTimestamp)));
+  const progress = Math.round(ratio * 10000) / 100;
+  const endClamped =
+    !isOpenEnded && currentTimestamp > stream.endTime
+      ? stream.endTime
+      : currentTimestamp;
+  const effectiveNow =
+    stream.paused && stream.pausedAt < endClamped ? stream.pausedAt : endClamped;
+  const elapsedSeconds = Math.max(0, effectiveNow - stream.startTime);
+  const remainingSeconds = isOpenEnded
+    ? 0
+    : Math.max(0, stream.endTime - currentTimestamp);
+  const formattedPercent = progress.toFixed(2).replace(/\.?0+$/, "");
+
+  return {
+    progress,
+    progressRatio: ratio,
+    elapsedSeconds,
+    remainingSeconds,
+    durationSeconds: isOpenEnded ? null : Math.max(0, stream.endTime - stream.startTime),
+    isOpenEnded,
+    status: streamStatus(stream, currentTimestamp),
+    streamed: streamedTotalLocal(stream, currentTimestamp),
+    withdrawable: withdrawableLocal(stream, currentTimestamp),
+    currentTimestamp,
+    formattedProgress: `${formattedPercent}%`,
+    formattedRemaining: isOpenEnded ? "Open-ended" : formatDuration(remainingSeconds),
+  };
+}
+
+export function getStreamStatus(
+  stream: StreamInfo,
+  currentTimestamp: number = Math.floor(Date.now() / 1000),
+): StreamProgress {
+  return getStreamProgress(stream, currentTimestamp);
+}
+
 /**
  * Pure helper to check whether `walletAddress` can cancel `stream` right
  * now, for conditionally rendering/disabling a "Cancel Stream" button
@@ -512,11 +562,17 @@ export function simulateWithdraw(
   };
 }
 
+interface EstimateOperationObject extends Partial<CreateStreamParams> {
+  params?: EstimateOperationObject;
+  streamId?: bigint | string;
+  amount?: bigint;
+}
+
 export class StreamsModule {
   private readonly rpcUrl: string;
   private readonly passphrase: string;
   private readonly horizonUrl: string;
-  private readonly _factory: FactoryModule;
+  private _factoryInstance?: FactoryModule;
   private readonly feeEstimator: FeeEstimator;
   private readonly feeEstimateCache = new Map<
     string,
@@ -547,11 +603,22 @@ export class StreamsModule {
   /** In-flight `get()` calls keyed by stream ID, shared by concurrent callers (#925). */
   private readonly _inFlightGets = new Map<bigint, Promise<StreamInfo>>();
 
+  private get _factory(): FactoryModule {
+    if (!this._factoryInstance) {
+      if (!this.config.factoryAddress) {
+        throw new Error(
+          `ConduitConfig.factoryAddress is required (no default DripFactory is known for network "${this.config.network}").`,
+        );
+      }
+      this._factoryInstance = new FactoryModule(this.config);
+    }
+    return this._factoryInstance;
+  }
+
   constructor(private readonly config: ConduitConfig) {
     this.rpcUrl = config.rpcUrl ?? DEFAULT_RPC[config.network];
     this.passphrase = NETWORK_PASSPHRASE[config.network];
     this.horizonUrl = config.horizonUrl ?? DEFAULT_HORIZON[config.network];
-    this._factory = new FactoryModule(config);
     this._fee = resolveFee(config);
     this.feeEstimator = new FeeEstimator(
       100n,
@@ -572,6 +639,7 @@ export class StreamsModule {
   setWallet(wallet: WalletAdapter): void {
     this.activeWallet = wallet;
     this._cachedCallerAddr = null;
+    this._factoryInstance?.setWallet(wallet);
   }
 
   private _signer(): Signer | null {
@@ -751,6 +819,109 @@ export class StreamsModule {
 
     const streamAddress = (await this._factory.streamAddress(streamId)) ?? "";
     return { streamId, streamAddress, txHash };
+  }
+
+  async simulateCreateStream(
+    params: CreateStreamParams,
+  ): Promise<StreamSimulationResult> {
+    const senderAddr = await this._getSenderAddress();
+    const validation = validateStreamParameters(params);
+    if (!validation.isValid) {
+      throw new Error(validation.error ?? "Invalid stream parameters");
+    }
+
+    const {
+      recipient,
+      token,
+      depositAmount,
+      durationSeconds,
+      ratePerSecond,
+      startTime,
+      clawbackEnabled = false,
+    } = params;
+
+    const factoryId = this.config.factoryAddress ?? "";
+    let resolvedToken = token;
+    if (token === "native") {
+      resolvedToken = Asset.native().contractId(this.passphrase);
+    } else if (token === "USDC") {
+      const issuer = USDC_ISSUER[this.config.network];
+      resolvedToken = new Asset("USDC", issuer).contractId(this.passphrase);
+    }
+
+    const decimals = await getTokenDecimals(
+      this.rpcUrl,
+      this.passphrase,
+      senderAddr,
+      resolvedToken,
+    );
+    const depositStroops = toStroops(depositAmount, decimals);
+    const rateStroops = ratePerSecond
+      ? BigInt(ratePerSecond)
+      : calculateRate(depositAmount, durationSeconds!, decimals);
+    const start = startTime ?? Math.floor(Date.now() / 1000);
+    const end = durationSeconds ? start + durationSeconds : 0;
+
+    const args = [
+      new Address(senderAddr).toScVal(),
+      new Address(recipient).toScVal(),
+      new Address(resolvedToken).toScVal(),
+      nativeToScVal(depositStroops, { type: "i128" }),
+      nativeToScVal(rateStroops, { type: "i128" }),
+      nativeToScVal(start, { type: "u64" }),
+      nativeToScVal(end, { type: "u64" }),
+      boolToScVal(clawbackEnabled),
+    ];
+
+    const tx = await buildContractCallTx(
+      this.rpcUrl,
+      this.passphrase,
+      senderAddr,
+      factoryId,
+      "create_stream",
+      args,
+      this._fee,
+      undefined,
+      this._txOptions(),
+    );
+    const sim = await catchNetworkError(
+      "simulateTransaction (create preview)",
+      this._server().simulateTransaction(tx),
+    );
+
+    let minResourceFee = estimateRequiredFee(sim, CREATE_RESOURCE_FEE_ESTIMATE);
+    let cpuInstructions = 0n;
+    let readBytes = 0n;
+    let writeBytes = 0n;
+    let storageEntries = 0;
+    let simulationError: string | undefined;
+
+    if (SorobanRpc.Api.isSimulationError(sim)) {
+      simulationError = sim.error;
+    } else {
+      const resources = sim.transactionData.build().resources();
+      minResourceFee = estimateRequiredFee(sim, CREATE_RESOURCE_FEE_ESTIMATE);
+      cpuInstructions = BigInt(resources.instructions());
+      readBytes = BigInt(resources.readBytes());
+      writeBytes = BigInt(resources.writeBytes());
+      storageEntries = resources.footprint().readWrite().length;
+    }
+
+    const inclusionFee = BigInt(this._fee);
+    return {
+      minResourceFee,
+      resourceFee: minResourceFee,
+      storageDeposit: minResourceFee,
+      depositAmount: depositStroops,
+      requiredBalance: depositStroops + inclusionFee + minResourceFee,
+      inclusionFee,
+      totalFee: inclusionFee + minResourceFee,
+      cpuInstructions,
+      readBytes,
+      writeBytes,
+      storageEntries,
+      ...(simulationError === undefined ? {} : { simulationError }),
+    };
   }
 
   /** Fetch full stream state from the deployed DripStream contract. */
@@ -1009,7 +1180,7 @@ export class StreamsModule {
           const depositStroops = toStroops(depositAmount, decimals);
           const rateStroops = ratePerSecond
             ? BigInt(ratePerSecond)
-            : calculateRate(depositAmount, durationSeconds!, decimals);
+          : calculateRate(depositAmount, durationSeconds as number, decimals);
           const start = startTime ?? Math.floor(Date.now() / 1000);
           const end = durationSeconds ? start + durationSeconds : 0;
 
@@ -1302,7 +1473,7 @@ export class StreamsModule {
     const opType = typeof operation === "string" ? operation : operation.type;
     const opObj = (
       typeof operation === "object" && operation !== null ? operation : {}
-    ) as Record<string, any>;
+    ) as EstimateOperationObject;
     const cacheKey = `${opType}:${JSON.stringify(operation, (_key, value) =>
       typeof value === "bigint" ? `${value}n` : value,
     )}`;
@@ -1667,7 +1838,7 @@ export class StreamsModule {
   async onStreamEvent(
     streamId: bigint | string,
     type: 'CliffReached' | 'Cancelled',
-    callback: (event: CancelEvent | CliffReachedEvent) => void,
+    callback: ((event: CancelEvent) => void) | ((event: CliffReachedEvent) => void),
     options?: CliffReachedListenerOptions,
   ): Promise<Subscription> {
     const addr = await this._resolveAddr(BigInt(streamId));

@@ -78,7 +78,7 @@ describe('GovernorModule.simulateProposalExecution (#1088)', () => {
       writeBytes: 30,
     });
     expect(result.raw).toBe(successSim);
-    const [, , caller, contractId, method] = mockBuildTx.mock.calls[0];
+    const [, , caller, contractId, method] = mockBuildTx.mock.calls[0]!;
     expect(caller).toBe(ZERO_ADDR);
     expect(contractId).toBe(governorAddress);
     expect(method).toBe('execute');
@@ -90,7 +90,7 @@ describe('GovernorModule.simulateProposalExecution (#1088)', () => {
     const governor = new GovernorModule({ network: 'testnet', governorAddress, keypair });
 
     await governor.simulateProposalExecution(1);
-    expect(mockBuildTx.mock.calls[0][2]).toBe(keypair.publicKey());
+    expect(mockBuildTx.mock.calls[0]![2]).toBe(keypair.publicKey());
   });
 
   it('throws when the execution would revert', async () => {

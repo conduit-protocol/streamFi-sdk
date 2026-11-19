@@ -93,7 +93,10 @@ describe('simulateBatch()', () => {
   it('propagates validateContext errors as a BatchBuildError', async () => {
     const { BatchBuildError } = await import('../batch-tx.js');
     await expect(
-      simulateBatch({ operations: [{ method: 'a' }], context: { ...CONTEXT, rpcUrl: undefined, sequence: undefined } }),
+      simulateBatch({
+        operations: [{ method: 'a' }],
+        context: { ...CONTEXT, rpcUrl: undefined, sequence: undefined } as unknown as BatchTransactionContext,
+      }),
     ).rejects.toThrow(BatchBuildError);
   });
 });
