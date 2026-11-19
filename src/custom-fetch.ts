@@ -53,6 +53,8 @@ function headerRecord(config: RequestConfig): Record<string, string> {
 
 /** Gateway statuses retried for idempotent requests (#980). Other 5xx responses are not. */
 const RETRYABLE_GATEWAY_STATUSES = new Set([502, 503, 504]);
+/** HTTP 429 Too Many Requests — retried with Retry-After or exponential backoff. */
+const RATE_LIMIT_STATUS = 429;
 /** Retries after the first attempt, so an idempotent call makes at most 4 requests. */
 const GATEWAY_MAX_RETRIES = 3;
 /** Wait before retry `n` is `GATEWAY_BASE_DELAY_MS * 2 ** n`: 250, 500, then 1000 ms. */
@@ -108,19 +110,62 @@ function sleep(ms: number, signal?: AbortSignal): Promise<void> {
 }
 
 /**
- * Re-runs `send` after a 502/503/504 response, with exponential backoff, up to
- * {@link GATEWAY_MAX_RETRIES} times. Any other error, and any abort, is thrown
- * through unchanged so callers see the same error shape as before.
+ * Parse the Retry-After header to determine backoff delay in milliseconds.
+ * Handles both delay-seconds and HTTP-date formats per RFC 7231.
+ *
+ * @param header - Value of the Retry-After response header.
+ * @param defaultMs - Fallback delay if header is invalid.
+ * @returns Delay in milliseconds to wait before retrying.
+ */
+function parseRetryAfter(header: string | null | undefined, defaultMs: number): number {
+  if (!header || typeof header !== 'string') return defaultMs;
+
+  const trimmed = header.trim();
+
+  // Try parsing as delay-seconds (e.g., "120").
+  const seconds = parseInt(trimmed, 10);
+  if (!isNaN(seconds) && seconds >= 0) {
+    return seconds * 1000;
+  }
+
+  // Try parsing as HTTP-date (e.g., "Wed, 21 Oct 2026 07:28:00 GMT").
+  const retryDate = new Date(trimmed);
+  if (!isNaN(retryDate.getTime())) {
+    const delayMs = Math.max(0, retryDate.getTime() - Date.now());
+    return delayMs;
+  }
+
+  return defaultMs;
+}
+
+/**
+ * Re-runs `send` after a 502/503/504 or 429 response, with exponential backoff
+ * or Retry-After header parsing, up to {@link GATEWAY_MAX_RETRIES} times.
+ * Any other error, and any abort, is thrown through unchanged so callers see
+ * the same error shape as before.
  */
 async function retryGatewayErrors(send: () => Promise<unknown>, signal?: AbortSignal): Promise<unknown> {
   for (let attempt = 0; ; attempt += 1) {
     try {
       return await send();
     } catch (err) {
-      const status = (err as { response?: { status?: unknown } } | null)?.response?.status;
-      const retryable = typeof status === 'number' && RETRYABLE_GATEWAY_STATUSES.has(status);
+      const status = (err as { response?: { status?: unknown; headers?: Record<string, string> } } | null)?.response?.status;
+      const headers = (err as { response?: { headers?: Record<string, string> } } | null)?.response?.headers ?? {};
+
+      const isGatewayError = typeof status === 'number' && RETRYABLE_GATEWAY_STATUSES.has(status);
+      const isRateLimit = status === RATE_LIMIT_STATUS;
+      const retryable = isGatewayError || isRateLimit;
+
       if (!retryable || attempt >= GATEWAY_MAX_RETRIES || signal?.aborted) throw err;
-      await sleep(GATEWAY_BASE_DELAY_MS * 2 ** attempt, signal);
+
+      let delayMs: number;
+      if (isRateLimit && headers['retry-after']) {
+        delayMs = parseRetryAfter(headers['retry-after'], GATEWAY_BASE_DELAY_MS * 2 ** attempt);
+      } else {
+        delayMs = GATEWAY_BASE_DELAY_MS * 2 ** attempt;
+      }
+
+      await sleep(delayMs, signal);
     }
   }
 }
@@ -136,14 +181,32 @@ async function fetchAdapter(config: RequestConfig): Promise<unknown> {
 
 async function sendOnce(config: RequestConfig, url: string, customFetch: typeof fetch): Promise<unknown> {
   const controller = new AbortController();
-  let timer: ReturnType<typeof setTimeout> | undefined;
   const onCallerAbort = () => controller.abort(config.signal?.reason);
   if (config.signal) {
     if (config.signal.aborted) controller.abort(config.signal.reason);
     else config.signal.addEventListener('abort', onCallerAbort, { once: true });
   }
+
+  // Apply timeout via AbortSignal.timeout or manual timer, whichever is available.
+  let timeoutSignal: AbortSignal | undefined;
   if (config.timeout && config.timeout > 0) {
-    timer = setTimeout(() => controller.abort(new Error('RPC request timed out')), config.timeout);
+    if (typeof AbortSignal !== 'undefined' && typeof AbortSignal.timeout === 'function') {
+      timeoutSignal = AbortSignal.timeout(config.timeout);
+    }
+  }
+
+  // If we have both a caller signal and a timeout, we need to listen to both.
+  // Create a composite signal by mirroring the timeout signal's abort to our controller.
+  if (timeoutSignal) {
+    if (timeoutSignal.aborted) {
+      controller.abort(new Error('RPC request timed out'));
+    } else {
+      timeoutSignal.addEventListener('abort', () => {
+        if (!controller.signal.aborted) {
+          controller.abort(timeoutSignal.reason ?? new Error('RPC request timed out'));
+        }
+      }, { once: true });
+    }
   }
 
   const init: RequestInit = {
@@ -159,7 +222,6 @@ async function sendOnce(config: RequestConfig, url: string, customFetch: typeof 
     res = await customFetch(url, init);
     text = await res.text();
   } finally {
-    if (timer !== undefined) clearTimeout(timer);
     config.signal?.removeEventListener('abort', onCallerAbort);
   }
   const response = {
