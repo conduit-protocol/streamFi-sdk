@@ -375,3 +375,10 @@ export type {
   ExecuteProposalsOptions,
   ProposalDetails,
 } from "./governor.js";
+export {
+  streamAddressLedgerKey,
+  contractInstanceLedgerKey,
+  streamIdFromAddressLedgerKey,
+  contractIdFromInstanceLedgerKey,
+  instanceConfigValue,
+} from "./ledger-keys.js";
