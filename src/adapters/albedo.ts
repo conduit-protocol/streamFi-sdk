@@ -40,6 +40,28 @@ function isAlbedoCancellation(err: unknown): boolean {
   return typeof message === 'string' && /reject|cancel|closed|denied/i.test(message);
 }
 
+/**
+ * Maps a configured network to Albedo's `network` intent parameter and the
+ * passphrase the signed envelope must be decoded with (#1079).
+ *
+ * Only the two networks Albedo names natively are mapped to identifiers —
+ * by exact passphrase, or the `'public'` / `'testnet'` shorthands. Anything
+ * else (Futurenet, a private testnet, a local Standalone network) is passed
+ * through verbatim as a custom passphrase. Substring matching on "test" or
+ * "public" used to route e.g. Futurenet ("Test SDF Future Network ; …") to
+ * Albedo's testnet, signing for the wrong network.
+ */
+export function resolveAlbedoNetwork(network: string): { networkParam: string; passphrase: string } {
+  const id = network.trim().toLowerCase();
+  if (network === Networks.PUBLIC || id === 'public') {
+    return { networkParam: 'public', passphrase: Networks.PUBLIC };
+  }
+  if (network === Networks.TESTNET || id === 'testnet') {
+    return { networkParam: 'testnet', passphrase: Networks.TESTNET };
+  }
+  return { networkParam: network, passphrase: network };
+}
+
 /** Runs an Albedo intent, rethrowing user cancellations as {@link AlbedoCancelError}. */
 async function runIntent<T>(intent: Promise<T>): Promise<T> {
   try {
@@ -91,6 +113,9 @@ export interface AlbedoWalletAdapterOptions {
   publicKey?: string;
   /**
    * Default network passphrase or identifier (e.g. 'public', 'testnet').
+   * Any other value is treated as a custom network passphrase (private
+   * testnets, local Standalone networks, Futurenet) and passed to Albedo
+   * verbatim.
    */
   networkPassphrase?: string;
 }
@@ -200,12 +225,12 @@ export class AlbedoWalletAdapter implements WalletAdapter {
     const client = this.getClient();
     const xdrString = typeof tx === 'string' ? tx : tx.toXDR();
 
-    let passphrase = opts?.networkPassphrase ?? this.networkPassphrase;
-    if (!passphrase && typeof tx !== 'string' && tx.networkPassphrase) {
-      passphrase = tx.networkPassphrase;
+    let network = opts?.networkPassphrase ?? this.networkPassphrase;
+    if (!network && typeof tx !== 'string' && tx.networkPassphrase) {
+      network = tx.networkPassphrase;
     }
 
-    if (!passphrase) {
+    if (!network) {
       throw new Error(
         'networkPassphrase is required to sign transactions with Albedo. ' +
         'Pass { networkPassphrase } in opts or constructor options.',
@@ -216,13 +241,7 @@ export class AlbedoWalletAdapter implements WalletAdapter {
       throw new Error('Albedo client does not support tx intent.');
     }
 
-    // Determine network param for Albedo: 'public', 'testnet', or full passphrase
-    let networkParam = passphrase;
-    if (passphrase === Networks.PUBLIC || passphrase.toLowerCase().includes('public')) {
-      networkParam = 'public';
-    } else if (passphrase === Networks.TESTNET || passphrase.toLowerCase().includes('test')) {
-      networkParam = 'testnet';
-    }
+    const { networkParam, passphrase } = resolveAlbedoNetwork(network);
 
     const accountToSign = opts?.accountToSign ?? this.pubKey;
     const signResult = await runIntent(

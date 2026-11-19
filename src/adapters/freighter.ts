@@ -63,6 +63,29 @@ export interface FreighterWalletAdapterOptions {
    * Set to `0` or `Infinity` to wait indefinitely.
    */
   signTimeoutMs?: number;
+  /**
+   * Called when the extension's active account or network changes, or the
+   * wallet is locked, while {@link FreighterWalletAdapter.watchWalletChanges}
+   * is running (#1078). The adapter's cached public key is already updated.
+   */
+  onWalletChange?: (change: FreighterWalletChange) => void;
+}
+
+/** Default polling interval for {@link FreighterWalletAdapter.watchWalletChanges}. */
+export const DEFAULT_FREIGHTER_WATCH_INTERVAL_MS = 3_000;
+
+/** Notification passed to `onWalletChange` (#1078). */
+export interface FreighterWalletChange {
+  /**
+   * `accountChanged`: the user switched accounts. `locked`: Freighter no
+   * longer exposes an account (locked, or access revoked). `networkChanged`:
+   * the extension switched networks.
+   */
+  type: 'accountChanged' | 'locked' | 'networkChanged';
+  /** The active public key afterwards, or null when locked. */
+  publicKey: string | null;
+  /** The extension's active network passphrase, when it reports one. */
+  networkPassphrase?: string;
 }
 
 /**
@@ -74,12 +97,152 @@ export class FreighterWalletAdapter implements WalletAdapter {
   private pubKey: string | null;
   public networkPassphrase: string | undefined;
   private readonly signTimeoutMs: number;
+  private readonly walletChangeListeners = new Set<(change: FreighterWalletChange) => void>();
+  private watchTimer: ReturnType<typeof setInterval> | null = null;
+  private watchInFlight = false;
+  private lastWalletNetwork: string | undefined;
+  private lockObserved = false;
 
   constructor(options: FreighterWalletAdapterOptions = {}) {
     this.freighterClient = (options.freighter as FreighterApi) ?? null;
     this.pubKey = options.publicKey ?? null;
     this.networkPassphrase = options.networkPassphrase;
     this.signTimeoutMs = options.signTimeoutMs ?? DEFAULT_FREIGHTER_SIGN_TIMEOUT_MS;
+    if (options.onWalletChange) this.walletChangeListeners.add(options.onWalletChange);
+  }
+
+  /**
+   * Register a listener for account/network/lock changes (see
+   * {@link FreighterWalletAdapterOptions.onWalletChange}). Returns an unsubscribe function.
+   */
+  onWalletChange(listener: (change: FreighterWalletChange) => void): () => void {
+    this.walletChangeListeners.add(listener);
+    return () => {
+      this.walletChangeListeners.delete(listener);
+    };
+  }
+
+  private notifyWalletChange(change: FreighterWalletChange): void {
+    for (const listener of this.walletChangeListeners) {
+      try {
+        listener(change);
+      } catch (handlerError) {
+        console.warn('[conduit-sdk] Freighter onWalletChange handler error:', handlerError);
+      }
+    }
+  }
+
+  /**
+   * Start polling the extension for account and network changes (#1078).
+   *
+   * Freighter does not push events to the page when the user locks the
+   * extension or switches accounts, so without this the adapter keeps its
+   * cached public key and later signs for an account the wallet no longer
+   * has active — failing with a signature mismatch. Each poll re-reads the
+   * active address and network; on a change the cached key is updated (or
+   * cleared when locked) and `onWalletChange` listeners are notified.
+   *
+   * Idempotent. Returns a function that stops watching.
+   */
+  watchWalletChanges(intervalMs: number = DEFAULT_FREIGHTER_WATCH_INTERVAL_MS): () => void {
+    if (!this.watchTimer) {
+      this.watchTimer = setInterval(() => {
+        void this.syncWalletState();
+      }, intervalMs);
+    }
+    return () => this.stopWatchingWalletChanges();
+  }
+
+  /** Stop the poller started by {@link watchWalletChanges}. */
+  stopWatchingWalletChanges(): void {
+    if (this.watchTimer) {
+      clearInterval(this.watchTimer);
+      this.watchTimer = null;
+    }
+  }
+
+  /**
+   * Re-read the extension's active account and network once, updating the
+   * cached public key and notifying listeners on any change. Called by the
+   * watcher on every tick; safe to call directly (e.g. on window focus).
+   */
+  async syncWalletState(): Promise<void> {
+    if (this.watchInFlight) return;
+    this.watchInFlight = true;
+    try {
+      let client: FreighterApi;
+      try {
+        client = this.getClient();
+      } catch {
+        return;
+      }
+
+      const address = await this.readActiveAddress(client);
+      if (address === undefined) return; // the extension can't report it: no signal
+
+      if (address === null) {
+        if (this.pubKey !== null) {
+          this.pubKey = null;
+          this.lockObserved = true;
+          this.notifyWalletChange({ type: 'locked', publicKey: null });
+        }
+        return;
+      }
+
+      if (address !== this.pubKey) {
+        // Announce a switch away from a known key, or an unlock after a lock;
+        // the very first silent read of an already-authorised key is not a change.
+        const announce = this.pubKey !== null || this.lockObserved;
+        this.pubKey = address;
+        this.lockObserved = false;
+        if (announce) this.notifyWalletChange({ type: 'accountChanged', publicKey: address });
+      }
+
+      if (typeof client.getNetworkDetails === 'function') {
+        let walletNetwork: string | undefined;
+        try {
+          walletNetwork = (await client.getNetworkDetails())?.networkPassphrase;
+        } catch {
+          walletNetwork = undefined;
+        }
+        if (walletNetwork && this.lastWalletNetwork && walletNetwork !== this.lastWalletNetwork) {
+          this.notifyWalletChange({
+            type: 'networkChanged',
+            publicKey: this.pubKey,
+            networkPassphrase: walletNetwork,
+          });
+        }
+        if (walletNetwork) this.lastWalletNetwork = walletNetwork;
+      }
+    } finally {
+      this.watchInFlight = false;
+    }
+  }
+
+  /**
+   * The extension's active address without prompting the user: a G-address,
+   * `null` when it reports no account (locked / access revoked), or
+   * `undefined` when this Freighter version can't be queried silently.
+   */
+  private async readActiveAddress(client: FreighterApi): Promise<string | null | undefined> {
+    if (typeof client.getAddress === 'function') {
+      try {
+        const res = await client.getAddress();
+        if (typeof res === 'string') return res || null;
+        if (res?.error) return null;
+        return res?.address || null;
+      } catch {
+        return null;
+      }
+    }
+    if (typeof client.getPublicKey === 'function') {
+      try {
+        return (await client.getPublicKey()) || null;
+      } catch {
+        return null;
+      }
+    }
+    return undefined;
   }
 
   private getClient(): FreighterApi {
@@ -184,6 +347,7 @@ export class FreighterWalletAdapter implements WalletAdapter {
    * Disconnects the wallet adapter session.
    */
   async disconnect(): Promise<void> {
+    this.stopWatchingWalletChanges();
     this.pubKey = null;
   }
 
