@@ -126,6 +126,7 @@ export {
   WalletTimeoutError,
   AlbedoInvalidSignatureError,
   isRecoverableError,
+  StreamFiError,
   IndexerMaxPagesExceededError,
   isConduitError,
   SUPPORTED_NETWORKS,
@@ -207,7 +208,9 @@ export {
   validateAndNormalizeAddress,
   isValidAddress,
   formatTokenAmount,
+  divWithRounding,
 } from "./utils.js";
+export type { DivRoundingMode } from "./utils.js";
 
 // Constants
 export {

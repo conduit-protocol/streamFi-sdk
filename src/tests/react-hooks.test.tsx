@@ -412,4 +412,187 @@ describe('React Hooks & Context', () => {
       expect(result.current.error?.message).toBe('Stream not found');
     });
   });
+
+  // #1103 — state transitions of useStreamBalance over simulated time.
+  describe('useStreamBalance state updates', () => {
+    const wrapperFor = (c: ConduitClient) =>
+      function Wrapper({ children }: { children: React.ReactNode }) {
+        return <ConduitProvider client={c}>{children}</ConduitProvider>;
+      };
+
+    beforeEach(() => {
+      vi.useFakeTimers();
+    });
+
+    afterEach(() => {
+      vi.useRealTimers();
+      vi.restoreAllMocks();
+    });
+
+    it('starts loading, then exposes the balance once fetched', async () => {
+      vi.spyOn(client.streams, 'withdrawable').mockResolvedValue(500n);
+
+      const { result } = renderHook(() => useStreamBalance(1n, { intervalMs: 1000 }), {
+        wrapper: wrapperFor(client),
+      });
+
+      expect(result.current.isLoading).toBe(true);
+      expect(result.current.withdrawable).toBeNull();
+
+      await act(async () => {
+        await vi.advanceTimersByTimeAsync(0);
+      });
+
+      expect(result.current.isLoading).toBe(false);
+      expect(result.current.withdrawable).toBe(500n);
+      expect(result.current.error).toBeNull();
+    });
+
+    it('tracks a growing balance across several polling ticks', async () => {
+      let balance = 0n;
+      const spy = vi.spyOn(client.streams, 'withdrawable').mockImplementation(async () => {
+        balance += 25n;
+        return balance;
+      });
+
+      const { result } = renderHook(() => useStreamBalance(1n, { intervalMs: 2000 }), {
+        wrapper: wrapperFor(client),
+      });
+
+      await act(async () => {
+        await vi.advanceTimersByTimeAsync(0);
+      });
+      expect(result.current.withdrawable).toBe(25n);
+
+      for (const expected of [50n, 75n, 100n]) {
+        await act(async () => {
+          await vi.advanceTimersByTimeAsync(2000);
+        });
+        expect(result.current.withdrawable).toBe(expected);
+      }
+      expect(spy).toHaveBeenCalledTimes(4);
+    });
+
+    it('does not poll before the interval elapses', async () => {
+      const spy = vi.spyOn(client.streams, 'withdrawable').mockResolvedValue(1n);
+
+      renderHook(() => useStreamBalance(1n, { intervalMs: 5000 }), {
+        wrapper: wrapperFor(client),
+      });
+
+      await act(async () => {
+        await vi.advanceTimersByTimeAsync(4999);
+      });
+      expect(spy).toHaveBeenCalledTimes(1);
+
+      await act(async () => {
+        await vi.advanceTimersByTimeAsync(1);
+      });
+      expect(spy).toHaveBeenCalledTimes(2);
+    });
+
+    it('clears a previous error once a later poll succeeds', async () => {
+      vi.spyOn(client.streams, 'withdrawable')
+        .mockRejectedValueOnce(new Error('rpc down'))
+        .mockResolvedValueOnce(42n);
+
+      const { result } = renderHook(() => useStreamBalance(1n, { intervalMs: 1000 }), {
+        wrapper: wrapperFor(client),
+      });
+
+      await act(async () => {
+        await vi.advanceTimersByTimeAsync(0);
+      });
+      expect(result.current.error?.message).toBe('rpc down');
+      expect(result.current.withdrawable).toBeNull();
+
+      await act(async () => {
+        await vi.advanceTimersByTimeAsync(1000);
+      });
+      expect(result.current.error).toBeNull();
+      expect(result.current.withdrawable).toBe(42n);
+    });
+
+    it('wraps non-Error rejections in an Error', async () => {
+      vi.spyOn(client.streams, 'withdrawable').mockRejectedValue('plain string');
+
+      const { result } = renderHook(() => useStreamBalance(1n), {
+        wrapper: wrapperFor(client),
+      });
+
+      await act(async () => {
+        await vi.advanceTimersByTimeAsync(0);
+      });
+      expect(result.current.error).toBeInstanceOf(Error);
+      expect(result.current.error?.message).toBe('plain string');
+    });
+
+    it('does nothing and reports idle state when disabled or without a stream id', async () => {
+      const spy = vi.spyOn(client.streams, 'withdrawable').mockResolvedValue(9n);
+
+      const disabled = renderHook(() => useStreamBalance(1n, { enabled: false }), {
+        wrapper: wrapperFor(client),
+      });
+      const noId = renderHook(() => useStreamBalance(null), {
+        wrapper: wrapperFor(client),
+      });
+
+      await act(async () => {
+        await vi.advanceTimersByTimeAsync(10_000);
+      });
+
+      expect(spy).not.toHaveBeenCalled();
+      for (const { result } of [disabled, noId]) {
+        expect(result.current.isLoading).toBe(false);
+        expect(result.current.withdrawable).toBeNull();
+        expect(result.current.error).toBeNull();
+      }
+    });
+
+    it('refetches for the new stream when the stream id changes', async () => {
+      const spy = vi
+        .spyOn(client.streams, 'withdrawable')
+        .mockImplementation(async (id) => (BigInt(id) === 1n ? 10n : 20n));
+
+      const { result, rerender } = renderHook(
+        ({ id }: { id: bigint }) => useStreamBalance(id, { intervalMs: 1000 }),
+        { wrapper: wrapperFor(client), initialProps: { id: 1n } },
+      );
+
+      await act(async () => {
+        await vi.advanceTimersByTimeAsync(0);
+      });
+      expect(result.current.withdrawable).toBe(10n);
+
+      rerender({ id: 2n });
+      await act(async () => {
+        await vi.advanceTimersByTimeAsync(0);
+      });
+
+      expect(spy).toHaveBeenLastCalledWith(2n);
+      expect(result.current.withdrawable).toBe(20n);
+    });
+
+    it('resets to idle when it is disabled after loading a balance', async () => {
+      vi.spyOn(client.streams, 'withdrawable').mockResolvedValue(77n);
+
+      const { result, rerender } = renderHook(
+        ({ enabled }: { enabled: boolean }) => useStreamBalance(1n, { enabled }),
+        { wrapper: wrapperFor(client), initialProps: { enabled: true } },
+      );
+
+      await act(async () => {
+        await vi.advanceTimersByTimeAsync(0);
+      });
+      expect(result.current.withdrawable).toBe(77n);
+
+      rerender({ enabled: false });
+      await act(async () => {
+        await vi.advanceTimersByTimeAsync(0);
+      });
+
+      expect(result.current.withdrawable).toBeNull();
+      expect(result.current.isLoading).toBe(false);
+    });
+  });
 });
