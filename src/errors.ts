@@ -18,21 +18,6 @@ export type ConduitContract = 'stream' | 'factory' | 'governor';
  */
 export const UNKNOWN_CONTRACT_ERROR_CODE = -1;
 
-/**
- * Common base for every error class this SDK throws (#1101).
- *
- * `isRecoverable` tells a UI whether to offer a "Retry" button (transient
- * network, timeout, rate-limit and open-circuit failures) or to ask the user to
- * change their inputs or permissions (contract rejections, validation, auth,
- * user cancellation). It is derived from {@link isRecoverableError}, so the
- * property and the standalone function can never disagree.
- */
-export class StreamFiError extends Error {
-  get isRecoverable(): boolean {
-    return isRecoverableError(this);
-  }
-}
-
 // ── DripStream errors (contracts/stream/src/errors.rs) ────────────────────────
 
 export enum StreamErrorCode {
@@ -235,7 +220,7 @@ export const CAIP2_TO_NETWORK: Readonly<Record<string, string>> = {
  * }
  * ```
  */
-export class UnsupportedChainError extends StreamFiError {
+export class UnsupportedChainError extends Error {
   /** The network value the caller passed in. */
   readonly providedNetwork: string;
   /** The full list of accepted network identifiers at the time of the throw. */
@@ -269,7 +254,7 @@ export class UnsupportedChainError extends StreamFiError {
  * {@link getRecoveryHint}) — useful for surfacing actionable guidance instead
  * of a bare `HostError(Error(Contract, #14))`-style message in a UI or log.
  */
-export class ConduitError extends StreamFiError {
+export class ConduitError extends Error {
   readonly contract: ConduitContract;
   readonly code: number;
   /** Suggested troubleshooting step for this error's `contract` + `code`. See {@link getRecoveryHint}. */
@@ -694,7 +679,7 @@ export function translateStreamError(err: unknown, operation: string, caller: st
  * }
  * ```
  */
-export class StreamFiNetworkError extends StreamFiError {
+export class StreamFiNetworkError extends Error {
   /** The underlying error that caused the network failure. */
   readonly cause: unknown;
 
@@ -725,7 +710,7 @@ export class StreamFiNetworkError extends StreamFiError {
  * }
  * ```
  */
-export class InsufficientBalanceError extends StreamFiError {
+export class InsufficientBalanceError extends Error {
   /** The account's current XLM balance in stroops. */
   readonly currentBalance: bigint;
   /** The minimum XLM balance required in stroops. */
@@ -769,7 +754,7 @@ function fromStroopsInternal(stroops: bigint, decimals: number): string {
  * failure mode and is reported as {@link RpcServiceUnavailableError} so
  * consumers can distinguish "throttled" from "endpoint down".
  */
-export class RateLimitError extends StreamFiError {
+export class RateLimitError extends Error {
   /** Milliseconds to wait before retrying, parsed from a Retry-After header if present. */
   readonly retryAfterMs: number | undefined;
 
@@ -862,7 +847,7 @@ export class RateLimitError extends StreamFiError {
  * therefore never loop forever against a genuinely unavailable service.
  * See #456.
  */
-export class RpcServiceUnavailableError extends StreamFiError {
+export class RpcServiceUnavailableError extends Error {
   /** Milliseconds to wait before retrying, parsed from a Retry-After header if present. */
   readonly retryAfterMs: number | undefined;
 
@@ -884,7 +869,7 @@ export class RpcServiceUnavailableError extends StreamFiError {
  * determined is down, `withRetry` fails fast with this error instead of
  * entering the retry loop. See #787.
  */
-export class CircuitOpenError extends StreamFiError {
+export class CircuitOpenError extends Error {
   /** The circuit scope (typically an RPC URL) that is currently open. */
   readonly scope: string;
   /** Epoch ms when the circuit will move to 'half-open' and allow a probe request. */
@@ -922,7 +907,7 @@ export class CircuitOpenError extends StreamFiError {
  * }
  * ```
  */
-export class IndexerTimeoutError extends StreamFiError {
+export class IndexerTimeoutError extends Error {
   /** The indexer endpoint that timed out. */
   readonly endpoint: string;
   /** The timeout window in milliseconds that was exceeded. */
@@ -960,7 +945,7 @@ export class IndexerTimeoutError extends StreamFiError {
  }
  ```
  */
-export class OperationAbortedError extends StreamFiError {
+export class OperationAbortedError extends Error {
   /** Human-readable name of the operation that was aborted (e.g. "submitBatch"). */
   readonly operation: string;
 
@@ -982,7 +967,7 @@ export class OperationAbortedError extends StreamFiError {
  * This allows callers to distinguish a confirmed transaction from an unconfirmed
  * or timed-out submission, while preserving access to the submitted transaction `hash`.
  */
-export class ConfirmationTimeoutError extends StreamFiError {
+export class ConfirmationTimeoutError extends Error {
   /** The transaction hash that was submitted to the network. */
   readonly hash: string;
   /** The number of poll attempts performed before timing out. */
@@ -1010,7 +995,7 @@ export class ConfirmationTimeoutError extends StreamFiError {
  * configured `signatureTimeoutMs` — e.g. the user opened a wallet popup and
  * forgot about it or closed it without rejecting.
  */
-export class SignatureTimeoutError extends StreamFiError {
+export class SignatureTimeoutError extends Error {
   /** The timeout window in milliseconds that was exceeded. */
   readonly timeoutMs: number;
 
@@ -1029,7 +1014,7 @@ export class SignatureTimeoutError extends StreamFiError {
  * the request) rather than the wallet failing. Apps can catch this to skip
  * showing an error alert for a deliberate cancellation.
  */
-export class UserCancelledError extends StreamFiError {
+export class UserCancelledError extends Error {
   /** The wallet that reported the cancellation, e.g. `'albedo'`. */
   readonly wallet: string;
 
@@ -1054,7 +1039,7 @@ export class AlbedoCancelError extends UserCancelledError {
  * Thrown when the wallet's active network does not match the network the
  * client is configured for (e.g. Freighter on Testnet, client on Mainnet).
  */
-export class NetworkMismatchError extends StreamFiError {
+export class NetworkMismatchError extends Error {
   readonly expectedPassphrase: string;
   readonly walletPassphrase: string;
 
@@ -1076,7 +1061,7 @@ export class NetworkMismatchError extends StreamFiError {
  * Freighter popup open without approving or closing it, which would
  * otherwise hang the caller's promise indefinitely (#970).
  */
-export class WalletTimeoutError extends StreamFiError {
+export class WalletTimeoutError extends Error {
   /** The wallet that failed to respond in time, e.g. `'freighter'`. */
   readonly wallet: string;
   /** The timeout window in milliseconds that was exceeded. */
@@ -1100,7 +1085,7 @@ export class WalletTimeoutError extends StreamFiError {
  * Catches a malformed signature before it is submitted on-chain, where it
  * would otherwise fail with a less specific `bad_auth` error (#971).
  */
-export class AlbedoInvalidSignatureError extends StreamFiError {
+export class AlbedoInvalidSignatureError extends Error {
   /** The actual signature length Albedo returned, in bytes. */
   readonly actualLength: number;
 
@@ -1154,7 +1139,7 @@ const HORIZON_UNDERFUNDED_CODES = new Set(['tx_insufficient_balance', 'op_underf
  * }
  * ```
  */
-export class BadAuthError extends StreamFiError {
+export class BadAuthError extends Error {
   /** The raw Horizon result codes this error was mapped from. */
   readonly resultCodes: HorizonResultCodes;
 
@@ -1181,7 +1166,7 @@ export class BadAuthError extends StreamFiError {
  * }
  * ```
  */
-export class HorizonTransactionError extends StreamFiError {
+export class HorizonTransactionError extends Error {
   /** The raw Horizon result codes this error was mapped from. */
   readonly resultCodes: HorizonResultCodes;
   /** The raw Horizon error response `mapHorizonError` was given. */
@@ -1391,7 +1376,7 @@ export interface SorobanDiagnosticInfo {
  * }
  * ```
  */
-export class SorobanRpcError extends StreamFiError {
+export class SorobanRpcError extends Error {
   /** The raw RPC error string. */
   readonly rpcError: string;
   /** Structured diagnostic information extracted from the simulation response. */
@@ -1525,7 +1510,7 @@ export class SorobanRpcError extends StreamFiError {
  * }
  * ```
  */
-export class ValidationError extends StreamFiError {
+export class ValidationError extends Error {
   /** The individual validation messages collected by `validate()`. */
   readonly issues: readonly string[];
 
@@ -1565,7 +1550,7 @@ export class ValidationError extends StreamFiError {
  *
  * See #801.
  */
-export class IndexerMaxPagesExceededError extends StreamFiError {
+export class IndexerMaxPagesExceededError extends Error {
   /** The number of pages that had been fetched when the limit was hit. */
   readonly attemptedPages: number;
   /** The maximum number of pages that was configured. */
@@ -1695,7 +1680,7 @@ export interface ContractErrorContext {
  * }
  * ```
  */
-export class ContractError extends StreamFiError {
+export class ContractError extends Error {
   /** The contract that raised the error, when it could be determined. */
   readonly contract: ConduitContract | undefined;
   /** The numeric contract error code, when one could be extracted. */
