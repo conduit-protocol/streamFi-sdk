@@ -258,6 +258,53 @@ export class StreamBuilder {
     return this;
   }
 
+  /**
+   * Sets the vesting cliff from a `Date`, an ISO/date string, or Unix seconds.
+   *
+   * A vesting cliff is a client-side scheduling convention, not contract state:
+   * the stream's `startTime` is set to the cliff end, so nothing accrues before
+   * it. This is the same model documented for `CliffReached` in `events.ts` and
+   * used by `examples/vesting-schedule.ts`. Equivalent to calling
+   * {@link startTime} with the resolved timestamp; prefer this method when the
+   * cliff is expressed as a calendar date, since it removes the manual
+   * second-conversion (and the timezone/DST mistakes that go with it).
+   *
+   * @param date - A `Date`, an ISO-8601/date string, or a non-negative integer
+   * Unix timestamp in seconds.
+   * @returns The builder instance for chaining.
+   * @throws {Error} If the value cannot be resolved to a valid Unix timestamp,
+   * or if the resolved cliff is in the past (same rule as {@link startTime}).
+   */
+  withCliffDate(date: Date | string | number): this {
+    let seconds: number;
+
+    if (date instanceof Date) {
+      seconds = Math.floor(date.getTime() / 1000);
+    } else if (typeof date === 'number') {
+      seconds = date;
+    } else if (typeof date === 'string') {
+      const trimmed = date.trim();
+      if (trimmed === '') {
+        throw new Error('Invalid StreamBuilder parameter: withCliffDate received an empty string');
+      }
+      seconds = /^\d+$/.test(trimmed)
+        ? Number(trimmed)
+        : Math.floor(new Date(trimmed).getTime() / 1000);
+    } else {
+      throw new Error(
+        'Invalid StreamBuilder parameter: withCliffDate expects a Date, an ISO date string, or Unix seconds',
+      );
+    }
+
+    if (!Number.isFinite(seconds)) {
+      throw new Error(
+        `Invalid StreamBuilder parameter: withCliffDate could not resolve a valid date from ${String(date)}`,
+      );
+    }
+
+    return this.startTime(seconds);
+  }
+
   /** Sets whether the stream may be cancelled after creation. */
   setCancelable(cancelable: boolean): this {
     if (typeof cancelable !== 'boolean') {
