@@ -5,6 +5,7 @@ All notable changes are documented here. Format based on [Keep a Changelog](http
 ## [Unreleased]
 
 ### Added
+- `StreamBuilder` now accepts retroactive start times only within the prior 30 days and validates positive deposits during `build()`; stream listeners now include typed cliff-reached/top-up-extended events and resume missed ledger events after a temporary polling failure (#1065, #1066, #1067, #1068).
 - `ConduitClient.getConnectionHealth()` / `refreshConnectionHealth()` expose RPC and relayer health with average successful latency, rolling-window packet loss, connected/status flags, per-endpoint samples, and heartbeat timing (#1059).
 - `ConduitConfig.rpcUrls` now performs per-call multi-endpoint failover: HTTP 429, HTTP 503, transport timeouts/network errors and open circuits rotate to the next endpoint without retrying a throttled or dead node; `getCurrentRpcUrl()` reports the active endpoint (#1060).
 - `getStreamProgress(stream, currentTimestamp?)` and its `getStreamStatus()` alias return formatted local stream progress, remaining time, lifecycle status, cumulative streamed amount and withdrawable balance without an RPC call (#1061).

@@ -8,6 +8,8 @@ import type {
   PauseEvent,
   ResumeEvent,
   TopUpEvent,
+  StreamCliffReachedEvent,
+  StreamTopUpExtendedEvent,
   ClawbackEvent,
   CreatedEvent,
   ForceCancelEvent,
@@ -143,6 +145,43 @@ describe('dispatchEvent — topped_up', () => {
     dispatchEvent(event, handlers);
 
     expect(received).toEqual({ sender: actorAddress, amount: 50_000n, newBalance: 150_000n, sequence: 0n });
+  });
+});
+
+describe('dispatchEvent — cliff_reached and top_up_extended', () => {
+  it('decodes the cliff recipient, timestamp, and unlock amount', () => {
+    let received: StreamCliffReachedEvent | undefined;
+    dispatchEvent(
+      {
+        topic: [topic('StreamCliffReached'), actorTopic()],
+        value: tuple(u64(1_700_000_000), i128(25_000n)),
+      } as Parameters<typeof dispatchEvent>[0],
+      { onStreamCliffReached: (event) => { received = event; } },
+    );
+    expect(received).toEqual({
+      recipient: actorAddress,
+      timestamp: 1_700_000_000,
+      unlockAmount: 25_000n,
+    });
+  });
+
+  it('decodes the extended top-up amount, balance, and end time', () => {
+    let received: StreamTopUpExtendedEvent | undefined;
+    dispatchEvent(
+      makeEvent(
+        'StreamTopUpExtended',
+        tuple(u64(1_700_000_000), u64(1_700_100_000), i128(50_000n), i128(150_000n)),
+      ),
+      { onStreamTopUpExtended: (event) => { received = event; } },
+    );
+    expect(received).toEqual({
+      sender: actorAddress,
+      oldEndTime: 1_700_000_000,
+      newEndTime: 1_700_100_000,
+      addedAmount: 50_000n,
+      newTotalDeposit: 150_000n,
+      sequence: 0n,
+    });
   });
 });
 

@@ -386,6 +386,8 @@ export {
   isVotingActive,
 } from "./governor.js";
 export type {
+  StreamEvent,
+  StreamEventMap,
   StreamHistoryEntry,
   StreamHistoryPage,
   StreamHistoryOptions,
