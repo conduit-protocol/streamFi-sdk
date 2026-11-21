@@ -26,6 +26,8 @@ import type {
   CreatedEvent,
   WithdrawEvent,
   StreamTopUpEvent,
+  StreamCliffReachedEvent,
+  StreamTopUpExtendedEvent,
   PauseEvent,
   ResumeEvent,
   CancelEvent,
@@ -301,6 +303,28 @@ export function createMockEventStream(
           sender,
           amount,
           newBalance: depositAmount + toppedUpTotal - withdrawnTotal,
+          sequence,
+        };
+        return { ...base, kind, event };
+      }
+      case "cliff_reached": {
+        const event: StreamCliffReachedEvent = {
+          recipient,
+          timestamp: startTimeSeconds + i * 5,
+          unlockAmount: 1_000_000n,
+        };
+        return { ...base, kind, event };
+      }
+      case "top_up_extended": {
+        topUpCount++;
+        const amount = 2_000_000n * BigInt(topUpCount);
+        toppedUpTotal += amount;
+        const event: StreamTopUpExtendedEvent = {
+          sender,
+          oldEndTime: startTimeSeconds + i * 3_600,
+          newEndTime: startTimeSeconds + (i + 1) * 3_600,
+          addedAmount: amount,
+          newTotalDeposit: depositAmount + toppedUpTotal,
           sequence,
         };
         return { ...base, kind, event };

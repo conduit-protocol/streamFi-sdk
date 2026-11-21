@@ -495,6 +495,45 @@ describe('subscribeToStream', () => {
 
     sub.unsubscribe();
   });
+
+  it('restarts from the last acknowledged ledger after a polling failure', async () => {
+    const warn = vi.spyOn(console, 'warn').mockImplementation(() => {});
+    const { Address, Keypair, nativeToScVal } = await import('@stellar/stellar-sdk');
+    const sender = Keypair.random().publicKey();
+    const missedEvent = {
+      id: 'missed-after-reconnect',
+      ledger: 101,
+      topic: [
+        xdr.ScVal.scvSymbol('clawback'),
+        new Address(sender).toScVal(),
+        nativeToScVal(1n, { type: 'u64' }),
+      ],
+      value: xdr.ScVal.scvI128(
+        new xdr.Int128Parts({ hi: xdr.Int64.fromString('0'), lo: xdr.Uint64.fromString('1') }),
+      ),
+    };
+    mockGetEvents
+      .mockResolvedValueOnce({ events: [], latestLedger: 100 })
+      .mockRejectedValueOnce(new Error('temporary disconnect'))
+      .mockResolvedValueOnce({ events: [missedEvent], latestLedger: 101 });
+    const { subscribeToStream } = await import('../events.js');
+    const received: unknown[] = [];
+
+    const sub = subscribeToStream('http://localhost:8000', 'CSTREAM', {
+      pollInterval: 1000,
+      onClawback: (event) => { received.push(event); },
+    });
+    await vi.waitFor(() => expect(mockGetEvents).toHaveBeenCalledTimes(1));
+    await vi.advanceTimersByTimeAsync(1000);
+    await vi.waitFor(() => expect(mockGetEvents).toHaveBeenCalledTimes(2));
+    await vi.advanceTimersByTimeAsync(1000);
+    await vi.waitFor(() => expect(mockGetEvents).toHaveBeenCalledTimes(3));
+
+    expect(mockGetEvents.mock.calls[2]?.[0]).toHaveProperty('startLedger', 101);
+    expect(received).toHaveLength(1);
+    sub.unsubscribe();
+    warn.mockRestore();
+  });
 });
 
 describe('subscribeToStreams', () => {

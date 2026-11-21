@@ -14,6 +14,8 @@ import type {
   PauseEvent,
   ResumeEvent,
   StreamTopUpEvent,
+  StreamCliffReachedEvent,
+  StreamTopUpExtendedEvent,
   StreamClawbackedEvent,
   CreatedEvent,
   ForceCancelEvent,
@@ -39,6 +41,8 @@ const TOPIC = {
   PAUSED:    'paused',
   RESUMED:   'resumed',
   TOPPED_UP: 'topped_up',
+  STREAM_CLIFF_REACHED: 'StreamCliffReached',
+  STREAM_TOP_UP_EXTENDED: 'StreamTopUpExtended',
   CLAWBACK:  'clawback',
   CREATED:               'created',
   FORCE_CANCELLED:       'force_cxl',
@@ -140,6 +144,8 @@ export function subscribeToStream(
   let   ledgerSeeded           = false; // true once startLedger holds a real ledger sequence
   let   cursor: string | undefined;
   let   consecutiveFailures    = 0;
+  let   lastSeenLedgerSequence: number | undefined;
+  let   hasAcknowledgedPoll = false;
   let   stopped                = false;
   let   timer: ReturnType<typeof setTimeout> | undefined;
   // Last per-contract event sequence seen (topics[2]), for gap detection
@@ -236,8 +242,16 @@ export function subscribeToStream(
         // fail identically (see #484).
         const latest = await server.getLatestLedger();
         startLedger = latest.sequence;
+        lastSeenLedgerSequence = Math.max(0, latest.sequence - 1);
         lastStartLedger = startLedger;
         ledgerSeeded = true;
+      }
+
+      const reconnecting = consecutiveFailures > 0 && hasAcknowledgedPoll;
+      if (reconnecting && lastSeenLedgerSequence !== undefined) {
+        cursor = undefined;
+        startLedger = lastSeenLedgerSequence + 1;
+        lastStartLedger = lastSeenLedgerSequence;
       }
 
       const response = await server.getEvents({
@@ -251,12 +265,14 @@ export function subscribeToStream(
 
       consecutiveFailures = 0;
 
+      let lastEventLedger: number | undefined;
       if (response.events.length > 0) {
         for (const event of response.events) {
           // `event.ledger` is a required field of the real RPC response, but
           // guard it defensively so a malformed/partial event can't abort
           // the whole poll tick the way an uncaught throw here would.
           if (typeof event.ledger === 'number') {
+            lastEventLedger = Math.max(lastEventLedger ?? 0, event.ledger);
             const ledgerGap = ledgerGapDetector.observe(event.ledger);
             if (ledgerGap) {
               try {
@@ -297,13 +313,16 @@ export function subscribeToStream(
         cursor = responseCursor;
       } else {
         cursor = undefined;
-        if (response.latestLedger !== undefined) {
-          startLedger = response.latestLedger + 1;
-          lastStartLedger = response.latestLedger;
+        const acknowledgedLedger = response.latestLedger ?? lastEventLedger;
+        if (acknowledgedLedger !== undefined) {
+          lastSeenLedgerSequence = Math.max(lastSeenLedgerSequence ?? 0, acknowledgedLedger);
+          startLedger = lastSeenLedgerSequence + 1;
+          lastStartLedger = lastSeenLedgerSequence;
         }
       }
 
       consecutiveFailures = 0;
+      hasAcknowledgedPoll = true;
     } catch (err) {
       // Swallow polling errors; the subscription continues (unless the
       // consecutive-failure cutoff below is reached).
@@ -419,10 +438,10 @@ export interface CliffReachedListenerOptions {
  * `'Cancelled'` is a real on-chain event — this delegates to
  * {@link subscribeToStream}'s existing `onCancel` decoding.
  *
- * `'CliffReached'` has no on-chain counterpart (the stream contract emits no
- * cliff event; a vesting cliff is a client-side scheduling convention, see
- * {@link CliffReachedListenerOptions.cliffTime}), so it's a one-shot timer
- * that fires `callback` once the wall clock reaches the supplied `cliffTime`.
+ * `'CliffReached'` is a client-side wall-clock notification for the configured
+ * schedule time. The separate on-chain `StreamCliffReached` event is delivered
+ * through `subscribeToStream`'s `onStreamCliffReached` handler when the first
+ * post-cliff withdrawal occurs.
  *
  * @example
  * ```ts
@@ -552,6 +571,36 @@ export function dispatchEvent(
         ...seq,
       };
       handlers.onWithdraw(data);
+      break;
+    }
+
+    case TOPIC.STREAM_CLIFF_REACHED: {
+      if (!handlers.onStreamCliffReached) break;
+      // data: (timestamp: u64, unlock_amount: i128); no sequence topic
+      const fields = tupleFields(event.value);
+      const data: StreamCliffReachedEvent = {
+        recipient: actor,
+        timestamp: u64Field(fields, 0),
+        unlockAmount: i128Field(fields, 1),
+        ...seq,
+      };
+      handlers.onStreamCliffReached(data);
+      break;
+    }
+
+    case TOPIC.STREAM_TOP_UP_EXTENDED: {
+      if (!handlers.onStreamTopUpExtended) break;
+      // data: (old_end_time: u64, new_end_time: u64, added_amount: i128, new_total_deposit: i128)
+      const fields = tupleFields(event.value);
+      const data: StreamTopUpExtendedEvent = {
+        sender:         actor,
+        oldEndTime:     u64Field(fields, 0),
+        newEndTime:     u64Field(fields, 1),
+        addedAmount:    i128Field(fields, 2),
+        newTotalDeposit: i128Field(fields, 3),
+        ...seq,
+      };
+      handlers.onStreamTopUpExtended(data);
       break;
     }
 
@@ -716,6 +765,8 @@ export type StreamHistoryEntry = StreamHistoryBase & (
   | { kind: 'created';  event: CreatedEvent }
   | { kind: 'withdraw'; event: WithdrawEvent }
   | { kind: 'top_up';   event: StreamTopUpEvent }
+  | { kind: 'cliff_reached'; event: StreamCliffReachedEvent }
+  | { kind: 'top_up_extended'; event: StreamTopUpExtendedEvent }
   | { kind: 'pause';    event: PauseEvent }
   | { kind: 'resume';   event: ResumeEvent }
   | { kind: 'cancel';   event: CancelEvent }
@@ -740,18 +791,25 @@ export interface StreamHistoryPage {
  * It mirrors the shape `getStreamHistory` assembles internally; exposing it
  * lets callers parse one event without standing up a full history page.
  */
-export type StreamEvent =
-  | { kind: 'created'; event: CreatedEvent }
-  | { kind: 'withdrawn'; event: WithdrawEvent }
-  | { kind: 'topped_up'; event: StreamTopUpEvent }
-  | { kind: 'paused'; event: PauseEvent }
-  | { kind: 'resumed'; event: ResumeEvent }
-  | { kind: 'cancelled'; event: CancelEvent }
-  | { kind: 'clawback'; event: StreamClawbackedEvent }
-  | { kind: 'force_cancelled'; event: ForceCancelEvent }
-  | { kind: 'recipient_transferred'; event: RecipientTransferEvent }
-  | { kind: 'operator_set'; event: OperatorSetEvent }
-  | { kind: 'operator_revoked'; event: OperatorRevokedEvent };
+export interface StreamEventMap {
+  created: CreatedEvent;
+  withdrawn: WithdrawEvent;
+  topped_up: StreamTopUpEvent;
+  cliff_reached: StreamCliffReachedEvent;
+  top_up_extended: StreamTopUpExtendedEvent;
+  paused: PauseEvent;
+  resumed: ResumeEvent;
+  cancelled: CancelEvent;
+  clawback: StreamClawbackedEvent;
+  force_cancelled: ForceCancelEvent;
+  recipient_transferred: RecipientTransferEvent;
+  operator_set: OperatorSetEvent;
+  operator_revoked: OperatorRevokedEvent;
+}
+
+export type StreamEvent = {
+  [Kind in keyof StreamEventMap]: { kind: Kind; event: StreamEventMap[Kind] }
+}[keyof StreamEventMap];
 
 /**
  * Parse one raw contract `EventResponse` into a typed {@link StreamEvent}, or
@@ -773,6 +831,8 @@ export function parseStreamEvent(event: SorobanRpc.Api.EventResponse): StreamEve
     onCreated:           (event) => { result = { kind: 'created', event }; },
     onWithdraw:          (event) => { result = { kind: 'withdrawn', event }; },
     onTopUp:             (event) => { result = { kind: 'topped_up', event }; },
+    onStreamCliffReached: (event) => { result = { kind: 'cliff_reached', event }; },
+    onStreamTopUpExtended: (event) => { result = { kind: 'top_up_extended', event }; },
     onPause:             (event) => { result = { kind: 'paused', event }; },
     onResume:            (event) => { result = { kind: 'resumed', event }; },
     onCancel:            (event) => { result = { kind: 'cancelled', event }; },
@@ -830,6 +890,8 @@ function actorAddressesOf(entry: StreamHistoryEntry): { sender?: string; recipie
     case 'created':  return { sender: entry.event.sender, recipient: entry.event.recipient };
     case 'withdraw': return { recipient: entry.event.recipient };
     case 'top_up':   return { sender: entry.event.sender };
+    case 'cliff_reached':
+    case 'top_up_extended': return { sender: entry.event.sender };
     case 'pause':    return { sender: entry.event.sender };
     case 'resume':   return { sender: entry.event.sender };
     case 'cancel':   return { sender: entry.event.sender };
@@ -900,6 +962,8 @@ export async function getStreamHistory(
         onCreated:  (event) => { entry = { ...base, kind: 'created', event }; },
         onWithdraw: (event) => { entry = { ...base, kind: 'withdraw', event }; },
         onTopUp:    (event) => { entry = { ...base, kind: 'top_up', event }; },
+        onStreamCliffReached: (event) => { entry = { ...base, kind: 'cliff_reached', event }; },
+        onStreamTopUpExtended: (event) => { entry = { ...base, kind: 'top_up_extended', event }; },
         onPause:    (event) => { entry = { ...base, kind: 'pause', event }; },
         onResume:   (event) => { entry = { ...base, kind: 'resume', event }; },
         onCancel:   (event) => { entry = { ...base, kind: 'cancel', event }; },
