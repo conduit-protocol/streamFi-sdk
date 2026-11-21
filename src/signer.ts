@@ -3,6 +3,7 @@ import { SignatureTimeoutError, UserCancelledError } from './errors.js';
 
 /** Default time (ms) to wait for a wallet/signer to return a signature. */
 export const DEFAULT_SIGNATURE_TIMEOUT_MS = 120_000;
+export const DEFAULT_HARDWARE_SIGN_TIMEOUT_MS = 60_000;
 
 export interface SignerOptions {
   /**
@@ -98,7 +99,8 @@ export function normalizeLedgerError(statusCode: number): { type: LedgerErrorTyp
  * Checks whether an error originated from a Ledger hardware wallet
  * and, if so, returns the normalized `LedgerErrorType` and message.
  *
- * Returns `null` when the error is not a Ledger error.
+ * Returns 
+ull` when the error is not a Ledger error.
  */
 export function classifyLedgerError(error: unknown): { type: LedgerErrorType; message: string } | null {
   if (!(error instanceof Error)) return null;
@@ -126,12 +128,14 @@ export class LedgerSigner implements Signer {
   private readonly path: string;
   private readonly device: LedgerDevice | undefined;
   private cachedPublicKey: string | undefined;
+  private readonly hardwareSignTimeoutMs: number;
 
-  constructor(options?: { appName?: string; path?: string; device?: LedgerDevice; publicKey?: string }) {
+  constructor(options?: { appName?: string; path?: string; device?: LedgerDevice; publicKey?: string; hardwareSignTimeoutMs?: number }) {
     this.appName = options?.appName ?? 'Stellar';
     this.path = options?.path ?? "44'/148'/0'/0/0";
     this.device = options?.device;
     this.cachedPublicKey = options?.publicKey;
+    this.hardwareSignTimeoutMs = options?.hardwareSignTimeoutMs ?? DEFAULT_HARDWARE_SIGN_TIMEOUT_MS;
   }
 
   /**
@@ -162,7 +166,7 @@ export class LedgerSigner implements Signer {
   /** Sign `tx` on the device and return the reconstructed transaction. */
   async sign(tx: Transaction): Promise<Transaction> {
     const device = await this.resolveDevice();
-    const { signedTxXdr } = await device.signTransaction(this.path, tx.toXDR());
+    const { signedTxXdr } = await withSignatureTimeout(device.signTransaction(this.path, tx.toXDR()), this.hardwareSignTimeoutMs);
     const passphrase = (tx as { networkPassphrase?: string }).networkPassphrase ?? '';
     return new Transaction(signedTxXdr, passphrase);
   }
@@ -296,7 +300,8 @@ export interface WebAuthnSignerOptions {
   contractAddress: string;
   /** The passkey credential enrolled for `contractAddress` by that wallet contract's own registration flow. */
   credential: WebAuthnCredentialDescriptor;
-  /** Injected `navigator.credentials`-like container. Defaults to `globalThis.navigator.credentials`. */
+  /** Injected 
+avigator.credentials`-like container. Defaults to `globalThis.navigator.credentials`. */
   credentials?: WebAuthnCredentialsContainer;
   /** Relying party ID passed to `credentials.get()`. Omit to let the platform default to the current origin. */
   rpId?: string;
@@ -441,7 +446,8 @@ export class WebAuthnSigner implements Signer {
     }).navigator;
     if (!nav?.credentials) {
       throw new Error(
-        'WebAuthnSigner: no `navigator.credentials` is available in this environment. ' +
+        'WebAuthnSigner: no 
+avigator.credentials` is available in this environment. ' +
         'Pass a `credentials` implementation explicitly (required in Node/tests, and on non-browser runtimes).',
       );
     }
