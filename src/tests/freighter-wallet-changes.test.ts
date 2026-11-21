@@ -1,6 +1,10 @@
 import { describe, it, expect, vi, afterEach } from 'vitest';
 import { Networks } from '@stellar/stellar-sdk';
-import { FreighterWalletAdapter, type FreighterApi } from '../adapters/freighter.js';
+import {
+  FreighterWalletAdapter,
+  DEFAULT_FREIGHTER_WATCH_INTERVAL_MS,
+  type FreighterApi,
+} from '../adapters/freighter.js';
 
 const KEY_A = 'GAAZI4TCR3TY5OJHCTJC2A4QSYRZPB26WKP43SXUXZVTYTBAKW7N5B6X';
 const KEY_B = 'GBRPYHIL2CI3FNQ4BXLFMNDLFJUNPU2HY3ZMFSHONUCEOASW7QC7OX2H';
@@ -93,5 +97,55 @@ describe('FreighterWalletAdapter wallet change detection (#1078)', () => {
     await adapter.disconnect();
     await vi.advanceTimersByTimeAsync(5000);
     expect((client.getAddress as ReturnType<typeof vi.fn>).mock.calls.length).toBe(callsAfterStop);
+  });
+
+  it('exposes the default watch interval', () => {
+    expect(DEFAULT_FREIGHTER_WATCH_INTERVAL_MS).toBe(3_000);
+  });
+
+  it('keeps the signing passphrase in sync and notifies network-only listeners (#1187)', async () => {
+    const { client, state } = makeFreighter({ address: KEY_A });
+    const onNetworkChange = vi.fn();
+    const adapter = new FreighterWalletAdapter({
+      freighter: client,
+      publicKey: KEY_A,
+      networkPassphrase: Networks.TESTNET,
+    });
+    adapter.onNetworkChange(onNetworkChange);
+
+    await adapter.syncWalletState(); // record starting network
+    state.network = Networks.PUBLIC;
+    await adapter.syncWalletState();
+
+    expect(onNetworkChange).toHaveBeenCalledWith(Networks.PUBLIC);
+    expect(adapter.networkPassphrase).toBe(Networks.PUBLIC);
+  });
+
+  it('reacts immediately to pushed accountChanged / networkChanged events (#1187)', async () => {
+    const listeners = new Map<string, (payload?: unknown) => void>();
+    const client: FreighterApi = {
+      on: vi.fn((event: string, listener: (payload?: unknown) => void) => {
+        listeners.set(event, listener);
+      }),
+      off: vi.fn(),
+      getAddress: vi.fn(async () => ({ address: KEY_A })),
+    };
+    const onWalletChange = vi.fn();
+    const onAccountChange = vi.fn();
+    const adapter = new FreighterWalletAdapter({
+      freighter: client,
+      publicKey: KEY_A,
+      networkPassphrase: Networks.TESTNET,
+      onWalletChange,
+      onAccountChange,
+    });
+
+    listeners.get('accountChanged')?.({ address: KEY_B });
+    expect(await adapter.getPublicKey()).toBe(KEY_B);
+    expect(onAccountChange).toHaveBeenCalledWith(KEY_B);
+    expect(onWalletChange).toHaveBeenCalledWith({ type: 'accountChanged', publicKey: KEY_B });
+
+    listeners.get('networkChanged')?.(Networks.PUBLIC);
+    expect(adapter.networkPassphrase).toBe(Networks.PUBLIC);
   });
 });

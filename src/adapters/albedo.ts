@@ -1,4 +1,4 @@
-import { Transaction, Networks } from '@stellar/stellar-sdk';
+import { Keypair, Transaction, Networks } from '@stellar/stellar-sdk';
 import type { WalletAdapter, SignTransactionOptions } from './types.js';
 import { AlbedoCancelError, AlbedoInvalidSignatureError } from '../errors.js';
 
@@ -73,6 +73,139 @@ async function runIntent<T>(intent: Promise<T>): Promise<T> {
     }
     throw err;
   }
+}
+
+/** Why an Albedo response was rejected. */
+export type AlbedoEnvelopeErrorReason =
+  | 'invalid_response'
+  | 'invalid_xdr'
+  | 'invalid_structure'
+  | 'invalid_signature_count'
+  | 'signature_mismatch';
+
+/** Thrown when an Albedo popup returns a malformed or unexpected envelope (#1188). */
+export class AlbedoEnvelopeError extends Error {
+  readonly reason: AlbedoEnvelopeErrorReason;
+
+  constructor(reason: AlbedoEnvelopeErrorReason, message: string) {
+    super(message);
+    this.name = 'AlbedoEnvelopeError';
+    this.reason = reason;
+  }
+}
+
+export interface VerifyEnvelopeOptions {
+  /** Require exactly this many decorated signatures. */
+  expectedSignatureCount?: number;
+  /** Require at least this many decorated signatures. Defaults to 1. */
+  minSignatureCount?: number;
+  /**
+   * Cryptographically verify each signature against this G-address. Off by
+   * default — most callers only need structural validation.
+   */
+  signerPublicKey?: string;
+}
+
+export interface EnvelopeVerificationResult {
+  transaction: Transaction;
+  signatureCount: number;
+}
+
+/**
+ * Verifies that a base64 transaction envelope returned by an Albedo popup is
+ * well-formed and carries the expected signatures (#1188).
+ *
+ * @throws {AlbedoEnvelopeError} if a check fails.
+ */
+export function verifyEnvelope(
+  xdr: string,
+  passphrase: string,
+  options: VerifyEnvelopeOptions = {},
+): EnvelopeVerificationResult {
+  if (typeof xdr !== 'string' || xdr.trim().length === 0) {
+    throw new AlbedoEnvelopeError('invalid_xdr', 'Albedo returned an empty transaction envelope XDR.');
+  }
+
+  let transaction: Transaction;
+  try {
+    transaction = new Transaction(xdr, passphrase);
+  } catch (error) {
+    const detail = error instanceof Error ? error.message : String(error);
+    throw new AlbedoEnvelopeError(
+      'invalid_xdr',
+      `Albedo returned a malformed transaction envelope XDR: ${detail}`,
+    );
+  }
+
+  const signatures = transaction.signatures;
+  if (!Array.isArray(signatures)) {
+    throw new AlbedoEnvelopeError('invalid_structure', 'Albedo envelope has no signature list.');
+  }
+
+  for (const [index, decorated] of signatures.entries()) {
+    let hint: Buffer | undefined;
+    let signature: Buffer | undefined;
+    try {
+      hint = decorated?.hint?.();
+      signature = decorated?.signature?.();
+    } catch {
+      // An undecodable decorated signature counts as malformed structure.
+    }
+    if (!hint || hint.length !== 4 || !signature || signature.length !== 64) {
+      throw new AlbedoEnvelopeError(
+        'invalid_structure',
+        `Albedo envelope signature #${index + 1} is malformed (expected a 4-byte hint and a 64-byte signature).`,
+      );
+    }
+  }
+
+  const min = options.minSignatureCount ?? 1;
+  if (signatures.length < min) {
+    throw new AlbedoEnvelopeError(
+      'invalid_signature_count',
+      `Albedo envelope has ${signatures.length} signature(s); expected at least ${min} signature(s).`,
+    );
+  }
+  if (options.expectedSignatureCount !== undefined && signatures.length !== options.expectedSignatureCount) {
+    throw new AlbedoEnvelopeError(
+      'invalid_signature_count',
+      `Albedo envelope has ${signatures.length} signature(s); expected exactly ${options.expectedSignatureCount}.`,
+    );
+  }
+
+  if (options.signerPublicKey) {
+    let signer: Keypair;
+    try {
+      signer = Keypair.fromPublicKey(options.signerPublicKey);
+    } catch {
+      throw new AlbedoEnvelopeError('signature_mismatch', 'Albedo signer public key is not a valid G-address.');
+    }
+    const txHash = transaction.hash();
+    for (const [index, decorated] of signatures.entries()) {
+      if (!signer.verify(txHash, decorated.signature())) {
+        throw new AlbedoEnvelopeError(
+          'signature_mismatch',
+          `Albedo envelope signature #${index + 1} was not produced by ${options.signerPublicKey}.`,
+        );
+      }
+    }
+  }
+
+  return { transaction, signatureCount: signatures.length };
+}
+
+/** Alias for callers that prefer the longer name. */
+export const verifySignedEnvelope = verifyEnvelope;
+/** Alias for callers that prefer a `validate*` name. */
+export const validateSignedEnvelope = verifyEnvelope;
+export const validateEnvelope = verifyEnvelope;
+
+/** Extra per-call controls for Albedo envelope verification (#1188). */
+export interface AlbedoSignOptions extends SignTransactionOptions {
+  /** Override the expected signature count (defaults to the input count + 1). */
+  expectedSignatureCount?: number;
+  /** Cryptographically verify signatures against this key (or the adapter's key). */
+  verifySignatures?: boolean;
 }
 
 export interface AlbedoPublicKeyResult {
@@ -220,7 +353,7 @@ export class AlbedoWalletAdapter implements WalletAdapter {
    */
   async signTransaction(
     tx: Transaction | string,
-    opts?: SignTransactionOptions,
+    opts?: AlbedoSignOptions,
   ): Promise<Transaction | string> {
     const client = this.getClient();
     const xdrString = typeof tx === 'string' ? tx : tx.toXDR();
@@ -253,19 +386,66 @@ export class AlbedoWalletAdapter implements WalletAdapter {
       }),
     );
 
+    // Schema-check the popup response before trusting any field (#1188).
     let signedXdr: string | undefined;
     if (typeof signResult === 'string') {
       signedXdr = signResult;
     } else if (signResult && typeof signResult === 'object') {
-      signedXdr = signResult.signed_envelope_xdr ?? signResult.xdr;
+      if ('error' in signResult && signResult.error) {
+        throw new AlbedoEnvelopeError(
+          'invalid_response',
+          `Albedo signing failed: ${String(signResult.error)}`,
+        );
+      }
+      const candidate = signResult.signed_envelope_xdr ?? signResult.xdr;
+      if (candidate !== undefined && typeof candidate !== 'string') {
+        throw new AlbedoEnvelopeError(
+          'invalid_response',
+          'Albedo returned a signed envelope field with a non-string value.',
+        );
+      }
+      signedXdr = candidate;
+    } else {
+      throw new AlbedoEnvelopeError(
+        'invalid_response',
+        'Albedo returned an unexpected response shape from the tx intent.',
+      );
     }
 
     if (!signedXdr || typeof signedXdr !== 'string') {
-      throw new Error('Albedo signing did not return valid signed XDR.');
+      throw new AlbedoEnvelopeError(
+        'invalid_response',
+        'Albedo signing did not return valid signed XDR.',
+      );
     }
 
-    const signedTx = new Transaction(signedXdr, passphrase);
+    // Decode here so malformed XDR is reported as an envelope error while the
+    // dedicated 64-byte signature check below keeps its specific error type.
+    let signedTx: Transaction;
+    try {
+      signedTx = new Transaction(signedXdr, passphrase);
+    } catch (error) {
+      const detail = error instanceof Error ? error.message : String(error);
+      throw new AlbedoEnvelopeError(
+        'invalid_xdr',
+        `Albedo returned a malformed transaction envelope XDR: ${detail}`,
+      );
+    }
     assertValidSignatureLength(signedTx);
+
+    // Albedo adds one signature to the envelope it was asked to sign. Reject
+    // empty, replayed, or over-signed responses before submission (#1188).
+    const originalSignatureCount = typeof tx === 'string' ? 0 : tx.signatures.length;
+    const expectedSignatureCount = opts?.expectedSignatureCount ?? originalSignatureCount + 1;
+    const verification: VerifyEnvelopeOptions = {
+      expectedSignatureCount,
+      minSignatureCount: 1,
+    };
+    if (opts?.verifySignatures) {
+      const signer = opts.accountToSign ?? this.pubKey;
+      if (signer) verification.signerPublicKey = signer;
+    }
+    verifyEnvelope(signedXdr, passphrase, verification);
 
     if (typeof tx === 'string') {
       return signedXdr;

@@ -1,5 +1,5 @@
 /**
- * Async request coalescing (#798).
+ * Async request coalescing (#798, #1186).
  *
  * Deduplicates concurrent in-flight async calls for the same key: callers
  * asking for the same uncached value share one fetch instead of triggering
@@ -147,4 +147,45 @@ export function coalesceInFlight<K, V>(
   };
   promise.then(evict, evict);
   return promise;
+}
+
+/**
+ * A stateful wrapper around {@link coalesceInFlight} (#1186).
+ *
+ * Keeps the in-flight map for callers that would otherwise have to share one
+ * (e.g. React components mounted at once that all request the same stream).
+ * Entries exist only while their promise is in flight, so a later call is
+ * always free to fetch fresh data.
+ */
+export class AsyncCoalescer<K, V> {
+  private readonly inFlight = new Map<K, Promise<V>>();
+
+  /** Returns the shared in-flight promise for `key`, starting `fn()` once. */
+  run(key: K, fn: () => Promise<V>, options?: Pick<CoalesceOptions, 'maxQueueDepth'>): Promise<V> {
+    return coalesceInFlight(this.inFlight, key, fn, options);
+  }
+
+  /** Number of requests currently in flight. */
+  get size(): number {
+    return this.inFlight.size;
+  }
+
+  /** Whether a request for `key` is currently in flight. */
+  has(key: K): boolean {
+    return this.inFlight.has(key);
+  }
+
+  /**
+   * Forget one (or all) in-flight entry without cancelling the underlying
+   * requests. Useful when a network/account switch makes pending reads stale.
+   */
+  clear(key?: K): void {
+    if (key === undefined) this.inFlight.clear();
+    else this.inFlight.delete(key);
+  }
+}
+
+/** Creates a standalone {@link AsyncCoalescer}. */
+export function createAsyncCoalescer<K, V>(): AsyncCoalescer<K, V> {
+  return new AsyncCoalescer<K, V>();
 }

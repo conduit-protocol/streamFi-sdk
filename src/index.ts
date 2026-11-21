@@ -178,7 +178,13 @@ export type {
   BatchFootprintOptions,
   ResourceEstimate,
 } from "./fee-estimator.js";
-export { coalesceAsync, coalesceInFlight, CoalesceQueueFullError } from "./coalesce-async.js";
+export {
+  coalesceAsync,
+  coalesceInFlight,
+  CoalesceQueueFullError,
+  AsyncCoalescer,
+  createAsyncCoalescer,
+} from "./coalesce-async.js";
 export type { CoalesceOptions } from "./coalesce-async.js";
 export { WebSocketRelayer } from "./relayer/WebSocketRelayer.js";
 export {
