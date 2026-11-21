@@ -54,6 +54,184 @@ export interface WebSocketRelayerOptions {
    * `id` are never deduplicated. Defaults to 1,000; set to 0 to disable.
    */
   dedupeWindowSize?: number;
+  /**
+   * Wire encoding for messages. `'json'` (the default) keeps the existing
+   * `JSON.stringify` payloads; `'binary'` packs each envelope into a compact
+   * framed ArrayBuffer, avoiding repeated envelope keys on high-frequency
+   * updates (e.g. stream balance broadcasts).
+   */
+  messageEncoding?: 'json' | 'binary';
+  /** Shorthand for `messageEncoding: 'binary'`. Defaults to `false`. */
+  binary?: boolean;
+  /** Alias of {@link WebSocketRelayerOptions.binary}. */
+  binaryPacking?: boolean;
+}
+
+// ── Binary frame codec ───────────────────────────────────────────────────────
+//
+// Frame layout (all integers little-endian):
+//   byte 0-1   magic 'S','F'
+//   byte 2     flags: bit 0 = id present
+//   byte 3     payload tag (0 = JSON, 1 = UTF-8 string, 2 = int64, 3 = null)
+//   u16        type length, then type bytes (UTF-8)
+//   u16 + bytes  id, only when bit 0 of flags is set
+//   u32 + bytes  payload bytes, for tags 0 and 1
+//   8 bytes      payload int64, for tag 2
+//
+// No bytes are stored for a null/undefined payload (tag 3). The framing
+// replaces the repeated `"type"`/`"payload"`/`"id"` JSON keys, and the typed
+// payload tags avoid JSON quoting/escaping for string and bigint values.
+
+const BINARY_MAGIC_0 = 0x53; // 'S'
+const BINARY_MAGIC_1 = 0x46; // 'F'
+
+const PAYLOAD_JSON = 0;
+const PAYLOAD_STRING = 1;
+const PAYLOAD_INT64 = 2;
+const PAYLOAD_NULL = 3;
+
+const utf8Encoder = new TextEncoder();
+const utf8Decoder = new TextDecoder();
+
+function writeU16(bytes: Uint8Array, offset: number, value: number): void {
+  bytes[offset] = value & 0xff;
+  bytes[offset + 1] = (value >>> 8) & 0xff;
+}
+
+function writeU32(bytes: Uint8Array, offset: number, value: number): void {
+  bytes[offset] = value & 0xff;
+  bytes[offset + 1] = (value >>> 8) & 0xff;
+  bytes[offset + 2] = (value >>> 16) & 0xff;
+  bytes[offset + 3] = (value >>> 24) & 0xff;
+}
+
+function readU16(bytes: Uint8Array, offset: number): number {
+  return ((bytes[offset] ?? 0) | ((bytes[offset + 1] ?? 0) << 8)) >>> 0;
+}
+
+function readU32(bytes: Uint8Array, offset: number): number {
+  return (
+    ((bytes[offset] ?? 0) |
+      ((bytes[offset + 1] ?? 0) << 8) |
+      ((bytes[offset + 2] ?? 0) << 16) |
+      ((bytes[offset + 3] ?? 0) << 24)) >>>
+    0
+  );
+}
+
+/** Pack a message into the binary frame understood by {@link unpackMessage}. */
+export function packMessage(message: WebSocketMessage): ArrayBuffer {
+  const typeBytes = utf8Encoder.encode(message.type);
+  const idBytes = message.id === undefined ? null : utf8Encoder.encode(message.id);
+
+  let payloadBytes: Uint8Array;
+  let payloadTag: number;
+  if (message.payload === null || message.payload === undefined) {
+    payloadBytes = new Uint8Array(0);
+    payloadTag = PAYLOAD_NULL;
+  } else if (typeof message.payload === 'string') {
+    payloadBytes = utf8Encoder.encode(message.payload);
+    payloadTag = PAYLOAD_STRING;
+  } else if (typeof message.payload === 'bigint') {
+    const buffer = new ArrayBuffer(8);
+    new DataView(buffer).setBigInt64(0, message.payload, true);
+    payloadBytes = new Uint8Array(buffer);
+    payloadTag = PAYLOAD_INT64;
+  } else {
+    const json = JSON.stringify(message.payload, (_, value) =>
+      typeof value === 'bigint' ? value.toString() : value,
+    );
+    payloadBytes = utf8Encoder.encode(json ?? 'null');
+    payloadTag = PAYLOAD_JSON;
+  }
+
+  const hasId = idBytes !== null;
+  const hasPayloadLength = payloadTag === PAYLOAD_JSON || payloadTag === PAYLOAD_STRING;
+  const size =
+    4 +
+    2 +
+    typeBytes.length +
+    (hasId ? 2 + (idBytes?.length ?? 0) : 0) +
+    (hasPayloadLength ? 4 : 0) +
+    payloadBytes.length;
+  const buffer = new ArrayBuffer(size);
+  const bytes = new Uint8Array(buffer);
+  bytes[0] = BINARY_MAGIC_0;
+  bytes[1] = BINARY_MAGIC_1;
+  bytes[2] = hasId ? 1 : 0;
+  bytes[3] = payloadTag;
+
+  let offset = 4;
+  writeU16(bytes, offset, Math.min(0xffff, typeBytes.length));
+  offset += 2;
+  bytes.set(typeBytes, offset);
+  offset += typeBytes.length;
+  if (idBytes !== null) {
+    writeU16(bytes, offset, Math.min(0xffff, idBytes.length));
+    offset += 2;
+    bytes.set(idBytes, offset);
+    offset += idBytes.length;
+  }
+  if (hasPayloadLength) {
+    writeU32(bytes, offset, payloadBytes.length);
+    offset += 4;
+  }
+  bytes.set(payloadBytes, offset);
+  return buffer;
+}
+
+/** Unpack a binary frame. Returns `null` for malformed or unknown frames. */
+export function unpackMessage(data: ArrayBuffer | ArrayBufferView): WebSocketMessage | null {
+  try {
+    const bytes =
+      data instanceof Uint8Array
+        ? data
+        : ArrayBuffer.isView(data)
+          ? new Uint8Array(data.buffer, data.byteOffset, data.byteLength)
+          : new Uint8Array(data);
+    if (bytes.length < 6) return null;
+    if (bytes[0] !== BINARY_MAGIC_0 || bytes[1] !== BINARY_MAGIC_1) return null;
+
+    const hasId = bytes[2] === 1;
+    const payloadTag = bytes[3] ?? PAYLOAD_NULL;
+    let offset = 4;
+    const typeLength = readU16(bytes, offset);
+    offset += 2;
+    if (offset + typeLength > bytes.length) return null;
+    const type = utf8Decoder.decode(bytes.subarray(offset, offset + typeLength));
+    offset += typeLength;
+
+    let id: string | undefined;
+    if (hasId) {
+      if (offset + 2 > bytes.length) return null;
+      const idLength = readU16(bytes, offset);
+      offset += 2;
+      if (offset + idLength > bytes.length) return null;
+      id = utf8Decoder.decode(bytes.subarray(offset, offset + idLength));
+      offset += idLength;
+    }
+
+    let payload: unknown = null;
+    if (payloadTag === PAYLOAD_JSON || payloadTag === PAYLOAD_STRING) {
+      if (offset + 4 > bytes.length) return null;
+      const payloadLength = readU32(bytes, offset);
+      offset += 4;
+      if (offset + payloadLength > bytes.length) return null;
+      const raw = bytes.subarray(offset, offset + payloadLength);
+      payload = payloadTag === PAYLOAD_JSON ? (JSON.parse(utf8Decoder.decode(raw)) as unknown) : utf8Decoder.decode(raw);
+    } else if (payloadTag === PAYLOAD_INT64) {
+      if (offset + 8 > bytes.length) return null;
+      payload = new DataView(bytes.buffer, bytes.byteOffset + offset, 8).getBigInt64(0, true);
+    } else if (payloadTag !== PAYLOAD_NULL) {
+      return null;
+    }
+
+    const message: WebSocketMessage = { type, payload };
+    if (id !== undefined) message.id = id;
+    return message;
+  } catch {
+    return null;
+  }
 }
 
 export class WebSocketRelayer {
@@ -82,6 +260,7 @@ export class WebSocketRelayer {
   private awaitingPong = false;
   private heartbeatSentAt: number | null = null;
   private dedupeWindowSize: number;
+  private useBinary: boolean;
   /** Insertion-ordered set of recently processed message ids (#1056). */
   private seenMessageIds: Map<string, true> = new Map();
 
@@ -95,6 +274,8 @@ export class WebSocketRelayer {
     this.heartbeatIntervalMs = options?.heartbeatIntervalMs ?? 30_000;
     this.heartbeatTimeoutMs = options?.heartbeatTimeoutMs ?? 5_000;
     this.dedupeWindowSize = Math.max(0, Math.floor(options?.dedupeWindowSize ?? 1000));
+    this.useBinary =
+      options?.messageEncoding === 'binary' || options?.binary === true || options?.binaryPacking === true;
     if (options?.onStateChange) {
       this.stateChangeHandlers.add(options.onStateChange);
     }
@@ -224,6 +405,15 @@ export class WebSocketRelayer {
           resolve();
           return;
         }
+        // Deliver binary frames as ArrayBuffer so decoding stays synchronous.
+        if (this.useBinary) {
+          try {
+            (ws as unknown as { binaryType?: string }).binaryType = 'arraybuffer';
+          } catch {
+            // Some mocks/implementations do not expose binaryType; the decoder
+            // still handles ArrayBuffer, views and Blob defensively.
+          }
+        }
         let settled = false;
 
         ws.onopen = () => {
@@ -247,7 +437,7 @@ export class WebSocketRelayer {
             this.heartbeatSentAt = null;
             this.clearHeartbeatTimeout();
           }
-          this.handleMessageSafe(event.data);
+          this.handleMessageSafe(event.data as unknown);
         };
 
         ws.onclose = () => {
@@ -294,16 +484,43 @@ export class WebSocketRelayer {
     }
   }
 
-  private handleMessageSafe(data: string): void {
+  /** Decode and dispatch an inbound frame, whether JSON text or a binary frame. */
+  private handleMessageSafe(data: unknown): void {
     if (data === null || data === undefined) return;
 
-    let parsed: WebSocketMessage;
-    try {
-      parsed = JSON.parse(data) as WebSocketMessage;
-    } catch {
+    if (typeof data === 'string') {
+      let parsed: WebSocketMessage | null;
+      try {
+        parsed = JSON.parse(data) as WebSocketMessage;
+      } catch {
+        return;
+      }
+      this.handleDecodedMessage(parsed);
       return;
     }
 
+    if (data instanceof ArrayBuffer || ArrayBuffer.isView(data)) {
+      this.handleDecodedMessage(unpackMessage(data));
+      return;
+    }
+
+    // Blob/File inbound (when binaryType could not be set to 'arraybuffer').
+    if (
+      typeof data === 'object' &&
+      data !== null &&
+      'arrayBuffer' in data &&
+      typeof (data as { arrayBuffer?: unknown }).arrayBuffer === 'function'
+    ) {
+      const blob = data as { arrayBuffer(): Promise<ArrayBuffer> };
+      Promise.resolve(blob.arrayBuffer())
+        .then((buffer) => {
+          if (!this.isDestroyed) this.handleDecodedMessage(unpackMessage(buffer));
+        })
+        .catch(() => {});
+    }
+  }
+
+  private handleDecodedMessage(parsed: WebSocketMessage | null): void {
     if (!parsed || typeof parsed !== 'object' || !parsed.type || typeof parsed.type !== 'string') return;
 
     // Handle pong responses for heartbeat ping
@@ -356,7 +573,13 @@ export class WebSocketRelayer {
     this.heartbeatInterval = setInterval(() => {
       if (this.ws && this.ws.readyState === 1 && !this.awaitingPong) {
         try {
-          this.ws.send(JSON.stringify({ type: 'ping' }));
+          // Keep the default/JSON heartbeat frame byte-for-byte unchanged;
+          // binary mode sends the same logical ping through the binary codec.
+          this.ws.send(
+            this.useBinary
+              ? this.encodeMessage({ type: 'ping', payload: null })
+              : JSON.stringify({ type: 'ping' }),
+          );
           this.awaitingPong = true;
           this.heartbeatSentAt = Date.now();
           this.heartbeatTimeout = setTimeout(() => {
@@ -552,6 +775,11 @@ export class WebSocketRelayer {
     this.offlineQueue.push({ message, enqueuedAt: Date.now() });
   }
 
+  /** Serialize using the encoding selected at construction time. */
+  private encodeMessage(message: WebSocketMessage): string | ArrayBuffer {
+    return this.useBinary ? packMessage(message) : JSON.stringify(message);
+  }
+
   async send(message: WebSocketMessage): Promise<void> {
     if (this.isDestroyed) {
       throw new Error('WebSocketRelayer has been destroyed');
@@ -582,7 +810,7 @@ export class WebSocketRelayer {
         return;
       }
 
-      const payload = JSON.stringify(message);
+      const payload = this.encodeMessage(message);
       this.ws.send(payload);
     } finally {
       this.releaseLock();
