@@ -1,30 +1,78 @@
 import { Keypair, Transaction, Networks } from '@stellar/stellar-sdk';
 import type { WalletAdapter, SignTransactionOptions } from './types.js';
+import { AlbedoCancelError, AlbedoInvalidSignatureError } from '../errors.js';
 
-export interface AlbedoPublicKeyResult {
-  pubkey: string;
-  signed_message?: string;
-  signature?: string;
-  [key: string]: unknown;
+/** Albedo intent error code for "rejected by the user" (includes closing the popup). */
+const ALBEDO_USER_REJECTED_CODE = -4;
+
+/** Byte length of a well-formed Ed25519 signature. */
+const ED25519_SIGNATURE_LENGTH = 64;
+
+/**
+ * Asserts every decorated signature on `tx` is a well-formed 64-byte Ed25519
+ * signature. The Albedo iframe has been observed returning a signed envelope
+ * whose signature was not validated for length before being handed back to
+ * the caller; left unchecked, it fails on-chain submission with a less
+ * specific `bad_auth` error far from where the real problem is (#971).
+ *
+ * @throws {AlbedoInvalidSignatureError} if any signature is not 64 bytes.
+ */
+function assertValidSignatureLength(tx: Transaction): void {
+  for (const decoratedSig of tx.signatures) {
+    const sigBytes = decoratedSig.signature();
+    if (sigBytes.length !== ED25519_SIGNATURE_LENGTH) {
+      throw new AlbedoInvalidSignatureError(sigBytes.length);
+    }
+  }
 }
 
-export interface AlbedoTxResult {
-  xdr?: string;
-  signed_envelope_xdr?: string;
-  tx_hash?: string;
-  network?: string;
-  [key: string]: unknown;
+/**
+ * True when an Albedo intent rejection means the user closed the popup or
+ * declined, rather than a genuine wallet/transaction failure.
+ */
+function isAlbedoCancellation(err: unknown): boolean {
+  if (!err) return false;
+  const { code, message } = (typeof err === 'object' ? err : { message: String(err) }) as {
+    code?: unknown;
+    message?: unknown;
+  };
+  if (code === ALBEDO_USER_REJECTED_CODE) return true;
+  return typeof message === 'string' && /reject|cancel|closed|denied/i.test(message);
 }
 
-export interface AlbedoApi {
-  publicKey?: (opts?: { require_existing?: boolean }) => Promise<AlbedoPublicKeyResult | string>;
-  tx?: (opts: {
-    xdr: string;
-    network?: string;
-    submit?: boolean;
-    pubkey?: string;
-  }) => Promise<AlbedoTxResult | string>;
-  [key: string]: unknown;
+/**
+ * Maps a configured network to Albedo's `network` intent parameter and the
+ * passphrase the signed envelope must be decoded with (#1079).
+ *
+ * Only the two networks Albedo names natively are mapped to identifiers —
+ * by exact passphrase, or the `'public'` / `'testnet'` shorthands. Anything
+ * else (Futurenet, a private testnet, a local Standalone network) is passed
+ * through verbatim as a custom passphrase. Substring matching on "test" or
+ * "public" used to route e.g. Futurenet ("Test SDF Future Network ; …") to
+ * Albedo's testnet, signing for the wrong network.
+ */
+export function resolveAlbedoNetwork(network: string): { networkParam: string; passphrase: string } {
+  const id = network.trim().toLowerCase();
+  if (network === Networks.PUBLIC || id === 'public') {
+    return { networkParam: 'public', passphrase: Networks.PUBLIC };
+  }
+  if (network === Networks.TESTNET || id === 'testnet') {
+    return { networkParam: 'testnet', passphrase: Networks.TESTNET };
+  }
+  return { networkParam: network, passphrase: network };
+}
+
+/** Runs an Albedo intent, rethrowing user cancellations as {@link AlbedoCancelError}. */
+async function runIntent<T>(intent: Promise<T>): Promise<T> {
+  try {
+    return await intent;
+  } catch (err) {
+    if (isAlbedoCancellation(err)) {
+      const message = (err as { message?: unknown })?.message;
+      throw new AlbedoCancelError(typeof message === 'string' && message ? message : undefined);
+    }
+    throw err;
+  }
 }
 
 /** Why an Albedo response was rejected. */
@@ -53,7 +101,7 @@ export interface VerifyEnvelopeOptions {
   minSignatureCount?: number;
   /**
    * Cryptographically verify each signature against this G-address. Off by
-   * default because most callers only need structural validation.
+   * default — most callers only need structural validation.
    */
   signerPublicKey?: string;
 }
@@ -67,15 +115,7 @@ export interface EnvelopeVerificationResult {
  * Verifies that a base64 transaction envelope returned by an Albedo popup is
  * well-formed and carries the expected signatures (#1188).
  *
- * Checks, in order:
- *  1. the response is a non-empty XDR string;
- *  2. it decodes into a Stellar `Transaction` for the given passphrase;
- *  3. each decorated signature has a 4-byte hint and a 64-byte ed25519
- *     signature (malformed signatures otherwise surface as opaque SDK errors
- *     when the transaction is submitted);
- *  4. the signature count satisfies the configured bounds.
- *
- * @throws {AlbedoEnvelopeError} on any failed check.
+ * @throws {AlbedoEnvelopeError} if a check fails.
  */
 export function verifyEnvelope(
   xdr: string,
@@ -109,7 +149,7 @@ export function verifyEnvelope(
       hint = decorated?.hint?.();
       signature = decorated?.signature?.();
     } catch {
-      // Treat an undecodable decorated signature as malformed structure.
+      // An undecodable decorated signature counts as malformed structure.
     }
     if (!hint || hint.length !== 4 || !signature || signature.length !== 64) {
       throw new AlbedoEnvelopeError(
@@ -154,12 +194,45 @@ export function verifyEnvelope(
   return { transaction, signatureCount: signatures.length };
 }
 
-/** Alias kept for callers that prefer the longer name. */
+/** Alias for callers that prefer the longer name. */
 export const verifySignedEnvelope = verifyEnvelope;
-/** Alias kept for callers that prefer a `validate*` name. */
+/** Alias for callers that prefer a `validate*` name. */
 export const validateSignedEnvelope = verifyEnvelope;
-/** Alias kept for callers that prefer a `validateEnvelope` name. */
 export const validateEnvelope = verifyEnvelope;
+
+/** Extra per-call controls for Albedo envelope verification (#1188). */
+export interface AlbedoSignOptions extends SignTransactionOptions {
+  /** Override the expected signature count (defaults to the input count + 1). */
+  expectedSignatureCount?: number;
+  /** Cryptographically verify signatures against this key (or the adapter's key). */
+  verifySignatures?: boolean;
+}
+
+export interface AlbedoPublicKeyResult {
+  pubkey: string;
+  signed_message?: string;
+  signature?: string;
+  [key: string]: unknown;
+}
+
+export interface AlbedoTxResult {
+  xdr?: string;
+  signed_envelope_xdr?: string;
+  tx_hash?: string;
+  network?: string;
+  [key: string]: unknown;
+}
+
+export interface AlbedoApi {
+  publicKey?: (opts?: { require_existing?: boolean }) => Promise<AlbedoPublicKeyResult | string>;
+  tx?: (opts: {
+    xdr: string;
+    network?: string;
+    submit?: boolean;
+    pubkey?: string;
+  }) => Promise<AlbedoTxResult | string>;
+  [key: string]: unknown;
+}
 
 export interface AlbedoWalletAdapterOptions {
   /**
@@ -173,16 +246,11 @@ export interface AlbedoWalletAdapterOptions {
   publicKey?: string;
   /**
    * Default network passphrase or identifier (e.g. 'public', 'testnet').
+   * Any other value is treated as a custom network passphrase (private
+   * testnets, local Standalone networks, Futurenet) and passed to Albedo
+   * verbatim.
    */
   networkPassphrase?: string;
-}
-
-/** Extra per-call controls for Albedo envelope verification (#1188). */
-export interface AlbedoSignOptions extends SignTransactionOptions {
-  /** Override the expected signature count (defaults to the input count + 1). */
-  expectedSignatureCount?: number;
-  /** Cryptographically verify signatures against this key (or the adapter's key). */
-  verifySignatures?: boolean;
 }
 
 /**
@@ -240,7 +308,7 @@ export class AlbedoWalletAdapter implements WalletAdapter {
       throw new Error('Albedo wallet API does not support publicKey intent.');
     }
 
-    const res = await client.publicKey({ require_existing: true });
+    const res = await runIntent(client.publicKey({ require_existing: true }));
     const key = typeof res === 'string' ? res : res?.pubkey;
 
     if (!key) {
@@ -260,7 +328,7 @@ export class AlbedoWalletAdapter implements WalletAdapter {
       throw new Error('Albedo wallet API does not support publicKey intent.');
     }
 
-    const res = await client.publicKey();
+    const res = await runIntent(client.publicKey());
     const key = typeof res === 'string' ? res : res?.pubkey;
 
     if (!key) {
@@ -281,9 +349,7 @@ export class AlbedoWalletAdapter implements WalletAdapter {
   /**
    * Signs a Soroban/Stellar transaction via Albedo tx intent.
    *
-   * The popup's response is schema-checked and the returned envelope is
-   * verified (#1188) before it is handed back to the caller, so a malformed
-   * or under-signed envelope fails here instead of during submission.
+   * @throws {AlbedoCancelError} if the user closes the Albedo popup or rejects the request.
    */
   async signTransaction(
     tx: Transaction | string,
@@ -292,12 +358,12 @@ export class AlbedoWalletAdapter implements WalletAdapter {
     const client = this.getClient();
     const xdrString = typeof tx === 'string' ? tx : tx.toXDR();
 
-    let passphrase = opts?.networkPassphrase ?? this.networkPassphrase;
-    if (!passphrase && typeof tx !== 'string' && tx.networkPassphrase) {
-      passphrase = tx.networkPassphrase;
+    let network = opts?.networkPassphrase ?? this.networkPassphrase;
+    if (!network && typeof tx !== 'string' && tx.networkPassphrase) {
+      network = tx.networkPassphrase;
     }
 
-    if (!passphrase) {
+    if (!network) {
       throw new Error(
         'networkPassphrase is required to sign transactions with Albedo. ' +
         'Pass { networkPassphrase } in opts or constructor options.',
@@ -308,22 +374,19 @@ export class AlbedoWalletAdapter implements WalletAdapter {
       throw new Error('Albedo client does not support tx intent.');
     }
 
-    // Determine network param for Albedo: 'public', 'testnet', or full passphrase
-    let networkParam = passphrase;
-    if (passphrase === Networks.PUBLIC || passphrase.toLowerCase().includes('public')) {
-      networkParam = 'public';
-    } else if (passphrase === Networks.TESTNET || passphrase.toLowerCase().includes('test')) {
-      networkParam = 'testnet';
-    }
+    const { networkParam, passphrase } = resolveAlbedoNetwork(network);
 
     const accountToSign = opts?.accountToSign ?? this.pubKey;
-    const signResult = await client.tx({
-      xdr: xdrString,
-      network: networkParam,
-      submit: false,
-      ...(accountToSign ? { pubkey: accountToSign } : {}),
-    });
+    const signResult = await runIntent(
+      client.tx({
+        xdr: xdrString,
+        network: networkParam,
+        submit: false,
+        ...(accountToSign ? { pubkey: accountToSign } : {}),
+      }),
+    );
 
+    // Schema-check the popup response before trusting any field (#1188).
     let signedXdr: string | undefined;
     if (typeof signResult === 'string') {
       signedXdr = signResult;
@@ -356,9 +419,22 @@ export class AlbedoWalletAdapter implements WalletAdapter {
       );
     }
 
-    // The wallet adds one signature to the envelope it was given. Rejecting
-    // anything else catches empty, replayed, or over-signed responses before
-    // they reach transaction submission (#1188).
+    // Decode here so malformed XDR is reported as an envelope error while the
+    // dedicated 64-byte signature check below keeps its specific error type.
+    let signedTx: Transaction;
+    try {
+      signedTx = new Transaction(signedXdr, passphrase);
+    } catch (error) {
+      const detail = error instanceof Error ? error.message : String(error);
+      throw new AlbedoEnvelopeError(
+        'invalid_xdr',
+        `Albedo returned a malformed transaction envelope XDR: ${detail}`,
+      );
+    }
+    assertValidSignatureLength(signedTx);
+
+    // Albedo adds one signature to the envelope it was asked to sign. Reject
+    // empty, replayed, or over-signed responses before submission (#1188).
     const originalSignatureCount = typeof tx === 'string' ? 0 : tx.signatures.length;
     const expectedSignatureCount = opts?.expectedSignatureCount ?? originalSignatureCount + 1;
     const verification: VerifyEnvelopeOptions = {
@@ -375,6 +451,6 @@ export class AlbedoWalletAdapter implements WalletAdapter {
       return signedXdr;
     }
 
-    return new Transaction(signedXdr, passphrase);
+    return signedTx;
   }
 }

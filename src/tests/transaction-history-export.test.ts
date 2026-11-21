@@ -101,6 +101,29 @@ describe('Transaction History Export Helpers (#808)', () => {
       const csv = exportTransactionsToCsv([]);
       expect(csv).toBe('id,hash,streamId,kind,direction,status,amount,asset,counterparty,timestamp');
     });
+
+    // #1083 — these files are opened in Excel/Sheets, so a field starting
+    // with a formula character must be exported as text, not as a formula.
+    it('neutralises spreadsheet formula injection but leaves plain numbers alone', () => {
+      const injected: TransactionRecord[] = [
+        {
+          ...mockTransactions[0]!,
+          hash: '=HYPERLINK("http://evil.example","x")',
+          streamId: '+SUM(A1:A9)',
+          asset: '@cmd',
+        },
+      ];
+
+      const csv = exportTransactionsToCsv(injected, {
+        formatAmounts: false,
+        includeHeader: false,
+      });
+
+      expect(csv).toContain(`"'=HYPERLINK(""http://evil.example"",""x"")"`);
+      expect(csv).toContain("'+SUM(A1:A9)");
+      expect(csv).toContain("'@cmd");
+      expect(csv).toContain(',100000000,');
+    });
   });
 
   describe('exportTransactionsToJson', () => {

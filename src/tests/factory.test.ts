@@ -35,6 +35,11 @@ vi.mock('../soroban.js', () => ({
     mainnet:  'https://mainnet.sorobanrpc.com',
     local:    'http://localhost:8000/soroban/rpc',
   },
+  DEFAULT_HORIZON: {
+    testnet:  'https://horizon-testnet.stellar.org',
+    mainnet:  'https://horizon.stellar.org',
+    local:    'http://localhost:8000',
+  },
   catchNetworkError: (label: string, fn: () => any) => fn(),
 }));
 
@@ -521,6 +526,124 @@ describe('FactoryModule — streamsBySender() / streamsByRecipient()', () => {
 
     const args = mockBuildTx.mock.calls.at(-1)![5] as _xdr.ScVal[];
     expect(args[2]!.u32()).toBe(50);
+  });
+});
+
+describe('FactoryModule — getStreamsBySenderPaginated()', () => {
+  it('returns a null cursor and hasMore=false on the last (or only) page', async () => {
+    const { FactoryModule } = await import('../factory.js');
+    mockSimulate.mockResolvedValueOnce(_xdr.ScVal.scvVec([
+      _xdr.ScVal.scvU64(_xdr.Uint64.fromString('0')),
+      _xdr.ScVal.scvU64(_xdr.Uint64.fromString('1')),
+    ]));
+
+    const res = await new FactoryModule(cfg()).getStreamsBySenderPaginated(SENDER_ADDR, undefined, 50);
+    expect(res.ids).toEqual([0n, 1n]);
+    expect(res.hasMore).toBe(false);
+    expect(res.cursor).toBeNull();
+  });
+
+  it('returns a cursor that resumes from the next offset when there are more pages', async () => {
+    const { FactoryModule } = await import('../factory.js');
+    const items = Array.from({ length: 2 }, (_, i) =>
+      _xdr.ScVal.scvU64(_xdr.Uint64.fromString(i.toString())),
+    );
+    mockSimulate
+      .mockResolvedValueOnce(_xdr.ScVal.scvVec(items))
+      .mockResolvedValueOnce(_xdr.ScVal.scvVec([_xdr.ScVal.scvU64(_xdr.Uint64.fromString('2'))]));
+
+    const factory = new FactoryModule(cfg());
+    const first = await factory.getStreamsBySenderPaginated(SENDER_ADDR, undefined, 2);
+    expect(first.ids).toEqual([0n, 1n]);
+    expect(first.hasMore).toBe(true);
+    expect(first.cursor).not.toBeNull();
+
+    const second = await factory.getStreamsBySenderPaginated(SENDER_ADDR, first.cursor!, 2);
+    expect(second.ids).toEqual([2n]);
+    expect(second.hasMore).toBe(false);
+    expect(second.cursor).toBeNull();
+
+    // The second page's contract call used the resumed offset (2), not 0.
+    const args = mockBuildTx.mock.calls.at(-1)![5] as _xdr.ScVal[];
+    expect(args[1]!.u32()).toBe(2);
+  });
+
+  it('rejects a malformed cursor instead of silently restarting from the first page', async () => {
+    const { FactoryModule } = await import('../factory.js');
+
+    await expect(
+      new FactoryModule(cfg()).getStreamsBySenderPaginated(SENDER_ADDR, 'not-a-valid-cursor'),
+    ).rejects.toThrow(/invalid cursor/);
+    expect(mockSimulate).not.toHaveBeenCalled();
+  });
+});
+
+describe('FactoryModule — getFactoryConfig()', () => {
+  it('returns feeBps and feeRecipient parsed from the contract', async () => {
+    const { FactoryModule } = await import('../factory.js');
+    mockSimulate
+      .mockResolvedValueOnce(makeU32ScVal(30))
+      .mockResolvedValueOnce(makeU32ScVal(1)); // any non-void scval, resolved by MockAddress
+
+    const cfgResult = await new FactoryModule(cfg()).getFactoryConfig();
+    expect(cfgResult.feeBps).toBe(30);
+    expect(cfgResult.feeRecipient).toBeDefined();
+  });
+
+  it('omits feeRecipient when the contract reports None', async () => {
+    const { FactoryModule } = await import('../factory.js');
+    mockSimulate
+      .mockResolvedValueOnce(makeU32ScVal(30))
+      .mockResolvedValueOnce(makeVoidScVal());
+
+    const cfgResult = await new FactoryModule(cfg()).getFactoryConfig();
+    expect(cfgResult).toEqual({ feeBps: 30 });
+  });
+
+  it('caches the result and does not re-simulate within the TTL', async () => {
+    const { FactoryModule } = await import('../factory.js');
+    mockSimulate
+      .mockResolvedValueOnce(makeU32ScVal(30))
+      .mockResolvedValueOnce(makeVoidScVal());
+
+    const factory = new FactoryModule(cfg());
+    await factory.getFactoryConfig();
+    await factory.getFactoryConfig();
+
+    expect(mockSimulate).toHaveBeenCalledTimes(2); // one for feeBps, one for feeRecipient — not re-issued on the 2nd call
+  });
+
+  it('re-simulates after clearFactoryConfigCache()', async () => {
+    const { FactoryModule } = await import('../factory.js');
+    mockSimulate
+      .mockResolvedValueOnce(makeU32ScVal(30))
+      .mockResolvedValueOnce(makeVoidScVal())
+      .mockResolvedValueOnce(makeU32ScVal(45))
+      .mockResolvedValueOnce(makeVoidScVal());
+
+    const factory = new FactoryModule(cfg());
+    const first = await factory.getFactoryConfig();
+    factory.clearFactoryConfigCache();
+    const second = await factory.getFactoryConfig();
+
+    expect(first.feeBps).toBe(30);
+    expect(second.feeBps).toBe(45);
+    expect(mockSimulate).toHaveBeenCalledTimes(4);
+  });
+
+  it('respects a custom factoryConfigCacheTtlMs of 0 by never caching', async () => {
+    const { FactoryModule } = await import('../factory.js');
+    mockSimulate
+      .mockResolvedValueOnce(makeU32ScVal(30))
+      .mockResolvedValueOnce(makeVoidScVal())
+      .mockResolvedValueOnce(makeU32ScVal(30))
+      .mockResolvedValueOnce(makeVoidScVal());
+
+    const factory = new FactoryModule({ ...cfg(), factoryConfigCacheTtlMs: 0 });
+    await factory.getFactoryConfig();
+    await factory.getFactoryConfig();
+
+    expect(mockSimulate).toHaveBeenCalledTimes(4);
   });
 });
 

@@ -16,15 +16,9 @@ function makeSession() {
   };
 }
 
-describe('WalletConnectAdapter ping watchdog (#1189)', () => {
+describe('WalletConnectAdapter session ping watchdog (#1080)', () => {
   afterEach(() => {
     vi.useRealTimers();
-  });
-
-  it('exports the documented defaults', () => {
-    expect(DEFAULT_WALLETCONNECT_PING_INTERVAL_MS).toBe(30_000);
-    expect(DEFAULT_WALLETCONNECT_PING_TIMEOUT_MS).toBe(10_000);
-    expect(DEFAULT_WALLETCONNECT_MAX_MISSED_PINGS).toBe(2);
   });
 
   it('is off by default', async () => {
@@ -67,7 +61,7 @@ describe('WalletConnectAdapter ping watchdog (#1189)', () => {
     });
 
     await vi.advanceTimersByTimeAsync(1000);
-    expect(adapter.isConnected()).toBe(true); // one miss tolerated
+    expect(adapter.isConnected()).toBe(true); // one miss is tolerated
     await vi.advanceTimersByTimeAsync(1000);
 
     expect(adapter.isConnected()).toBe(false);
@@ -80,7 +74,7 @@ describe('WalletConnectAdapter ping watchdog (#1189)', () => {
 
   it('counts a ping that never settles as missed after pingTimeoutMs', async () => {
     vi.useFakeTimers();
-    const client = { ping: vi.fn(() => new Promise<void>(() => undefined)) };
+    const client = { ping: vi.fn(() => new Promise<void>(() => {})) };
     const onDisconnect = vi.fn();
     const adapter = new WalletConnectAdapter({
       chainId: 'stellar:testnet',
@@ -97,7 +91,7 @@ describe('WalletConnectAdapter ping watchdog (#1189)', () => {
     expect(onDisconnect).toHaveBeenCalledWith({ reason: 'ping_timeout', topic: 'session-topic' });
   });
 
-  it('resets the missed count after a successful ping', async () => {
+  it('a successful ping resets the missed-ping count', async () => {
     vi.useFakeTimers();
     const client = {
       ping: vi.fn()
@@ -133,10 +127,7 @@ describe('WalletConnectAdapter ping watchdog (#1189)', () => {
 
   it('stops pinging after a local disconnect()', async () => {
     vi.useFakeTimers();
-    const client = {
-      ping: vi.fn().mockResolvedValue(undefined),
-      disconnect: vi.fn().mockResolvedValue(undefined),
-    };
+    const client = { ping: vi.fn().mockResolvedValue(undefined), disconnect: vi.fn().mockResolvedValue(undefined) };
     const adapter = new WalletConnectAdapter({
       chainId: 'stellar:testnet',
       client,
@@ -148,7 +139,13 @@ describe('WalletConnectAdapter ping watchdog (#1189)', () => {
     expect(client.ping).not.toHaveBeenCalled();
   });
 
-  it('stops on a session_delete event', async () => {
+  it('exports the documented watchdog defaults (#1189)', () => {
+    expect(DEFAULT_WALLETCONNECT_PING_INTERVAL_MS).toBe(30_000);
+    expect(DEFAULT_WALLETCONNECT_PING_TIMEOUT_MS).toBe(10_000);
+    expect(DEFAULT_WALLETCONNECT_MAX_MISSED_PINGS).toBe(2);
+  });
+
+  it('stops pinging when the wallet ends the session via session_delete (#1189)', async () => {
     vi.useFakeTimers();
     const handlers = new Map<string, (payload?: unknown) => void>();
     const client = {
@@ -164,6 +161,7 @@ describe('WalletConnectAdapter ping watchdog (#1189)', () => {
       session: makeSession(),
       pingIntervalMs: 1000,
     });
+
     handlers.get('session_delete')?.({ topic: 'session-topic' });
     await vi.advanceTimersByTimeAsync(5000);
     expect(client.ping).not.toHaveBeenCalled();

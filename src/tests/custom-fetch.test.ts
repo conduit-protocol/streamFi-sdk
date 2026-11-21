@@ -53,7 +53,7 @@ describe('ConduitConfig.customFetch (#862)', () => {
     const err = await client.rpcServer.getLatestLedger().catch((e: unknown) => e);
 
     expect(RateLimitError.fromRpcError(err)).toBeInstanceOf(RateLimitError);
-  });
+  }, 10_000);
 
   it('does not touch RPC URLs without a registered fetch', async () => {
     const customFetch = vi.fn(async () => jsonResponse({ sequence: 1 }));

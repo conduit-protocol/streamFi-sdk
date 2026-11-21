@@ -70,3 +70,33 @@ describe('KeypairWalletAdapter keystore (#819)', () => {
     await expect(adapter.exportKeystore('pw', FAST)).rejects.toThrow(/no secret key/);
   });
 });
+
+describe('keystore kdfIterations (#1082)', () => {
+  it('stores the configured iteration count and decrypts with it', async () => {
+    const kp = Keypair.random();
+    const ks = await new KeypairWalletAdapter(kp).exportKeystore('pw', { kdfIterations: 1_500 });
+    expect(ks.kdfparams.iterations).toBe(1_500);
+    const restored = await KeypairWalletAdapter.fromKeystore(ks, 'pw');
+    expect(restored.getPublicKey()).toBe(kp.publicKey());
+  });
+
+  it('prefers kdfIterations over the legacy iterations option', async () => {
+    const ks = await new KeypairWalletAdapter(Keypair.random()).exportKeystore('pw', {
+      kdfIterations: 1_200,
+      iterations: 9_999,
+    });
+    expect(ks.kdfparams.iterations).toBe(1_200);
+  });
+
+  it('still honours the legacy iterations option on its own', async () => {
+    const ks = await new KeypairWalletAdapter(Keypair.random()).exportKeystore('pw', FAST);
+    expect(ks.kdfparams.iterations).toBe(1_000);
+  });
+
+  it.each([0, -1, 1.5, Number.NaN])('rejects kdfIterations = %p', async (kdfIterations) => {
+    const adapter = new KeypairWalletAdapter(Keypair.random());
+    await expect(adapter.exportKeystore('pw', { kdfIterations })).rejects.toThrow(
+      /kdfIterations must be a positive integer/,
+    );
+  });
+});

@@ -300,7 +300,7 @@ describe('GraphQLIndexer.subscribe() — WebSocket transport', () => {
     vi.useRealTimers();
   });
 
-  it('tears down after reconnect attempts are exhausted', () => {
+  it('tears down after reconnect attempts are exhausted when polling fallback is disabled', () => {
     vi.useFakeTimers();
     const sockets: Array<ReturnType<typeof createMockWs>> = [];
     wsCtor.mockImplementation(function () {
@@ -317,6 +317,7 @@ describe('GraphQLIndexer.subscribe() — WebSocket transport', () => {
       onError,
       maxReconnectAttempts: 2,
       reconnectDelayMs: 10,
+      pollingFallback: false,
     });
 
     sockets[0]!.onclose!();
@@ -359,7 +360,7 @@ describe('GraphQLIndexer.subscribe() — WebSocket transport', () => {
     indexer.cleanup();
   });
 
-  it('tears down immediately when maxReconnectAttempts is 0', () => {
+  it('tears down immediately when maxReconnectAttempts is 0 and polling fallback is disabled', () => {
     const onError = vi.fn();
     const indexer = new GraphQLIndexer(endpoint);
     indexer.subscribe({
@@ -368,6 +369,7 @@ describe('GraphQLIndexer.subscribe() — WebSocket transport', () => {
       onError,
       maxReconnectAttempts: 0,
       reconnectDelayMs: 10,
+      pollingFallback: false,
     });
 
     mockWs.onclose!();

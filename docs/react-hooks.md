@@ -239,6 +239,9 @@ All hooks will now automatically use the provided client from context.
 Reads a SEP-41 token allowance and exposes an approval mutation. The owner
 address must match the connected wallet or signer when calling `approve`.
 
+`approveInfinite(expirationLedger)` approves `i128::MAX` so later streams need no re-approval. It
+still takes an expiration ledger, because SEP-41 requires a valid expiration for a non-zero amount.
+
 ```tsx
 import { useTokenAllowance } from '@streamfi/react';
 
@@ -324,6 +327,46 @@ interface UseStreamCountdownResult {
 
 ---
 
+## Stream lifecycle helpers
+
+Four lifecycle hooks expose state that lets a UI preview or label an action
+before the user commits to it.
+
+```tsx
+import { useCancelStream, useCreateBatchStreams, usePauseStream, useResumeStream } from '@streamfi/react';
+
+function StreamControls({ streamId }) {
+  const { estimatedRefund, cancel } = useCancelStream(streamId);
+  const { isPausing, pause } = usePauseStream(streamId);
+  const { resume } = useResumeStream(streamId);
+  const { estimateTotalBatchCost } = useCreateBatchStreams();
+
+  return (
+    <div>
+      <p>Refund if cancelled: {estimatedRefund === null ? 'Unknown' : estimatedRefund.toString()}</p>
+      <button onClick={() => pause().catch(() => {})} disabled={isPausing}>
+        {isPausing ? 'Pausing Stream...' : 'Pause'}
+      </button>
+      <button onClick={() => resume().catch(() => {})}>Resume</button>
+      <button onClick={() => cancel().catch(() => {})}>Cancel</button>
+      <p>Batch total: {estimateTotalBatchCost(batchConfigs).toString()} stroops</p>
+    </div>
+  );
+}
+```
+
+- `useCancelStream(streamId).estimatedRefund` is the sender's unstreamed balance
+  in stroops, or `null` until the stream loads and for open-ended streams.
+- `usePauseStream(streamId).isPausing` is `true` only while the pause
+  transaction is in flight.
+- `useResumeStream(streamId).resume()` rejects without contacting the wallet
+  when the loaded stream is active or cancelled. Streams that have not loaded
+  yet are not pre-checked.
+- `useCreateBatchStreams().estimateTotalBatchCost(configs)` returns the sum of
+  every config's `depositAmount` in stroops. It is pure and makes no network call.
+
+---
+
 ## Error Handling
 
 Each hook exposes an `error` field that captures:
@@ -396,6 +439,14 @@ events and so only covers the RPC retention window (about seven days); use the i
 older history. `pageSize` is 1–200 (default 50); the query is disabled while `streamId` is
 `undefined`.
 
+Pass `filterEventTypes` to keep only some categories: `'Deposit'` (created and top-up events),
+`'Withdraw'` or `'Cancel'`. The filter runs on the loaded entries, so a page can hold fewer
+matches than `pageSize`; keep calling `fetchNextPage` while `hasNextPage` is true.
+
+```tsx
+const withdrawals = useStreamHistoryInfinite(streamId, 25, { filterEventTypes: ['Withdraw'] });
+```
+
 ## `useStreamSearch`
 
 Client-side search over streams you have already loaded; no indexer refetch.
@@ -408,4 +459,8 @@ const { results, total } = useStreamSearch(streams, query, {
 });
 ```
 
-Whitespace-separated terms must all match. By default it searches `id`, `address`, `sender`, `recipient`, `token`, `memo`, `note` and string/number metadata values; pass `fields` (e.g. `['sender', 'metadata.dept']`) to narrow it.
+Whitespace-separated terms must all match. By default it searches `id`, `address`, `sender`, `recipient`, `token`, `memo`, `note`, `txHash` and string/number metadata values; pass `fields` (e.g. `['sender', 'metadata.dept']`) to narrow it.
+
+To find a stream from its creation transaction, set `txHash` on each stream (for example from the
+`created` entry in `useStreamHistoryInfinite`) and search for the hash. Transaction hashes match by
+substring only, so a partial hash works but fuzzy matching never applies to them.

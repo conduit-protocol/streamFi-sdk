@@ -14,8 +14,8 @@ export interface WalletConnectSignClient {
   disconnect?: (opts: unknown) => Promise<void>;
   request?: (opts: unknown) => Promise<unknown>;
   /** Event emitter surface of a WalletConnect v2 SignClient. */
-  on?: (event: string, listener: (...args: any[]) => void) => unknown;
-  off?: (event: string, listener: (...args: any[]) => void) => unknown;
+  on?: (event: string, listener: (...args: unknown[]) => void) => unknown;
+  off?: (event: string, listener: (...args: unknown[]) => void) => unknown;
   /** SignClient session ping: resolves when the peer wallet answers. */
   ping?: (opts: { topic: string }) => Promise<void>;
   /** WalletConnect core, whose pairing controller can ping a pairing topic. */
@@ -23,7 +23,7 @@ export interface WalletConnectSignClient {
   [key: string]: unknown;
 }
 
-/** Default interval between watchdog pings when the watchdog is enabled (#1189). */
+/** Default interval between watchdog pings when the watchdog is enabled (#1080). */
 export const DEFAULT_WALLETCONNECT_PING_INTERVAL_MS = 30_000;
 /** Default time to wait for a single watchdog ping before counting it as missed. */
 export const DEFAULT_WALLETCONNECT_PING_TIMEOUT_MS = 10_000;
@@ -37,16 +37,9 @@ export interface WalletConnectSessionChange {
   publicKey: string | null;
 }
 
-/** Fired when an active session ends, so the app can prompt a clean reconnect. */
-export interface WalletConnectDisconnectEvent {
-  /** `'ping_timeout'`: the session watchdog stopped getting answers (#1189). */
-  reason: 'session_delete' | 'session_expire' | 'ping_timeout';
-  /** Topic of the session that ended, when known. */
-  topic?: string;
-}
-
 export interface WalletConnectSession {
   topic?: string;
+  /** Pairing topic used by `core.pairing.ping` when the session ping is unavailable. */
   pairingTopic?: string;
   account?: string;
   namespaces?: Record<string, { accounts?: string[] }>;
@@ -78,11 +71,37 @@ export interface WalletConnectAdapterOptions {
    */
   onSessionChange?: (change: WalletConnectSessionChange) => void;
   /**
-   * Interval (ms) for the session ping watchdog (#1189). While a session is
+   * Called when the wallet ends the session (`session_delete`, e.g. the user
+   * disconnected from their mobile wallet) or it expires, so the UI can reset
+   * immediately. The adapter's session is already cleared when this runs.
+   * Not called for a local {@link WalletConnectAdapter.disconnect}.
+   */
+  onDisconnect?: (event: WalletConnectDisconnectEvent) => void;
+  /**
+   * Called with the pairing URI to render as a QR code whenever the client
+   * emits `display_uri` — including with a fresh URI after an automatic
+   * pairing refresh (#972).
+   */
+  onDisplayUri?: (uri: string) => void;
+  /**
+   * Called each time an expired pairing automatically triggers a fresh
+   * pairing attempt during `connect()` (#972), so the UI can show that a new
+   * QR code is on its way.
+   */
+  onPairingExpire?: () => void;
+  /**
+   * Number of times `connect()` automatically re-pairs (minting a fresh URI)
+   * after the current pairing expires before the wallet approves it, instead
+   * of requiring the caller to reload the page for a new QR code (#972).
+   * Default 1. Set 0 to disable auto-refresh and reject immediately.
+   */
+  maxPairingRetries?: number;
+  /**
+   * Interval (ms) for the session ping watchdog (#1080). While a session is
    * active the adapter pings the wallet; after `maxMissedPings` consecutive
    * pings fail or time out, the session is treated as gone (e.g. the user
    * closed the mobile wallet), cleared, and `onDisconnect` fires with reason
-   * `'ping_timeout'` — instead of the app only finding out when the next
+   * `'ping_timeout'` — instead of the dApp only finding out when the next
    * signature request hangs. `0` (the default) disables the watchdog; see
    * {@link DEFAULT_WALLETCONNECT_PING_INTERVAL_MS} for a suggested value.
    */
@@ -91,8 +110,14 @@ export interface WalletConnectAdapterOptions {
   pingTimeoutMs?: number;
   /** Consecutive missed pings that end the session. Default {@link DEFAULT_WALLETCONNECT_MAX_MISSED_PINGS}. */
   maxMissedPings?: number;
-  /** Called when a session ends (including a watchdog-detected drop). */
-  onDisconnect?: (event: WalletConnectDisconnectEvent) => void;
+}
+
+/** Payload passed to `onDisconnect` (#918). */
+export interface WalletConnectDisconnectEvent {
+  /** `'ping_timeout'`: the session watchdog stopped getting answers (#1080). */
+  reason: 'session_delete' | 'session_expire' | 'ping_timeout';
+  /** Topic of the session that ended, when the wallet supplied it. */
+  topic?: string;
 }
 
 /**
@@ -107,17 +132,19 @@ export class WalletConnectAdapter implements WalletAdapter {
   private session: WalletConnectSession | null;
   private readonly connectTimeoutMs: number;
   private readonly onSessionChange: ((change: WalletConnectSessionChange) => void) | undefined;
+  private readonly onDisplayUri: ((uri: string) => void) | undefined;
+  private readonly onPairingExpire: (() => void) | undefined;
+  private readonly maxPairingRetries: number;
+  private readonly disconnectListeners = new Set<(event: WalletConnectDisconnectEvent) => void>();
   /** Removes the listeners attached by attachSessionListeners(), if any. */
   private detachListeners: (() => void) | null = null;
   private listenedClient: WalletConnectSignClient | null = null;
-
   private readonly pingIntervalMs: number;
   private readonly pingTimeoutMs: number;
   private readonly maxMissedPings: number;
   private watchdogTimer: ReturnType<typeof setInterval> | null = null;
   private pingInFlight = false;
   private missedPings = 0;
-  private readonly disconnectListeners = new Set<(event: WalletConnectDisconnectEvent) => void>();
 
   constructor(options: WalletConnectAdapterOptions = {}) {
     this.projectId = options.projectId;
@@ -140,6 +167,9 @@ export class WalletConnectAdapter implements WalletAdapter {
     this.session   = (options.session as WalletConnectSession) ?? null;
     this.connectTimeoutMs = options.connectTimeoutMs ?? 30000;
     this.onSessionChange = options.onSessionChange;
+    this.onDisplayUri = options.onDisplayUri;
+    this.onPairingExpire = options.onPairingExpire;
+    this.maxPairingRetries = options.maxPairingRetries ?? 1;
     this.pingIntervalMs = options.pingIntervalMs ?? 0;
     this.pingTimeoutMs = options.pingTimeoutMs ?? DEFAULT_WALLETCONNECT_PING_TIMEOUT_MS;
     this.maxMissedPings = Math.max(1, options.maxMissedPings ?? DEFAULT_WALLETCONNECT_MAX_MISSED_PINGS);
@@ -164,27 +194,7 @@ export class WalletConnectAdapter implements WalletAdapter {
   }
 
   /**
-   * Subscribe to session-end notifications. Returns an unsubscribe function.
-   */
-  onDisconnect(listener: (event: WalletConnectDisconnectEvent) => void): () => void {
-    this.disconnectListeners.add(listener);
-    return () => {
-      this.disconnectListeners.delete(listener);
-    };
-  }
-
-  private notifyDisconnect(event: WalletConnectDisconnectEvent): void {
-    for (const listener of this.disconnectListeners) {
-      try {
-        listener(event);
-      } catch (handlerError) {
-        console.warn('[conduit-sdk] WalletConnect onDisconnect handler error:', handlerError);
-      }
-    }
-  }
-
-  /**
-   * Start the session ping watchdog (#1189). Called automatically whenever a
+   * Start the session ping watchdog (#1080). Called automatically whenever a
    * session becomes active if `pingIntervalMs` > 0; a no-op otherwise or when
    * already running. Pings use the SignClient's `ping({ topic })` with the
    * session topic, falling back to `core.pairing.ping` with the pairing topic.
@@ -208,15 +218,15 @@ export class WalletConnectAdapter implements WalletAdapter {
 
   /**
    * Ping the wallet once. Resolves `true` when it answered, `false` when the
-   * ping failed, timed out, or could not be sent. Consecutive failures end
-   * the session once `maxMissedPings` is reached.
+   * ping failed or timed out (counted towards `maxMissedPings`), or when
+   * there is no session / no ping method to call.
    */
   async pingSession(): Promise<boolean> {
     const session = this.session;
     const client = this.client;
     if (!session || !client || this.pingInFlight) return false;
 
-    const rawPairingTopic = session.pairingTopic;
+    const rawPairingTopic = session['pairingTopic'];
     const pairingTopic = typeof rawPairingTopic === 'string' ? rawPairingTopic : session.topic;
     const pairing = client.core?.pairing;
 
@@ -236,17 +246,13 @@ export class WalletConnectAdapter implements WalletAdapter {
       await Promise.race([
         ping(),
         new Promise<never>((_, reject) => {
-          timer = setTimeout(
-            () => reject(new Error('WalletConnect ping timed out')),
-            this.pingTimeoutMs,
-          );
+          timer = setTimeout(() => reject(new Error('WalletConnect ping timed out')), this.pingTimeoutMs);
         }),
       ]);
       this.missedPings = 0;
       return true;
     } catch {
-      // A session that changed or ended while the ping was out is not this
-      // ping's to end.
+      // A session that changed or ended while the ping was out is not this ping's to end.
       if (this.session !== session) return false;
       this.missedPings += 1;
       if (this.missedPings >= this.maxMissedPings) {
@@ -263,10 +269,7 @@ export class WalletConnectAdapter implements WalletAdapter {
     this.stopSessionWatchdog();
     this.session = null;
     this.notifySessionChange({ type: 'disconnected', publicKey: null });
-    this.notifyDisconnect({
-      reason: 'ping_timeout',
-      ...(session.topic ? { topic: session.topic } : {}),
-    });
+    this.notifyDisconnect({ reason: 'ping_timeout', ...(session.topic ? { topic: session.topic } : {}) });
   }
 
   /**
@@ -303,6 +306,27 @@ export class WalletConnectAdapter implements WalletAdapter {
     this.detachListeners?.();
     this.detachListeners = null;
     this.listenedClient = null;
+  }
+
+  /**
+   * Register a listener for wallet-initiated disconnects (see
+   * {@link WalletConnectAdapterOptions.onDisconnect}). Returns an unsubscribe function.
+   */
+  onDisconnect(listener: (event: WalletConnectDisconnectEvent) => void): () => void {
+    this.disconnectListeners.add(listener);
+    return () => {
+      this.disconnectListeners.delete(listener);
+    };
+  }
+
+  private notifyDisconnect(event: WalletConnectDisconnectEvent): void {
+    for (const listener of this.disconnectListeners) {
+      try {
+        listener(event);
+      } catch (handlerError) {
+        console.warn('[conduit-sdk] WalletConnect onDisconnect handler error:', handlerError);
+      }
+    }
   }
 
   private notifySessionChange(change: WalletConnectSessionChange): void {
@@ -413,8 +437,45 @@ export class WalletConnectAdapter implements WalletAdapter {
     }
 
     if (this.client && typeof this.client.connect === 'function') {
+      this.session = await this._connectWithPairingRefresh(this.maxPairingRetries);
+    }
+
+    const pubKey = this.getPublicKeyFromSession();
+    if (!pubKey) {
+      throw new Error('Failed to establish WalletConnect session or obtain public key.');
+    }
+
+    this.attachSessionListeners();
+    this.startSessionWatchdog();
+
+    return pubKey;
+  }
+
+  /**
+   * Runs the connect handshake once, mints a fresh pairing (and URI) and
+   * retries automatically if the current pairing expires before the wallet
+   * approves it (#972) — up to `retriesRemaining` times — instead of leaving
+   * the caller stuck on a dead QR code until `connectTimeoutMs` elapses.
+   */
+  private async _connectWithPairingRefresh(retriesRemaining: number): Promise<WalletConnectSession | null> {
+    const client = this.client;
+    if (!client || typeof client.connect !== 'function') return null;
+
+    const hasEmitter = typeof client.on === 'function';
+    const onUri = (uri: unknown) => {
+      if (typeof uri === 'string') this._notifyDisplayUri(uri);
+    };
+    let pairingExpired = false;
+    const onExpire = () => { pairingExpired = true; };
+
+    if (hasEmitter) {
+      client.on!('display_uri', onUri);
+      client.on!('pairing_expire', onExpire);
+    }
+
+    try {
       const connectResult = await this._withTimeout(
-        this.client.connect({
+        client.connect({
           requiredNamespaces: {
             stellar: {
               methods: ['stellar_signTransaction', 'stellar_signXdr', 'soroban_signTransaction'],
@@ -427,24 +488,35 @@ export class WalletConnectAdapter implements WalletAdapter {
       );
 
       if (connectResult.session) {
-        this.session = connectResult.session;
-      } else if (connectResult.approval) {
-        this.session = await this._withTimeout(
-          connectResult.approval(),
-          'WalletConnect approval()'
-        );
+        return connectResult.session;
+      }
+      if (!connectResult.approval) {
+        return null;
+      }
+
+      try {
+        return await this._withTimeout(connectResult.approval(), 'WalletConnect approval()');
+      } catch (err) {
+        if (pairingExpired && retriesRemaining > 0) {
+          this.onPairingExpire?.();
+          return this._connectWithPairingRefresh(retriesRemaining - 1);
+        }
+        throw err;
+      }
+    } finally {
+      if (hasEmitter) {
+        client.off?.('display_uri', onUri);
+        client.off?.('pairing_expire', onExpire);
       }
     }
+  }
 
-    const pubKey = this.getPublicKeyFromSession();
-    if (!pubKey) {
-      throw new Error('Failed to establish WalletConnect session or obtain public key.');
+  private _notifyDisplayUri(uri: string): void {
+    try {
+      this.onDisplayUri?.(uri);
+    } catch (handlerError) {
+      console.warn('[conduit-sdk] WalletConnect onDisplayUri handler error:', handlerError);
     }
-
-    this.attachSessionListeners();
-    this.startSessionWatchdog();
-
-    return pubKey;
   }
 
   /**
@@ -479,8 +551,6 @@ export class WalletConnectAdapter implements WalletAdapter {
         );
       }
     } finally {
-      // Always clean up the watchdog and listeners, even when the remote
-      // disconnect rejects or times out (#1189).
       this.stopSessionWatchdog();
       this.session = null;
       this.detachSessionListeners();

@@ -14,6 +14,8 @@ import {
   clearTokenDecimalsCache,
 } from "@conduit-protocol/sdk";
 import type { ConduitConfig, Network } from "@conduit-protocol/sdk";
+// QueryClient is an optional peer dep — import type only to avoid hard runtime dep.
+import type { QueryClient } from "@tanstack/react-query";
 
 export interface StreamFiContextValue {
   client: ConduitClient | null;
@@ -25,6 +27,8 @@ export interface StreamFiContextValue {
   setNetwork: (network: Network) => void;
   isSupportedNetwork: (network: string) => network is Network;
   availableNetworks: readonly Network[];
+  /** The QueryClient passed via props, if any (#944). Hooks can read this to share the app's cache. */
+  queryClient: QueryClient | undefined;
 }
 
 export const StreamFiContext = createContext<StreamFiContextValue | null>(null);
@@ -33,6 +37,12 @@ export interface StreamFiProviderProps {
   config?: ConduitConfig;
   defaultNetwork?: Network;
   children: ReactNode;
+  /**
+   * An existing TanStack QueryClient from the host application. When provided,
+   * the SDK shares the app's cache instead of maintaining its own, preventing
+   * duplicate cache entries and conflicting invalidations (#944).
+   */
+  queryClient?: QueryClient;
 }
 
 function checkVersionMismatch() {
@@ -70,7 +80,11 @@ export function StreamFiProvider({
   config,
   defaultNetwork,
   children,
+  queryClient,
 }: StreamFiProviderProps) {
+  const customFetch = rpcHeaders && Object.keys(rpcHeaders).length > 0
+    ? makeHeaderFetch(rpcHeaders)
+    : undefined;
   const [currentConfig, setCurrentConfig] = useState<ConduitConfig | undefined>(
     () => config ?? (defaultNetwork ? { network: defaultNetwork } : undefined),
   );
@@ -85,7 +99,7 @@ export function StreamFiProvider({
       config ?? (defaultNetwork ? { network: defaultNetwork } : undefined);
     if (initialConfig) {
       try {
-        return { client: new ConduitClient(initialConfig), error: null };
+        return { client: new ConduitClient({ ...initialConfig, ...(customFetch ? { customFetch } : {}) }), error: null };
       } catch (err: unknown) {
         return {
           client: null,
@@ -103,7 +117,7 @@ export function StreamFiProvider({
 
   const connect = useCallback((cfg: ConduitConfig) => {
     try {
-      const newClient = new ConduitClient(cfg);
+      const newClient = new ConduitClient({ ...cfg, ...(customFetch ? { customFetch } : {}) });
       setCurrentConfig(cfg);
       setCurrentNetwork(cfg.network);
       setState({ client: newClient, error: null });
@@ -164,7 +178,7 @@ export function StreamFiProvider({
       setCurrentConfig(nextConfig);
 
       try {
-        const newClient = new ConduitClient(nextConfig);
+        const newClient = new ConduitClient({ ...nextConfig, ...(customFetch ? { customFetch } : {}) });
         setState({ client: newClient, error: null });
       } catch (err: unknown) {
         setState({
@@ -187,6 +201,7 @@ export function StreamFiProvider({
       setNetwork,
       isSupportedNetwork,
       availableNetworks,
+      queryClient,
     }),
     [
       state.client,
@@ -197,6 +212,7 @@ export function StreamFiProvider({
       setNetwork,
       isSupportedNetwork,
       availableNetworks,
+      queryClient,
     ],
   );
 

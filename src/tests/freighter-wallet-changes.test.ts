@@ -11,11 +11,7 @@ const KEY_B = 'GBRPYHIL2CI3FNQ4BXLFMNDLFJUNPU2HY3ZMFSHONUCEOASW7QC7OX2H';
 
 /** A Freighter stub whose active address and network the test controls. */
 function makeFreighter(initial: { address: string; network?: string }) {
-  const state = {
-    address: initial.address,
-    error: undefined as string | undefined,
-    network: initial.network ?? Networks.TESTNET,
-  };
+  const state = { address: initial.address, error: undefined as string | undefined, network: initial.network ?? Networks.TESTNET };
   const client: FreighterApi = {
     getAddress: vi.fn(async () => (state.error ? { error: state.error } : { address: state.address })),
     getNetworkDetails: vi.fn(async () => ({ networkPassphrase: state.network })),
@@ -23,16 +19,12 @@ function makeFreighter(initial: { address: string; network?: string }) {
   return { client, state };
 }
 
-describe('FreighterWalletAdapter change detection (#1187)', () => {
+describe('FreighterWalletAdapter wallet change detection (#1078)', () => {
   afterEach(() => {
     vi.useRealTimers();
   });
 
-  it('exposes a default watch interval', () => {
-    expect(DEFAULT_FREIGHTER_WATCH_INTERVAL_MS).toBe(3_000);
-  });
-
-  it('updates the cached key and notifies when the account switches', async () => {
+  it('updates the cached key and notifies when the user switches accounts', async () => {
     const { client, state } = makeFreighter({ address: KEY_A });
     const onWalletChange = vi.fn();
     const adapter = new FreighterWalletAdapter({ freighter: client, publicKey: KEY_A, onWalletChange });
@@ -44,7 +36,7 @@ describe('FreighterWalletAdapter change detection (#1187)', () => {
     expect(onWalletChange).toHaveBeenCalledWith({ type: 'accountChanged', publicKey: KEY_B });
   });
 
-  it('clears the key on lock and announces an unlock', async () => {
+  it('clears the cached key when Freighter is locked, and announces the unlock', async () => {
     const { client, state } = makeFreighter({ address: KEY_A });
     const changes: string[] = [];
     const adapter = new FreighterWalletAdapter({ freighter: client, publicKey: KEY_A });
@@ -60,19 +52,12 @@ describe('FreighterWalletAdapter change detection (#1187)', () => {
     expect(changes).toEqual(['locked:null', `accountChanged:${KEY_A}`]);
   });
 
-  it('notifies on a network switch and keeps the signing passphrase in sync', async () => {
+  it('notifies on a network switch', async () => {
     const { client, state } = makeFreighter({ address: KEY_A });
     const onWalletChange = vi.fn();
-    const onNetworkChange = vi.fn();
-    const adapter = new FreighterWalletAdapter({
-      freighter: client,
-      publicKey: KEY_A,
-      networkPassphrase: Networks.TESTNET,
-      onWalletChange,
-    });
-    adapter.onNetworkChange(onNetworkChange);
+    const adapter = new FreighterWalletAdapter({ freighter: client, publicKey: KEY_A, onWalletChange });
 
-    await adapter.syncWalletState(); // record starting network
+    await adapter.syncWalletState(); // records the starting network
     state.network = Networks.PUBLIC;
     await adapter.syncWalletState();
 
@@ -81,11 +66,9 @@ describe('FreighterWalletAdapter change detection (#1187)', () => {
       publicKey: KEY_A,
       networkPassphrase: Networks.PUBLIC,
     });
-    expect(onNetworkChange).toHaveBeenCalledWith(Networks.PUBLIC);
-    expect(adapter.networkPassphrase).toBe(Networks.PUBLIC);
   });
 
-  it('does not notify when nothing changed', async () => {
+  it('does not report a change when nothing changed', async () => {
     const { client } = makeFreighter({ address: KEY_A });
     const onWalletChange = vi.fn();
     const adapter = new FreighterWalletAdapter({ freighter: client, publicKey: KEY_A, onWalletChange });
@@ -94,7 +77,51 @@ describe('FreighterWalletAdapter change detection (#1187)', () => {
     expect(onWalletChange).not.toHaveBeenCalled();
   });
 
-  it('reacts immediately to pushed accountChanged / networkChanged events', async () => {
+  it('polls on an interval and stops on the returned function and on disconnect()', async () => {
+    vi.useFakeTimers();
+    const { client, state } = makeFreighter({ address: KEY_A });
+    const onWalletChange = vi.fn();
+    const adapter = new FreighterWalletAdapter({ freighter: client, publicKey: KEY_A, onWalletChange });
+
+    const stop = adapter.watchWalletChanges(1000);
+    state.address = KEY_B;
+    await vi.advanceTimersByTimeAsync(1000);
+    expect(onWalletChange).toHaveBeenCalledTimes(1);
+
+    stop();
+    const callsAfterStop = (client.getAddress as ReturnType<typeof vi.fn>).mock.calls.length;
+    await vi.advanceTimersByTimeAsync(5000);
+    expect((client.getAddress as ReturnType<typeof vi.fn>).mock.calls.length).toBe(callsAfterStop);
+
+    adapter.watchWalletChanges(1000);
+    await adapter.disconnect();
+    await vi.advanceTimersByTimeAsync(5000);
+    expect((client.getAddress as ReturnType<typeof vi.fn>).mock.calls.length).toBe(callsAfterStop);
+  });
+
+  it('exposes the default watch interval', () => {
+    expect(DEFAULT_FREIGHTER_WATCH_INTERVAL_MS).toBe(3_000);
+  });
+
+  it('keeps the signing passphrase in sync and notifies network-only listeners (#1187)', async () => {
+    const { client, state } = makeFreighter({ address: KEY_A });
+    const onNetworkChange = vi.fn();
+    const adapter = new FreighterWalletAdapter({
+      freighter: client,
+      publicKey: KEY_A,
+      networkPassphrase: Networks.TESTNET,
+    });
+    adapter.onNetworkChange(onNetworkChange);
+
+    await adapter.syncWalletState(); // record starting network
+    state.network = Networks.PUBLIC;
+    await adapter.syncWalletState();
+
+    expect(onNetworkChange).toHaveBeenCalledWith(Networks.PUBLIC);
+    expect(adapter.networkPassphrase).toBe(Networks.PUBLIC);
+  });
+
+  it('reacts immediately to pushed accountChanged / networkChanged events (#1187)', async () => {
     const listeners = new Map<string, (payload?: unknown) => void>();
     const client: FreighterApi = {
       on: vi.fn((event: string, listener: (payload?: unknown) => void) => {
@@ -120,27 +147,5 @@ describe('FreighterWalletAdapter change detection (#1187)', () => {
 
     listeners.get('networkChanged')?.(Networks.PUBLIC);
     expect(adapter.networkPassphrase).toBe(Networks.PUBLIC);
-  });
-
-  it('polls on an interval and stops via the unsubscribe function and disconnect()', async () => {
-    vi.useFakeTimers();
-    const { client, state } = makeFreighter({ address: KEY_A });
-    const onWalletChange = vi.fn();
-    const adapter = new FreighterWalletAdapter({ freighter: client, publicKey: KEY_A, onWalletChange });
-
-    const stop = adapter.watchWalletChanges(1000);
-    state.address = KEY_B;
-    await vi.advanceTimersByTimeAsync(1000);
-    expect(onWalletChange).toHaveBeenCalledTimes(1);
-
-    stop();
-    const callsAfterStop = (client.getAddress as ReturnType<typeof vi.fn>).mock.calls.length;
-    await vi.advanceTimersByTimeAsync(5000);
-    expect((client.getAddress as ReturnType<typeof vi.fn>).mock.calls.length).toBe(callsAfterStop);
-
-    adapter.watchWalletChanges(1000);
-    await adapter.disconnect();
-    await vi.advanceTimersByTimeAsync(5000);
-    expect((client.getAddress as ReturnType<typeof vi.fn>).mock.calls.length).toBe(callsAfterStop);
   });
 });

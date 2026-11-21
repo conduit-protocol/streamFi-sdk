@@ -27,6 +27,9 @@ const { mockBuildTx, mockSimulate } = vi.hoisted(() => ({
 vi.mock('../soroban.js', () => ({
   buildContractCallTx: mockBuildTx,
   simulateReadOnly:    mockSimulate,
+  createRpcServer: vi.fn(() => ({ getLatestLedger: vi.fn() })),
+  registerRpcEndpointGroup: vi.fn((urls: string[]) => urls),
+  resolveRpcEndpoint: (url: string) => url,
   scValToU64: (v: { u64: () => { toString: () => string } }) => BigInt(v.u64().toString()),
   scValToU32: (v: { u32: () => number }) => v.u32(),
   scValToI128: () => 0n,
@@ -40,6 +43,11 @@ vi.mock('../soroban.js', () => ({
     testnet:  'https://soroban-testnet.stellar.org',
     mainnet:  'https://mainnet.sorobanrpc.com',
     local:    'http://localhost:8000/soroban/rpc',
+  },
+  DEFAULT_HORIZON: {
+    testnet:  'https://horizon-testnet.stellar.org',
+    mainnet:  'https://horizon.stellar.org',
+    local:    'http://localhost:8000',
   },
   catchNetworkError: (label: string, fn: () => unknown) => fn(),
 }));

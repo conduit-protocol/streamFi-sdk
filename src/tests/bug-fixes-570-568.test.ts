@@ -36,6 +36,11 @@ vi.mock('../soroban.js', () => ({
     mainnet: 'https://mainnet.sorobanrpc.com',
     local:   'http://localhost:8000/soroban/rpc',
   },
+  DEFAULT_HORIZON: {
+    testnet:  'https://horizon-testnet.stellar.org',
+    mainnet:  'https://horizon.stellar.org',
+    local:    'http://localhost:8000',
+  },
 }));
 
 vi.mock('@stellar/stellar-sdk', async () => {

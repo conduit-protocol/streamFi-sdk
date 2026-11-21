@@ -691,7 +691,7 @@ export class StreamBuilder {
       if (config.startTime >= now) {
         builder.startTime(config.startTime);
       } else {
-        (builder as any)._startTime = config.startTime;
+        (builder as unknown as { _startTime: number })._startTime = config.startTime;
       }
     }
 

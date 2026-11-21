@@ -496,6 +496,7 @@ describe('StreamsModule.transferRecipient() — success path', () => {
     expect(buildContractCallTx).toHaveBeenCalledWith(
       expect.any(String), expect.any(String), expect.any(String),
       STREAM_ADDR, 'transfer_recipient', [expect.anything()], expect.any(String),
+      undefined, expect.objectContaining({ horizonUrl: expect.any(String) }),
     );
   });
 });
@@ -518,6 +519,7 @@ describe('StreamsModule — configurable inclusion fee (#509)', () => {
     expect(buildContractCallTx).toHaveBeenLastCalledWith(
       expect.any(String), expect.any(String), expect.any(String),
       STREAM_ADDR, 'pause', [], BASE_FEE,
+      undefined, expect.objectContaining({ horizonUrl: expect.any(String) }),
     );
   });
 
@@ -531,6 +533,7 @@ describe('StreamsModule — configurable inclusion fee (#509)', () => {
     expect(buildContractCallTx).toHaveBeenLastCalledWith(
       expect.any(String), expect.any(String), expect.any(String),
       STREAM_ADDR, 'pause', [], '5000',
+      undefined, expect.objectContaining({ horizonUrl: expect.any(String) }),
     );
   });
 
@@ -545,6 +548,7 @@ describe('StreamsModule — configurable inclusion fee (#509)', () => {
     expect(buildContractCallTx).toHaveBeenLastCalledWith(
       expect.any(String), expect.any(String), expect.any(String),
       STREAM_ADDR, 'pause', [], (BigInt(BASE_FEE) * 10n).toString(),
+      undefined, expect.objectContaining({ horizonUrl: expect.any(String) }),
     );
   });
 });

@@ -1,4 +1,4 @@
-import { StrKey } from '@stellar/stellar-sdk';
+import { Networks } from '@stellar/stellar-sdk';
 
 /** Stellar networks supported by public explorer links. */
 export type NetworkType = 'mainnet' | 'testnet' | 'futurenet';
@@ -35,6 +35,104 @@ export const EXPLORER_URLS: Record<
     account: 'https://stellar.expert/explorer/futurenet/account/',
   },
 };
+
+/** Connection details and official contract deployments for one Stellar network. */
+export interface NetworkConfig {
+  /** Network passphrase used when building and signing transactions. */
+  networkPassphrase: string;
+  /** Public Soroban RPC endpoint. */
+  rpcUrl: string;
+  /** Horizon endpoint (used by the fee estimator). */
+  horizonUrl: string;
+  /**
+   * Official DripFactory contract ID, or `null` when no official deployment
+   * has been published for this network yet — pass `factoryAddress`
+   * explicitly in that case.
+   */
+  factoryAddress: string | null;
+  /** Official vault contract ID, or `null` when not yet deployed. */
+  vaultAddress: string | null;
+}
+
+/**
+ * Official network configurations (#927). Use these instead of copying RPC
+ * URLs, passphrases and contract IDs out of the docs:
+ *
+ *   const { rpcUrl, factoryAddress } = NETWORK_CONFIGS.testnet;
+ */
+export const NETWORK_CONFIGS: Readonly<Record<NetworkType, Readonly<NetworkConfig>>> = Object.freeze({
+  mainnet: Object.freeze({
+    networkPassphrase: Networks.PUBLIC,
+    rpcUrl: 'https://soroban-mainnet.stellar.org',
+    horizonUrl: 'https://horizon.stellar.org',
+    factoryAddress: null,
+    vaultAddress: null,
+  }),
+  testnet: Object.freeze({
+    networkPassphrase: Networks.TESTNET,
+    rpcUrl: 'https://soroban-testnet.stellar.org',
+    horizonUrl: 'https://horizon-testnet.stellar.org',
+    factoryAddress: null,
+    vaultAddress: null,
+  }),
+  futurenet: Object.freeze({
+    networkPassphrase: Networks.FUTURENET,
+    rpcUrl: 'https://rpc-futurenet.stellar.org',
+    horizonUrl: 'https://horizon-futurenet.stellar.org',
+    factoryAddress: null,
+    vaultAddress: null,
+  }),
+});
+
+/**
+ * Networks that have RPC presets but no explorer links, such as the public
+ * Futurenet and a local standalone container (#981).
+ */
+export type RpcNetworkId = 'futurenet' | 'standalone';
+
+/** RPC endpoint and passphrase for a network, ready to pass to a client. */
+export interface RpcNetworkConfig {
+  rpcUrl: string;
+  networkPassphrase: string;
+}
+
+/**
+ * Soroban RPC endpoint and network passphrase per network. The standalone
+ * entry matches the `local` preset in `soroban.ts`.
+ */
+export const NETWORK_CONFIG: Record<RpcNetworkId, RpcNetworkConfig> = {
+  futurenet: {
+    rpcUrl: 'https://rpc-futurenet.stellar.org',
+    networkPassphrase: 'Test SDF Future Network ; October 2022',
+  },
+  standalone: {
+    rpcUrl: 'http://localhost:8000/soroban/rpc',
+    networkPassphrase: 'Standalone Network ; February 2017',
+  },
+};
+
+/** Contract roles that the SDK can address by ID. */
+export type ContractRole = 'factory' | 'governor';
+
+/**
+ * Deployed contract IDs per network. Each ID is derived from the deployer's
+ * address and salt, so the SDK publishes none for `futurenet` or `standalone`.
+ * An entry stays `null` until a deployment is recorded here, and callers must
+ * pass their own addresses (`factoryAddress`, `governorAddress`) until then.
+ */
+export const CONTRACT_IDS: Record<RpcNetworkId, Record<ContractRole, string | null>> = {
+  futurenet: { factory: null, governor: null },
+  standalone: { factory: null, governor: null },
+};
+
+/**
+ * Returns the published contract ID for `role` on `network`, or `null` when
+ * none has been published. A `null` result means the caller must supply the
+ * address explicitly.
+ */
+export function getContractId(network: RpcNetworkId, role: ContractRole): string | null {
+  return CONTRACT_IDS[network][role];
+}
 
 /**
  * A syntactically valid Stellar G-address with no known keypair. Used only

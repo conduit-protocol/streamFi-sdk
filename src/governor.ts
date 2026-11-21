@@ -2,13 +2,15 @@
  * GovernorModule — DripGovernor config reads.
  */
 
-import { Address, Transaction, nativeToScVal, xdr } from '@stellar/stellar-sdk';
+import { Address, SorobanRpc, Transaction, nativeToScVal, xdr } from '@stellar/stellar-sdk';
 import type { ConduitConfig, GovernorConfig } from './types/index.js';
 import type { Signer } from './signer.js';
+import type { SimulationResult } from './builder.js';
 import { ZERO_ADDR } from './constants.js';
 import { coalesceAsync } from './coalesce-async.js';
 import {
   buildContractCallTx,
+  getServer,
   invokeContract,
   resolveFee,
   simulateReadOnly,
@@ -233,6 +235,47 @@ export class GovernorModule {
     return results;
   }
 
+  /**
+   * Preview executing `proposalId` before voting on it (#1088).
+   *
+   * Simulates the governor's `execute` call through Soroban RPC and returns
+   * its resource cost and the raw simulation (footprint, auth, events, return
+   * value). Nothing is signed or submitted, so no wallet prompt is triggered,
+   * and no credentials are required.
+   *
+   * @throws {Error} If no governor address is configured, the id is invalid,
+   *   or the simulation fails — i.e. the execution payload would revert.
+   */
+  async simulateProposalExecution(proposalId: number): Promise<SimulationResult> {
+    if (!this.governorId) {
+      throw new Error(
+        `ConduitConfig.governorAddress is required (no default DripGovernor is known for network "${this.network}").`,
+      );
+    }
+    if (!Number.isSafeInteger(proposalId) || proposalId < 0) {
+      throw new Error(`Invalid proposal id ${String(proposalId)}: must be a non-negative integer`);
+    }
+
+    const { wallet, signer, keypair } = this.cfg;
+    const caller = wallet || signer || keypair ? await this.resolveCaller() : this.callerAddr;
+    const tx = await buildContractCallTx(
+      this.rpcUrl, this.passphrase, caller, this.governorId,
+      'execute', [nativeToScVal(BigInt(proposalId), { type: 'u64' })], resolveFee(this.cfg),
+    );
+    const sim = await getServer(this.rpcUrl).simulateTransaction(tx);
+    if (SorobanRpc.Api.isSimulationError(sim)) {
+      throw new Error(`Proposal ${proposalId} execution simulation failed: ${sim.error}`);
+    }
+    const resources = sim.transactionData.build().resources();
+    return {
+      minResourceFee: BigInt(sim.minResourceFee),
+      cpuInstructions: resources.instructions(),
+      readBytes: resources.readBytes(),
+      writeBytes: resources.writeBytes(),
+      raw: sim as SorobanRpc.Api.SimulateTransactionSuccessResponse,
+    };
+  }
+
   private resolveSigner(): Signer {
     const { wallet, signer, keypair } = this.cfg;
     if (wallet) {
@@ -302,6 +345,41 @@ export function parseProposalState(value: unknown): ProposalState | undefined {
 export function formatProposalState(state: number): string {
   const parsed = parseProposalState(state);
   return parsed === undefined ? 'Unknown' : PROPOSAL_STATE_LABELS[parsed];
+}
+
+/** A proposal's voting window in ledger sequences, as used by {@link isVotingActive}. */
+export interface ProposalDetails {
+  /** First ledger on which votes are accepted. */
+  startLedger: number;
+  /** Last ledger on which votes are accepted (inclusive). */
+  endLedger: number;
+  /** On-chain state, when known. Anything other than `Active` is never votable. */
+  state?: ProposalState;
+}
+
+/**
+ * Whether `proposal` can receive votes at `currentLedger` (#1087): the ledger
+ * is inside `[startLedger, endLedger]` and, when `state` is given, the
+ * contract reports the proposal as `Active`. A malformed window (negative or
+ * non-integer ledgers, or `endLedger < startLedger`) is never active.
+ *
+ * @throws {RangeError} If `currentLedger` is not a non-negative integer.
+ */
+export function isVotingActive(proposal: ProposalDetails, currentLedger: number): boolean {
+  if (!Number.isSafeInteger(currentLedger) || currentLedger < 0) {
+    throw new RangeError('currentLedger must be a non-negative integer');
+  }
+  const { startLedger, endLedger, state } = proposal;
+  if (
+    !Number.isSafeInteger(startLedger) ||
+    !Number.isSafeInteger(endLedger) ||
+    startLedger < 0 ||
+    endLedger < startLedger
+  ) {
+    return false;
+  }
+  if (state !== undefined && state !== ProposalState.Active) return false;
+  return currentLedger >= startLedger && currentLedger <= endLedger;
 }
 
 export interface ExecuteProposalsOptions {

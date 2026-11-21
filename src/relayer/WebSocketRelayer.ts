@@ -1,3 +1,5 @@
+import { recordConnectionResult } from "../connection-health.js";
+
 export interface WebSocketMessage {
   type: string;
   payload: unknown;
@@ -29,13 +31,29 @@ export interface WebSocketRelayerOptions {
   reconnectDelayMs?: number;
   maxReconnectDelayMs?: number;
   onStateChange?: StateChangeHandler;
+  /**
+   * Interval in milliseconds between periodic ping keepalive messages to prevent
+   * silent socket dropouts by intermediate firewalls and NAT gateways (#920).
+   * Defaults to 30,000 ms (30 seconds). Set to 0 to disable.
+   */
   heartbeatIntervalMs?: number;
+  /**
+   * Maximum milliseconds to wait for a pong response before declaring the socket dead
+   * and reconnecting (#920). Defaults to 5,000 ms (5 seconds).
+   */
   heartbeatTimeoutMs?: number;
   /**
    * Maximum milliseconds a message may sit in the offline buffer before it is
    * silently dropped on the next flush. `0` (default) disables TTL expiry.
    */
   offlineBufferTtlMs?: number;
+  /**
+   * Number of recently processed inbound message `id`s remembered so a
+   * message re-delivered after a reconnect is dispatched to handlers only
+   * once (#1056). Oldest ids are evicted first (LRU). Messages without an
+   * `id` are never deduplicated. Defaults to 1,000; set to 0 to disable.
+   */
+  dedupeWindowSize?: number;
 }
 
 export class WebSocketRelayer {
@@ -62,6 +80,10 @@ export class WebSocketRelayer {
   private heartbeatInterval: ReturnType<typeof setInterval> | null = null;
   private heartbeatTimeout: ReturnType<typeof setTimeout> | null = null;
   private awaitingPong = false;
+  private heartbeatSentAt: number | null = null;
+  private dedupeWindowSize: number;
+  /** Insertion-ordered set of recently processed message ids (#1056). */
+  private seenMessageIds: Map<string, true> = new Map();
 
   constructor(url: string, options?: WebSocketRelayerOptions) {
     this.url = url;
@@ -72,6 +94,7 @@ export class WebSocketRelayer {
     this.offlineBufferTtlMs = options?.offlineBufferTtlMs ?? 0;
     this.heartbeatIntervalMs = options?.heartbeatIntervalMs ?? 30_000;
     this.heartbeatTimeoutMs = options?.heartbeatTimeoutMs ?? 5_000;
+    this.dedupeWindowSize = Math.max(0, Math.floor(options?.dedupeWindowSize ?? 1000));
     if (options?.onStateChange) {
       this.stateChangeHandlers.add(options.onStateChange);
     }
@@ -114,6 +137,11 @@ export class WebSocketRelayer {
     if (this.stateTransition === transition) return;
 
     this.stateTransition = transition;
+    if (transition === "connected") {
+      recordConnectionResult(this.url, true, 0, "relayer");
+    } else if (transition === "disconnected" || transition === "destroyed") {
+      recordConnectionResult(this.url, false, 0, "relayer");
+    }
     const state = this.state;
     for (const handler of this.stateChangeHandlers) {
       try {
@@ -212,7 +240,11 @@ export class WebSocketRelayer {
         ws.onmessage = (event: MessageEvent) => {
           // Any inbound frame proves the link is alive, not just a pong.
           if (this.awaitingPong) {
+            const latencyMs =
+              this.heartbeatSentAt === null ? 0 : Date.now() - this.heartbeatSentAt;
+            recordConnectionResult(this.url, true, latencyMs, "relayer");
             this.awaitingPong = false;
+            this.heartbeatSentAt = null;
             this.clearHeartbeatTimeout();
           }
           this.handleMessageSafe(event.data);
@@ -276,10 +308,16 @@ export class WebSocketRelayer {
 
     // Handle pong responses for heartbeat ping
     if (parsed.type === 'pong' && this.awaitingPong) {
+      const latencyMs =
+        this.heartbeatSentAt === null ? 0 : Date.now() - this.heartbeatSentAt;
+      recordConnectionResult(this.url, true, latencyMs, "relayer");
       this.awaitingPong = false;
+      this.heartbeatSentAt = null;
       this.clearHeartbeatTimeout();
       return;
     }
+
+    if (this.isDuplicateMessage(parsed)) return;
 
     const typeHandlers = this.handlers.get(parsed.type);
     if (!typeHandlers) return;
@@ -287,6 +325,29 @@ export class WebSocketRelayer {
     for (const handler of typeHandlers) {
       this.safeInvokeHandler(handler, parsed);
     }
+  }
+
+  /**
+   * True when `msg.id` was already processed within the dedupe window (#1056).
+   * Otherwise records the id, evicting the oldest once the window is full.
+   */
+  private isDuplicateMessage(msg: WebSocketMessage): boolean {
+    if (this.dedupeWindowSize === 0) return false;
+    if (typeof msg.id !== 'string' || msg.id === '') return false;
+
+    if (this.seenMessageIds.has(msg.id)) {
+      // Refresh recency so a message that keeps being re-sent stays remembered.
+      this.seenMessageIds.delete(msg.id);
+      this.seenMessageIds.set(msg.id, true);
+      return true;
+    }
+
+    this.seenMessageIds.set(msg.id, true);
+    if (this.seenMessageIds.size > this.dedupeWindowSize) {
+      const oldest = this.seenMessageIds.keys().next().value;
+      if (oldest !== undefined) this.seenMessageIds.delete(oldest);
+    }
+    return false;
   }
 
   private startHeartbeat(): void {
@@ -297,6 +358,7 @@ export class WebSocketRelayer {
         try {
           this.ws.send(JSON.stringify({ type: 'ping' }));
           this.awaitingPong = true;
+          this.heartbeatSentAt = Date.now();
           this.heartbeatTimeout = setTimeout(() => {
             if (this.awaitingPong && this.ws) {
               this.handleHeartbeatTimeout();
@@ -345,6 +407,7 @@ export class WebSocketRelayer {
       this.heartbeatInterval = null;
     }
     this.awaitingPong = false;
+    this.heartbeatSentAt = null;
   }
 
   private clearHeartbeatTimeout(): void {
@@ -396,6 +459,17 @@ export class WebSocketRelayer {
     );
   }
 
+  /**
+   * Full-jitter exponential backoff (#1055): a uniformly random delay in
+   * `[0, min(maxDelay, baseDelay * 2 ** (attempt - 1)))`. Spreading clients
+   * across the whole window — rather than the previous 50–100% band — keeps
+   * a fleet reconnecting after a relayer restart from arriving in lockstep.
+   */
+  private reconnectDelayFor(attempt: number): number {
+    const cap = Math.min(this.maxReconnectDelayMs, this.reconnectDelayMs * 2 ** (attempt - 1));
+    return Math.floor(Math.random() * cap);
+  }
+
   private async attemptReconnect(): Promise<void> {
     if (!this.shouldAttemptReconnect()) {
       if (this.isPermanentlyDown()) {
@@ -417,10 +491,7 @@ export class WebSocketRelayer {
 
       this.reconnectAttempts++;
       this.emitStateChange('reconnecting');
-      const delay = Math.min(
-        this.maxReconnectDelayMs,
-        this.reconnectDelayMs * 2 ** (this.reconnectAttempts - 1),
-      ) * (0.5 + Math.random() * 0.5);
+      const delay = this.reconnectDelayFor(this.reconnectAttempts);
       await new Promise((r) => setTimeout(r, delay));
       // disconnect()/destroy() can land during the backoff delay; bail before
       // opening another socket if reconnection was cancelled meanwhile (#619).
@@ -560,6 +631,7 @@ export class WebSocketRelayer {
     this.emitStateChange('destroyed');
     this.handlers.clear();
     this.stateChangeHandlers.clear();
+    this.seenMessageIds.clear();
     this.lockQueue = [];
     this.isLocked = false;
   }

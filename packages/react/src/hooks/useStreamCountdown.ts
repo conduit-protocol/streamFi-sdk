@@ -61,18 +61,43 @@ export function useStreamCountdown(
 
   const hasTarget = isFiniteTimestamp(targetTimestamp);
 
-  // Re-sync on mount and whenever the target changes, then tick once per
-  // second. `targetTimestamp` is intentionally a dependency: a changed
-  // deadline must not keep counting down against the old value.
+  // Re-sync on mount and whenever the target changes, then poll the clock on
+  // animation frames. State only changes when the whole-second value changes,
+  // so React re-renders once per visible tick and the display lands on the
+  // second boundary instead of drifting up to a second behind a setInterval.
+  // `targetTimestamp` is intentionally a dependency: a changed deadline must
+  // not keep counting down against the old value.
   useEffect(() => {
     if (!hasTarget) return;
 
-    setNow(currentUnixSeconds());
-    const interval = setInterval(() => {
-      setNow(currentUnixSeconds());
-    }, 1_000);
+    let lastSecond = currentUnixSeconds();
+    setNow(lastSecond);
 
-    return () => clearInterval(interval);
+    const hasRaf = typeof requestAnimationFrame === 'function';
+    let handle: ReturnType<typeof setTimeout> | number | undefined;
+    let cancelled = false;
+
+    const schedule = () => {
+      if (cancelled) return;
+      handle = hasRaf ? requestAnimationFrame(tick) : setTimeout(tick, 250);
+    };
+
+    const tick = () => {
+      const second = currentUnixSeconds();
+      if (second !== lastSecond) {
+        lastSecond = second;
+        setNow(second);
+      }
+      schedule();
+    };
+
+    schedule();
+
+    return () => {
+      cancelled = true;
+      if (hasRaf) cancelAnimationFrame(handle as number);
+      else clearTimeout(handle as ReturnType<typeof setTimeout>);
+    };
   }, [hasTarget, targetTimestamp]);
 
   return useMemo(() => {

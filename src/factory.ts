@@ -3,7 +3,7 @@
  */
 
 import { nativeToScVal, xdr, Address, hash, StrKey } from '@stellar/stellar-sdk';
-import type { ConduitConfig } from './types/index.js';
+import type { ConduitConfig, FactoryConfig } from './types/index.js';
 import type { WalletAdapter } from './adapters/types.js';
 import { KeypairWalletAdapter } from './adapters/keypair.js';
 import { ZERO_ADDR, DEFAULT_LIST_LIMIT, clampListLimit, clampOffset } from './constants.js';
@@ -14,9 +14,11 @@ import {
   scValToU32,
   NETWORK_PASSPHRASE,
   DEFAULT_RPC,
+  DEFAULT_HORIZON,
 } from './soroban.js';
 import { SUPPORTED_NETWORKS, UnsupportedChainError } from './errors.js';
 import { mapWithConcurrency, DEFAULT_LIST_CONCURRENCY } from './map-with-concurrency.js';
+import { coalesceAsync } from './coalesce-async.js';
 
 /**
  * A `null` (not-found) `streamAddress` result is cached only briefly — a
@@ -27,9 +29,60 @@ import { mapWithConcurrency, DEFAULT_LIST_CONCURRENCY } from './map-with-concurr
  */
 const NEGATIVE_ADDRESS_CACHE_TTL_MS = 30_000;
 
+/**
+ * How long a {@link FactoryModule.getFactoryConfig} read is reused before
+ * re-simulating (#958). Factory protocol parameters (fee bps, fee
+ * recipient) only change through a governance action, so the window is a
+ * staleness budget rather than a correctness requirement. 5 minutes trades
+ * a little staleness for avoiding a simulation on every stream-creation
+ * call. Override with `ConduitConfig.factoryConfigCacheTtlMs`, or set `0`
+ * to disable caching.
+ */
+const FACTORY_CONFIG_CACHE_TTL_MS = 300_000;
+
 export interface FactoryStreamListResult {
   ids: bigint[];
   hasMore: boolean;
+}
+
+/**
+ * Page of stream IDs returned by {@link FactoryModule.getStreamsBySenderPaginated}.
+ *
+ * `cursor` is an opaque token for the next page — pass it back in as the
+ * `cursor` argument to continue. `null` means there is no next page.
+ */
+export interface PaginatedStreamIdsResult {
+  ids: bigint[];
+  /** Opaque cursor for the next page, or `null` when `ids` is the last page. */
+  cursor: string | null;
+  hasMore: boolean;
+}
+
+/**
+ * Encode an offset as the opaque cursor handed to callers of
+ * {@link FactoryModule.getStreamsBySenderPaginated} (#957). The contract's
+ * `streams_by_sender` only understands offset/limit, so the cursor is just
+ * that offset, base64-encoded so callers treat it as opaque rather than
+ * depending on (or hand-editing) the underlying integer.
+ */
+function encodeStreamCursor(offset: number): string {
+  return Buffer.from(String(offset), 'utf8').toString('base64');
+}
+
+/**
+ * Decode a cursor produced by {@link encodeStreamCursor}. `undefined` (no
+ * cursor supplied, i.e. the first page) decodes to offset `0`. Throws on a
+ * malformed cursor rather than silently restarting from the first page,
+ * which would resurface already-seen ids to the caller.
+ */
+function decodeStreamCursor(cursor: string | undefined): number {
+  if (cursor === undefined) return 0;
+  const decoded = Buffer.from(cursor, 'base64').toString('utf8');
+  const offset = Number(decoded);
+  if (!Number.isInteger(offset) || offset < 0) {
+    throw new Error(`getStreamsBySenderPaginated: invalid cursor "${cursor}"`);
+  }
+  return offset;
 }
 
 /** Options for {@link FactoryModule.streamAddresses}. */
@@ -45,6 +98,7 @@ export interface StreamAddressesOptions {
 export class FactoryModule {
   private readonly rpcUrl:      string;
   private readonly passphrase:  string;
+  private readonly horizonUrl:  string;
   private readonly factoryId:   string;
 
   /**
@@ -72,6 +126,20 @@ export class FactoryModule {
   private _cacheHits = 0;
   private _cacheMisses = 0;
 
+  /**
+   * Cached `getFactoryConfig()` read and the timestamp it goes stale at
+   * (#958). A single entry is enough: a `FactoryModule` reads exactly one
+   * factory contract, so there is only ever one key.
+   */
+  private factoryConfigCache: { value: FactoryConfig; expiresAt: number } | undefined;
+  private readonly factoryConfigCacheTtlMs: number;
+  /**
+   * In-flight `getFactoryConfig()` fetch, keyed by the constant `'config'`.
+   * Coalesces the burst of calls a TTL cache produces the moment its entry
+   * expires — mirrors `GovernorModule`'s `inFlightConfig`.
+   */
+  private readonly inFlightFactoryConfig = new Map<string, Promise<FactoryConfig>>();
+
   constructor(private readonly config: ConduitConfig) {
     // Guard against direct construction with an unsupported network, which
     // would bypass the ConduitClient validation gate and produce a confusing
@@ -81,6 +149,7 @@ export class FactoryModule {
     }
     this.rpcUrl     = config.rpcUrl     ?? DEFAULT_RPC[config.network];
     this.passphrase = NETWORK_PASSPHRASE[config.network];
+    this.horizonUrl = config.horizonUrl ?? DEFAULT_HORIZON[config.network];
     // There is no known default DripFactory deployment for any network —
     // shipping a placeholder string here means callers who forget to set
     // this fail deep inside @stellar/stellar-sdk with a confusing StrKey
@@ -92,6 +161,7 @@ export class FactoryModule {
     }
     this.factoryId  = config.factoryAddress;
     this._negativeCacheTtlMs = config.negativeCacheTtlMs ?? NEGATIVE_ADDRESS_CACHE_TTL_MS;
+    this.factoryConfigCacheTtlMs = config.factoryConfigCacheTtlMs ?? FACTORY_CONFIG_CACHE_TTL_MS;
 
     if (config.wallet) {
       this.activeWallet = config.wallet;
@@ -108,6 +178,18 @@ export class FactoryModule {
   setWallet(wallet: WalletAdapter): void {
     this.activeWallet = wallet;
     this._cachedCallerAddr = null;
+  }
+
+  /**
+   * Options forwarded to every {@link buildContractCallTx} call so the
+   * `getAccount` step can fail over to Horizon when the Soroban RPC
+   * endpoint is unreachable (see #953).
+   */
+  private _txOptions(): { horizonUrl: string; customFetch?: typeof fetch } {
+    return {
+      horizonUrl: this.horizonUrl,
+      ...(this.config.customFetch ? { customFetch: this.config.customFetch } : {}),
+    };
   }
 
   /**
@@ -172,6 +254,7 @@ export class FactoryModule {
     const tx  = await buildContractCallTx(
       this.rpcUrl, this.passphrase, caller,
       this.factoryId, 'stream_count', [],
+      undefined, undefined, this._txOptions(),
     );
     const val = await simulateReadOnly(this.rpcUrl, this.passphrase, tx);
     return scValToU64(val);
@@ -186,6 +269,7 @@ export class FactoryModule {
       this.rpcUrl, this.passphrase, caller,
       this.factoryId, 'stream_count_by_sender',
       [new Address(address).toScVal()],
+      undefined, undefined, this._txOptions(),
     );
     const val = await simulateReadOnly(this.rpcUrl, this.passphrase, tx);
     return scValToU64(val);
@@ -200,6 +284,7 @@ export class FactoryModule {
       this.rpcUrl, this.passphrase, caller,
       this.factoryId, 'stream_count_by_recipient',
       [new Address(address).toScVal()],
+      undefined, undefined, this._txOptions(),
     );
     const val = await simulateReadOnly(this.rpcUrl, this.passphrase, tx);
     return scValToU64(val);
@@ -228,6 +313,7 @@ export class FactoryModule {
       this.rpcUrl, this.passphrase, caller,
       this.factoryId, 'stream_address',
       [nativeToScVal(id, { type: 'u64' })],
+      undefined, undefined, this._txOptions(),
     );
     const val = await simulateReadOnly(this.rpcUrl, this.passphrase, tx);
 
@@ -364,11 +450,46 @@ export class FactoryModule {
         nativeToScVal(clampOffset(offset), { type: 'u32' }),
         nativeToScVal(clampedLimit, { type: 'u32' }),
       ],
+      undefined, undefined, this._txOptions(),
     );
     const val = await simulateReadOnly(this.rpcUrl, this.passphrase, tx);
     const ids = this.parseU64Vec(val);
     const hasMore = ids.length === clampedLimit;
     return { ids, hasMore };
+  }
+
+  /**
+   * Cursor-paginated variant of {@link streamsBySender} (#957).
+   *
+   * `streamsBySender`'s offset/limit works, but a caller fetching heavy
+   * senders page-by-page has to track the running offset itself. This hands
+   * back an opaque `cursor` instead: pass `undefined` (or omit it) for the
+   * first page, then feed the previous page's `cursor` back in for the
+   * next one, until it comes back `null`.
+   *
+   * Internally this is still offset/limit against the contract — the
+   * cursor is just that offset, opaque-encoded — so it shares
+   * `streamsBySender`'s `limit` clamping and `hasMore` semantics.
+   *
+   * @param address - Sender address to list streams for.
+   * @param cursor - Previous page's cursor, or `undefined` for the first page.
+   * @param limit - Page size; clamped to `[0, 100]` (see README).
+   * @param signal - Abort signal; rejects with an `AbortError` if aborted.
+   * @throws If `cursor` is not a value this method produced.
+   */
+  async getStreamsBySenderPaginated(
+    address: string,
+    cursor?: string,
+    limit = DEFAULT_LIST_LIMIT,
+    signal?: AbortSignal,
+  ): Promise<PaginatedStreamIdsResult> {
+    const offset = decodeStreamCursor(cursor);
+    const { ids, hasMore } = await this.streamsBySender(address, offset, limit, signal);
+    return {
+      ids,
+      hasMore,
+      cursor: hasMore ? encodeStreamCursor(offset + ids.length) : null,
+    };
   }
 
   /**
@@ -398,6 +519,7 @@ export class FactoryModule {
         nativeToScVal(clampOffset(offset), { type: 'u32' }),
         nativeToScVal(clampedLimit, { type: 'u32' }),
       ],
+      undefined, undefined, this._txOptions(),
     );
     const val = await simulateReadOnly(this.rpcUrl, this.passphrase, tx);
     const ids = this.parseU64Vec(val);
@@ -413,9 +535,77 @@ export class FactoryModule {
     const tx  = await buildContractCallTx(
       this.rpcUrl, this.passphrase, caller,
       this.factoryId, 'protocol_fee_bps', [],
+      undefined, undefined, this._txOptions(),
     );
     const val = await simulateReadOnly(this.rpcUrl, this.passphrase, tx);
     return scValToU32(val);
+  }
+
+  /**
+   * Fetch the current factory configuration (`feeBps`, `feeRecipient`) from
+   * the DripFactory contract (#958).
+   *
+   * Every stream creation re-reading these from contract storage costs a
+   * simulation for data that only changes through a governance action, so
+   * the result is cached for `factoryConfigCacheTtlMs` (default 5 minutes).
+   * Concurrent misses share a single simulation pair, and a failed fetch is
+   * never cached. Mirrors `GovernorModule.getConfig()`.
+   *
+   * Call {@link clearFactoryConfigCache} to force the next call to
+   * re-simulate, or set `factoryConfigCacheTtlMs: 0` to disable caching.
+   *
+   * @param signal - Abort signal; rejects with an `AbortError` if already
+   *   aborted. Gates *this* call only — it never aborts an in-flight fetch
+   *   that other concurrent callers are also awaiting.
+   */
+  async getFactoryConfig(signal?: AbortSignal): Promise<FactoryConfig> {
+    if (signal?.aborted) throw new DOMException("Aborted", "AbortError");
+
+    const cached = this.factoryConfigCache;
+    if (cached && Date.now() < cached.expiresAt) {
+      return { ...cached.value };
+    }
+
+    const value = await coalesceAsync(this.inFlightFactoryConfig, 'config', async () => {
+      this._cacheMisses++;
+      const caller = await this._resolveCallerAddress();
+
+      const feeBpsTx = await buildContractCallTx(
+        this.rpcUrl, this.passphrase, caller,
+        this.factoryId, 'protocol_fee_bps', [],
+      );
+      const feeBpsVal = await simulateReadOnly(this.rpcUrl, this.passphrase, feeBpsTx);
+      const feeBps = scValToU32(feeBpsVal);
+
+      const feeRecipientTx = await buildContractCallTx(
+        this.rpcUrl, this.passphrase, caller,
+        this.factoryId, 'fee_recipient', [],
+      );
+      const feeRecipientVal = await simulateReadOnly(this.rpcUrl, this.passphrase, feeRecipientTx);
+      // Contract returns Option<Address> — void = None, matching streamAddress().
+      const feeRecipient = feeRecipientVal.switch().name === 'scvVoid'
+        ? undefined
+        : Address.fromScVal(feeRecipientVal).toString();
+
+      const parsed: FactoryConfig = feeRecipient !== undefined ? { feeBps, feeRecipient } : { feeBps };
+      // Stamped on completion, so the TTL bounds staleness from the moment
+      // the data was actually read rather than from when the call started.
+      this.factoryConfigCache = { value: parsed, expiresAt: Date.now() + this.factoryConfigCacheTtlMs };
+      return parsed;
+    });
+
+    // `coalesceAsync` holds on to a *fulfilled* promise, which would pin the
+    // first result forever and defeat the TTL. Release the entry once the
+    // shared fetch has settled; a rejection was already evicted by
+    // `coalesceAsync` itself.
+    this.inFlightFactoryConfig.delete('config');
+
+    return { ...value };
+  }
+
+  /** Drop the cached `getFactoryConfig()` read so the next call re-simulates. */
+  clearFactoryConfigCache(): void {
+    this.factoryConfigCache = undefined;
   }
 
   /**
@@ -431,6 +621,7 @@ export class FactoryModule {
     const tx  = await buildContractCallTx(
       this.rpcUrl, this.passphrase, caller,
       this.factoryId, 'paused', [],
+      undefined, undefined, this._txOptions(),
     );
     const val = await simulateReadOnly(this.rpcUrl, this.passphrase, tx);
     // Contract returns a boolean (scvBool)

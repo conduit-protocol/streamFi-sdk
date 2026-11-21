@@ -10,15 +10,23 @@ export interface UseStreamMutationState {
   txHash: string | null;
 }
 
-export interface UseStreamMutationResult<TArgs extends unknown[]> extends UseStreamMutationState {
-  mutate: (...args: TArgs) => Promise<string>;
+export interface UseStreamMutationResult<TArgs extends unknown[], TResult = string> extends UseStreamMutationState {
+  mutate: (...args: TArgs) => Promise<TResult>;
   reset: () => void;
 }
 
-export function useStreamMutation<TArgs extends unknown[]>(
+function extractTxHash<TResult>(result: TResult): string | null {
+  if (typeof result === 'string') return result;
+  if (result && typeof result === 'object' && 'txHash' in result && typeof (result as { txHash?: unknown }).txHash === 'string') {
+    return (result as { txHash: string }).txHash;
+  }
+  return null;
+}
+
+export function useStreamMutation<TArgs extends unknown[], TResult = string>(
   streamId: StreamMutationId,
-  action: (client: ConduitClient, streamId: bigint | string, ...args: TArgs) => Promise<string>,
-): UseStreamMutationResult<TArgs> {
+  action: (client: ConduitClient, streamId: bigint | string, ...args: TArgs) => Promise<TResult>,
+): UseStreamMutationResult<TArgs, TResult> {
   const { client, isReady } = useStreamFiClient();
   const [state, setState] = useState<UseStreamMutationState>({
     isPending: false,
@@ -31,7 +39,7 @@ export function useStreamMutation<TArgs extends unknown[]>(
   }, []);
 
   const mutate = useCallback(
-    async (...args: TArgs): Promise<string> => {
+    async (...args: TArgs): Promise<TResult> => {
       if (!isReady || !client) {
         const err = new Error('ConduitClient is not connected. Wrap your component with <StreamFiProvider>.');
         setState({ isPending: false, error: err, txHash: null });
@@ -47,9 +55,9 @@ export function useStreamMutation<TArgs extends unknown[]>(
       setState({ isPending: true, error: null, txHash: null });
 
       try {
-        const txHash = await action(client, streamId, ...args);
-        setState({ isPending: false, error: null, txHash });
-        return txHash;
+        const result = await action(client, streamId, ...args);
+        setState({ isPending: false, error: null, txHash: extractTxHash(result) });
+        return result;
       } catch (err: unknown) {
         const typed = err instanceof Error ? err : new Error(String(err));
         setState({ isPending: false, error: typed, txHash: null });

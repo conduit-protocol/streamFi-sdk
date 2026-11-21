@@ -118,11 +118,27 @@ const client = new ConduitClient(config: ConduitConfig);
 | `keypair` | `Keypair` | Optional | Signing keypair (for secret key workflows) |
 | `wallet` | `WalletAdapter` | Optional | Custom wallet adapter (e.g. `WalletConnectAdapter`) |
 | `rpcUrl` | `string` | No | Override default Soroban RPC URL |
+| `rpcUrls` | `string[]` | No | Multiple Soroban RPC endpoints with automatic failover; takes precedence over `rpcUrl` |
+| `rpcUrlFailureThresholdConsecutive` | `number` | No | Consecutive failures before rotating endpoints. Default `3` |
 | `factoryAddress` | `string` | No | Override deployed factory contract ID |
 | `governorAddress` | `string` | No | Override deployed governor contract ID |
 | `fee` | `string` | No | Explicit inclusion fee in stroops (overrides feeMultiplier) |
 | `feeMultiplier` | `number` | No | Multiplier applied to BASE_FEE when fee is not set |
-| `customFetch` | `typeof fetch` | No | `fetch` used for Soroban RPC and fee-estimator requests (edge runtimes, proxies, tracing headers, timeouts). Registered per `rpcUrl`, process-wide |
+| `customFetch` | `typeof fetch` | No | `fetch` used for Soroban RPC and fee-estimator requests (edge runtimes, proxies, tracing headers, timeouts). Registered per configured RPC endpoint, process-wide |
+
+### RPC failover and connection health
+
+Pass `rpcUrls: [primary, backup, ...]` to rotate endpoints automatically on HTTP 429, HTTP 503, network timeouts and open circuits. `getCurrentRpcUrl()` returns the active endpoint. `getConnectionHealth()` returns a synchronous `ConnectionHealthStatus` with connected/status flags, average successful ping latency, packet loss, per-endpoint samples, and relayer heartbeat stats. `refreshConnectionHealth()` performs a live `getLatestLedger()` probe before returning the snapshot.
+
+```typescript
+const client = new ConduitClient({
+  network: 'testnet',
+  rpcUrls: ['https://rpc-primary.example', 'https://rpc-backup.example'],
+});
+
+const health = client.getConnectionHealth();
+console.log(health.status, health.latencyMs, health.packetLossRate, health.activeRpcUrl);
+```
 
 ### Fee Precedence
 
@@ -133,6 +149,25 @@ When both `fee` and `feeMultiplier` are present, `fee` wins. The precedence is:
 3. **`BASE_FEE`** — hardcoded fallback when neither is set
 
 Use `resolveFee(config)` to compute the effective fee for a given `ConduitConfig`.
+
+### Dynamic Fee Estimation
+
+`FeeEstimator` tracks a live inclusion fee from Horizon's `/fee_stats`, with two ways to read it:
+
+```typescript
+import { FeeEstimator } from '@conduit-protocol/sdk';
+
+const estimator = new FeeEstimator(100n); // 100n = fallback base fee in stroops
+
+// Fixed multiplier applied to the modal fee charged in recent ledgers.
+const urgentFee = await estimator.getDynamicFee({ priority: 'urgent' }); // 'low' | 'standard' | 'urgent' | custom multiplier
+
+// Recent-ledger fee percentiles — moves with real congestion, including
+// spikes a fixed multiplier would under- or over-shoot.
+const { p75, p95 } = await estimator.getLedgerFeeStats();
+```
+
+Both share the `feeMultiplier` safety-margin buffer passed to the `FeeEstimator` constructor, and both fall back to the last successfully fetched value on a network error.
 
 ### WalletConnect v2 Integration (Mobile & Browser Wallets)
 
@@ -290,6 +325,23 @@ console.log('Operations:', result.operations);
 console.log('Transaction XDR:', result.xdr);
 ```
 
+Dry-run a batch before prompting for wallet signatures with `simulateBatch()` —
+it simulates every operation and tells you exactly which one(s) would revert
+(e.g. an invalid recipient address), without spending an inclusion fee:
+
+```typescript
+import { simulateBatch } from '@conduit-protocol/sdk';
+
+const summary = await simulateBatch({
+  operations: [stream1.toBatchOperation(), stream2.toBatchOperation()],
+  context: { network: 'testnet', contractId: 'C...', sourceAccount: 'GABC...SENDER', rpcUrl: 'https://soroban-testnet.stellar.org' },
+});
+
+if (!summary.success) {
+  console.log('Operations that would revert:', summary.invalidIndices);
+}
+```
+
 ---
 
 ## API Reference
@@ -325,6 +377,16 @@ const result = await client.streams.create({
 - `durationSeconds >= 3600` (1 hour minimum)
 - `startTime >= now`
 - Either `ratePerSecond` or `durationSeconds` must be provided (not both)
+
+---
+
+#### `simulateCreateStream(params)`
+
+Dry-run stream creation and return estimated resource fees, storage/rent estimate, CPU/read/write usage, and the required balance. No wallet prompt, signing, or transaction submission occurs.
+
+#### `getStreamProgress(stream, currentTimestamp?)`
+
+Pure local helper returning percentage progress, elapsed/remaining seconds, lifecycle status, cumulative `streamed`, `withdrawable`, and display strings. `getStreamStatus()` is an alias.
 
 ---
 
@@ -511,8 +573,23 @@ const { ids } = await client.factory.streamsBySender(sender, 0, 50);
 const addresses = await client.factory.streamAddresses(ids);
 // Map<string, string | null>, keyed by decimal stream-id string
 
+// Cursor-paginated variant of streamsBySender — pass the previous page's
+// `cursor` back in to continue; `cursor` is `null` on the last page.
+let cursor: string | undefined;
+do {
+  const page = await client.factory.getStreamsBySenderPaginated(sender, cursor, 50);
+  console.log(page.ids);
+  cursor = page.cursor ?? undefined;
+} while (cursor);
+
 // Protocol fee in basis points (e.g. 30 = 0.3%)
 const feeBps = await client.factory.protocolFeeBps();
+
+// feeBps + feeRecipient together, cached for `factoryConfigCacheTtlMs`
+// (default 5 minutes) so stream-creation-heavy callers don't pay a
+// simulation per call for data that rarely changes.
+const { feeBps: cachedFeeBps, feeRecipient } = await client.factory.getFactoryConfig();
+client.factory.clearFactoryConfigCache(); // force the next call to re-simulate
 ```
 
 ---
@@ -651,6 +728,29 @@ try {
 | 1 | `NotAuthorized` | Caller is not the current authority |
 | 2 | `InvalidParam` | Setter argument failed validation |
 | 3 | `AlreadyInitialized` | Governor has already been initialized |
+
+**Recovery hints**
+
+A raw Soroban panic looks like `HostError(Error(Contract, #14))` — a bare code with no
+indication of what to do about it. Every `ConduitError` (and `ContractError`, when the
+contract could be determined) carries a `recoveryHint` string with a suggested next step for
+its specific `contract` + `code`, in addition to the descriptive `message` above:
+
+```typescript
+import { getRecoveryHint, StreamErrorCode } from '@conduit-protocol/sdk';
+
+try {
+  await client.streams.forceCancel(streamId);
+} catch (err) {
+  if (err instanceof ConduitError) {
+    console.error(err.message);       // "force_cancel called before the 30-day pause threshold elapsed."
+    console.error(err.recoveryHint);  // "force_cancel requires the stream to have been paused for ..."
+  }
+}
+
+// Or look one up directly from a contract + code pair:
+getRecoveryHint('stream', StreamErrorCode.AlreadyInitialized);
+```
 
 ---
 

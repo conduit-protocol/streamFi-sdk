@@ -53,7 +53,37 @@ export interface GraphQLSubscriptionOptions {
   maxReconnectAttempts?: number;
   /** Base delay in ms; actual wait uses capped exponential backoff (max 30s) with jitter. Default 1000. */
   reconnectDelayMs?: number;
+  /**
+   * Heartbeat interval (ms). When positive, the client sends a `ping` frame
+   * every `heartbeatIntervalMs` and expects a `pong` back within
+   * `heartbeatTimeoutMs`; if none arrives the socket is treated as half-open
+   * (NAT timeout, device sleep) and force-reconnected. Defaults to 30_000ms.
+   * Set to `0` to disable the heartbeat.
+   */
+  heartbeatIntervalMs?: number;
+  /**
+   * How long (ms) to wait for a `pong` after sending `ping` before assuming
+   * the connection is dead and triggering a reconnect. Defaults to 5_000ms.
+   */
+  heartbeatTimeoutMs?: number;
+  /**
+   * When the WebSocket cannot be re-established after `maxReconnectAttempts`,
+   * keep the subscription alive by polling the endpoint over HTTP instead of
+   * tearing it down (#1089). Defaults to `true`; set `false` to restore the
+   * previous behaviour (report the error and unsubscribe).
+   */
+  pollingFallback?: boolean;
+  /** Interval (ms) between HTTP polls once in polling fallback. Default 10_000. */
+  pollingIntervalMs?: number;
+  /**
+   * Query sent on each poll. Defaults to the subscription document with its
+   * leading `subscription` keyword replaced by `query`.
+   */
+  pollingQuery?: string;
 }
+
+/** Default interval for {@link GraphQLSubscriptionOptions.pollingIntervalMs}. */
+export const DEFAULT_SUBSCRIPTION_POLLING_INTERVAL_MS = 10_000;
 
 export interface IndexerSubscription {
   unsubscribe: () => void;
@@ -179,6 +209,22 @@ export interface FetchStreamsBySenderOptions
   beforeCursor?: string;
 }
 
+/**
+ * Stream lifecycle filter for {@link GraphQLIndexer.streamsByRecipient} (#1090).
+ * `active` streams are still vesting or withdrawable; `completed` streams have
+ * ended or been cancelled; `all` (the default) applies no filter.
+ */
+export type StreamStatusFilter = 'active' | 'completed' | 'all';
+
+const STREAM_STATUS_FILTERS: readonly StreamStatusFilter[] = ['active', 'completed', 'all'];
+
+/** Options for {@link GraphQLIndexer.streamsByRecipient}. */
+export interface StreamsByRecipientOptions
+  extends Omit<GraphQLQueryOptions, 'query' | 'variables'> {
+  /** Restrict results to active or completed streams. Default `'all'`. */
+  status?: StreamStatusFilter;
+}
+
 function decodePageInfo(raw: unknown): IndexerPageInfo {
   const info = (raw && typeof raw === 'object' ? raw : {}) as Record<string, unknown>;
   return {
@@ -217,6 +263,62 @@ function findPaginatedCollection(value: unknown): PaginatedCollection | undefine
   return undefined;
 }
 
+
+/** A detected skip in an otherwise-monotonic ledger sequence. */
+export interface LedgerGap {
+  /** The ledger sequence that should have come next (`currentLedger + 1`). */
+  expected: number;
+  /** The ledger sequence actually observed. */
+  actual: number;
+}
+
+/**
+ * Tracks a monotonically increasing ledger sequence and flags a skip —
+ * `nextLedger !== currentLedger + 1` — so a streaming poller can trigger a
+ * backfill fetch instead of silently continuing past missed ledgers (a
+ * network hiccup during polling would otherwise corrupt off-chain balance
+ * indexing and state projections built from the stream).
+ *
+ * This is framework-agnostic: feed it any monotonically-intended ledger
+ * sequence (e.g. each dispatched event's `event.ledger`) from whichever
+ * poller observes it.
+ */
+export class LedgerGapDetector {
+  private current: number | undefined;
+
+  /** The last ledger sequence observed, or `undefined` before the first `observe()` call. */
+  get currentLedger(): number | undefined {
+    return this.current;
+  }
+
+  /**
+   * Records the next observed ledger sequence.
+   *
+   * Returns the detected {@link LedgerGap} if `ledger` is not exactly one
+   * past the previously observed ledger, otherwise `undefined`. A `ledger`
+   * at or behind the current value (a duplicate or re-ordered delivery) is
+   * recorded without being treated as a gap.
+   */
+  observe(ledger: number): LedgerGap | undefined {
+    if (!Number.isInteger(ledger) || ledger < 0) {
+      throw new Error(`LedgerGapDetector.observe: ledger must be a non-negative integer, got ${String(ledger)}`);
+    }
+
+    let gap: LedgerGap | undefined;
+    if (this.current !== undefined && ledger > this.current + 1) {
+      gap = { expected: this.current + 1, actual: ledger };
+    }
+    if (this.current === undefined || ledger > this.current) {
+      this.current = ledger;
+    }
+    return gap;
+  }
+
+  /** Clears the tracked ledger so the next `observe()` call cannot be flagged as a gap. */
+  reset(): void {
+    this.current = undefined;
+  }
+}
 
 export class GraphQLIndexer {
   private endpoint: string;
@@ -523,6 +625,30 @@ export class GraphQLIndexer {
       60_000,
       'reconnectDelayMs',
     );
+    const heartbeatIntervalMs = this.parseBoundedInt(
+      options.heartbeatIntervalMs,
+      30_000,
+      0,
+      600_000,
+      'heartbeatIntervalMs',
+    );
+    const heartbeatTimeoutMs = this.parseBoundedInt(
+      options.heartbeatTimeoutMs,
+      5_000,
+      0,
+      600_000,
+      'heartbeatTimeoutMs',
+    );
+    const pollingIntervalMs = this.parseBoundedInt(
+      options.pollingIntervalMs,
+      DEFAULT_SUBSCRIPTION_POLLING_INTERVAL_MS,
+      100,
+      600_000,
+      'pollingIntervalMs',
+    );
+    const pollingFallback = options.pollingFallback !== false;
+    const pollingQuery =
+      options.pollingQuery ?? options.query.replace(/^\s*subscription\b/, 'query');
 
     let unsubscribed = false;
     const subId = `sub_${++this.subCounter}_${Date.now()}`;
@@ -531,6 +657,47 @@ export class GraphQLIndexer {
     let abortController: AbortController | null = null;
     let reconnectAttempts = 0;
     let reconnectTimer: ReturnType<typeof setTimeout> | null = null;
+    let heartbeatInterval: ReturnType<typeof setInterval> | null = null;
+    let heartbeatTimeout: ReturnType<typeof setTimeout> | null = null;
+    let awaitingPong = false;
+    let polling = false;
+    let pollTimer: ReturnType<typeof setTimeout> | null = null;
+
+    /**
+     * WebSocket is unrecoverable: poll the endpoint over HTTP every
+     * `pollingIntervalMs` and feed each result to `onData`, so dashboards stay
+     * fresh behind proxies or firewalls that block WebSocket upgrades (#1089).
+     * The next poll is scheduled only after the previous one settles, so a slow
+     * indexer never has overlapping requests in flight.
+     */
+    const startPolling = (): void => {
+      if (polling || unsubscribed || this.isDestroyed) return;
+      polling = true;
+      const poll = (): void => {
+        pollTimer = null;
+        if (unsubscribed || this.isDestroyed) return;
+        abortController = typeof AbortController !== 'undefined' ? new AbortController() : null;
+        const pollOptions: GraphQLQueryOptions = { query: pollingQuery, variables };
+        if (options.headers) pollOptions.headers = options.headers;
+        if (abortController) pollOptions.signal = abortController.signal;
+        this.query(pollOptions)
+          .then((data) => {
+            if (!unsubscribed && !this.isDestroyed) options.onData(data);
+          })
+          .catch((err: unknown) => {
+            const isAbort = err instanceof Error && err.name === 'AbortError';
+            if (!unsubscribed && !this.isDestroyed && !isAbort) {
+              this.handleError(options.onError, err);
+            }
+          })
+          .finally(() => {
+            if (!unsubscribed && !this.isDestroyed) {
+              pollTimer = setTimeout(poll, pollingIntervalMs);
+            }
+          });
+      };
+      poll();
+    };
 
     const clearReconnectTimer = (): void => {
       if (reconnectTimer !== null) {
@@ -539,11 +706,117 @@ export class GraphQLIndexer {
       }
     };
 
+    const clearHeartbeatTimeout = (): void => {
+      if (heartbeatTimeout !== null) {
+        clearTimeout(heartbeatTimeout);
+        heartbeatTimeout = null;
+      }
+    };
+
+    const stopHeartbeat = (): void => {
+      clearHeartbeatTimeout();
+      if (heartbeatInterval !== null) {
+        clearInterval(heartbeatInterval);
+        heartbeatInterval = null;
+      }
+      awaitingPong = false;
+    };
+
+    /**
+     * Schedule a reconnect using the same capped exponential backoff already
+     * used by {@link socket.onclose}. Extracted so a dead socket whose
+     * `close()` never fires `onclose` (the classic half-open failure) can drive
+     * a reconnect itself after a heartbeat timeout.
+     */
+    const scheduleReconnect = (): void => {
+      if (unsubscribed || this.isDestroyed) return;
+      if (reconnectAttempts >= maxReconnectAttempts) {
+        const exhausted = `GraphQL subscription WebSocket closed on ${this.endpoint} after ${maxReconnectAttempts} reconnect attempts exhausted`;
+        if (pollingFallback) {
+          this.handleError(
+            options.onError,
+            new Error(`${exhausted}; falling back to HTTP polling every ${pollingIntervalMs}ms`),
+          );
+          startPolling();
+          return;
+        }
+        this.handleError(options.onError, new Error(exhausted));
+        subscription.unsubscribe();
+        return;
+      }
+      reconnectAttempts += 1;
+      const baseDelay = reconnectDelayMs * reconnectAttempts;
+      const cappedDelay = Math.min(baseDelay, 30_000);
+      const jitter = Math.random() * 0.3 * cappedDelay;
+      const delay = cappedDelay + jitter;
+      reconnectTimer = setTimeout(() => {
+        reconnectTimer = null;
+        if (unsubscribed || this.isDestroyed) return;
+        openSocket();
+      }, delay);
+    };
+
+    /**
+     * Drive the keepalive ping/pong heartbeat for one socket. Every
+     * `heartbeatIntervalMs` (when the socket is OPEN and we are not already
+     * awaiting a `pong`) we send a `ping` and arm a `heartbeatTimeoutMs`
+     * timer; if no `pong` comes back in time, the connection is considered
+     * dead and force-reconnected.
+     */
+    const startHeartbeat = (socket: WebSocket): void => {
+      stopHeartbeat();
+      if (!(heartbeatIntervalMs > 0)) return;
+      heartbeatInterval = setInterval(() => {
+        if (unsubscribed || this.isDestroyed) return;
+        if (socket.readyState === 1 /* OPEN */ && !awaitingPong) {
+          try {
+            socket.send(JSON.stringify({ type: 'ping' }));
+            awaitingPong = true;
+            heartbeatTimeout = setTimeout(() => {
+              if (awaitingPong) {
+                handleHeartbeatTimeout();
+              }
+            }, heartbeatTimeoutMs);
+          } catch {
+            // Ignore send errors — the next interval will retry.
+          }
+        }
+      }, heartbeatIntervalMs);
+    };
+
+    /**
+     * No `pong` arrived in time: the socket is half-open. `close()` on such a
+     * socket may never fire `onclose`, so detach the dead socket and drive the
+     * reconnect ourselves rather than waiting on an event that may never come.
+     */
+    const handleHeartbeatTimeout = (): void => {
+      const dead = ws;
+      stopHeartbeat();
+      ws = null;
+      if (dead) {
+        dead.onopen = null;
+        dead.onmessage = null;
+        dead.onerror = null;
+        dead.onclose = null;
+        try {
+          dead.close();
+        } catch {
+          // Socket already closed/closing; nothing to clean up.
+        }
+      }
+      scheduleReconnect();
+    };
+
     const subscription: IndexerSubscription = {
       unsubscribe: () => {
         if (unsubscribed) return;
         unsubscribed = true;
         clearReconnectTimer();
+        stopHeartbeat();
+        if (pollTimer !== null) {
+          clearTimeout(pollTimer);
+          pollTimer = null;
+        }
 
         if (ws) {
           try {
@@ -602,6 +875,7 @@ export class GraphQLIndexer {
           return;
         }
         reconnectAttempts = 0;
+        startHeartbeat(socket);
         try {
           socket.send(JSON.stringify({ type: 'connection_init' }));
           queuedSubscribeMessage = JSON.stringify({
@@ -626,6 +900,23 @@ export class GraphQLIndexer {
               : (event.data as unknown);
           if (!raw || typeof raw !== 'object') return;
           const data = raw as GraphQLServerMessage;
+
+          // Heartbeat keepalive (graphql-transport-ws).
+          if (data.type === 'ping') {
+            // Server-initiated keepalive — the client MUST respond with pong.
+            try {
+              socket.send(JSON.stringify({ type: 'pong' }));
+            } catch {
+              // Ignore send errors — the next ping will retry.
+            }
+            return;
+          }
+          if (data.type === 'pong') {
+            // Response to our heartbeat ping: the link is alive.
+            awaitingPong = false;
+            clearHeartbeatTimeout();
+            return;
+          }
 
           if (data.type === 'connection_ack') {
             if (queuedSubscribeMessage !== null) {
@@ -654,31 +945,13 @@ export class GraphQLIndexer {
       };
 
       socket.onclose = () => {
+        stopHeartbeat();
         if (unsubscribed || this.isDestroyed) return;
         this.handleError(
           options.onError,
           new Error(`GraphQL subscription WebSocket closed on ${this.endpoint}`),
         );
-        if (reconnectAttempts >= maxReconnectAttempts) {
-          this.handleError(
-            options.onError,
-            new Error(
-              `GraphQL subscription WebSocket closed on ${this.endpoint} after ${maxReconnectAttempts} reconnect attempts exhausted`,
-            ),
-          );
-          subscription.unsubscribe();
-          return;
-        }
-        reconnectAttempts += 1;
-        const baseDelay = reconnectDelayMs * reconnectAttempts;
-        const cappedDelay = Math.min(baseDelay, 30_000);
-        const jitter = Math.random() * 0.3 * cappedDelay;
-        const delay = cappedDelay + jitter;
-        reconnectTimer = setTimeout(() => {
-          reconnectTimer = null;
-          if (unsubscribed || this.isDestroyed) return;
-          openSocket();
-        }, delay);
+        scheduleReconnect();
       };
     };
 
@@ -777,7 +1050,7 @@ export class GraphQLIndexer {
     let cursor: string | null | undefined = undefined;
     let pagesFetched = 0;
 
-    while (true) {
+    for (;;) {
       if (pagesFetched >= maxPages) {
         throw new IndexerMaxPagesExceededError(pagesFetched, maxPages);
       }
@@ -964,11 +1237,22 @@ export class GraphQLIndexer {
    */
   async streamsByRecipient<T = unknown>(
     recipientAddress: string,
-    options?: Omit<GraphQLQueryOptions, 'query' | 'variables'>,
+    options: StreamsByRecipientOptions = {},
   ): Promise<T> {
+    const { status = 'all', ...queryOptions } = options;
+    if (!STREAM_STATUS_FILTERS.includes(status)) {
+      throw new Error(
+        `streamsByRecipient: status must be one of ${STREAM_STATUS_FILTERS.join(', ')}`,
+      );
+    }
+    // Only send `status` when it narrows the result, so the default request
+    // is unchanged for indexers that predate the argument (#1090).
+    const filtered = status !== 'all';
+    const variables: Record<string, unknown> = { recipient: recipientAddress };
+    if (filtered) variables.status = status;
     const query = `
-      query StreamsByRecipient($recipient: String!) {
-        streamsByRecipient(recipient: $recipient) {
+      query StreamsByRecipient($recipient: String!${filtered ? ', $status: String' : ''}) {
+        streamsByRecipient(recipient: $recipient${filtered ? ', status: $status' : ''}) {
           items {
             id
             sender
@@ -992,9 +1276,9 @@ export class GraphQLIndexer {
       }
     `;
     return this.query<T>({
-      ...options,
+      ...queryOptions,
       query,
-      variables: { recipient: recipientAddress },
+      variables,
     });
   }
 

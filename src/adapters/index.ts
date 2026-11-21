@@ -24,6 +24,7 @@ export {
 } from './walletconnect.js';
 export {
   FreighterWalletAdapter,
+  DEFAULT_FREIGHTER_SIGN_TIMEOUT_MS,
   DEFAULT_FREIGHTER_WATCH_INTERVAL_MS,
   type FreighterWalletChange,
   type FreighterAccountChangeListener,
@@ -35,13 +36,14 @@ export {
 export {
   AlbedoWalletAdapter,
   AlbedoEnvelopeError,
+  resolveAlbedoNetwork,
   verifyEnvelope,
   verifySignedEnvelope,
   validateSignedEnvelope,
   validateEnvelope,
+  type AlbedoEnvelopeErrorReason,
   type VerifyEnvelopeOptions,
   type EnvelopeVerificationResult,
-  type AlbedoEnvelopeErrorReason,
   type AlbedoSignOptions,
   type AlbedoWalletAdapterOptions,
   type AlbedoApi,

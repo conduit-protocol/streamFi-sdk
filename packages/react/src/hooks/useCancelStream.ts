@@ -1,6 +1,6 @@
 import { useCallback, useMemo, useState } from 'react';
 import { useStreamMutation, type StreamMutationId, type UseStreamMutationState } from './useStreamMutation.js';
-import { useStream } from './useStream.js';
+import { useStream, type UseStreamResult } from './useStream.js';
 import { useStreamFiClient } from '../context/useStreamFiClient.js';
 
 export interface CancelSettlement {
@@ -8,9 +8,13 @@ export interface CancelSettlement {
   recipientPayout: string;
   senderRefundAmount: bigint;
   recipientPayoutAmount: bigint;
+  /** Protocol penalty fee deducted when the stream is cancelled early (#999). */
+  cancellationFee?: string;
+  /** Raw stroop amount of the cancellation fee; undefined means no fee applies. */
+  cancellationFeeAmount?: bigint;
 }
 
-export type CancelStreamFn = () => Promise<void>;
+export type CancelStreamFn = () => Promise<string>;
 
 export interface UseCancelStreamResult extends UseStreamMutationState {
   /** Opens the in-app confirmation flow; does not contact the wallet. */
@@ -21,6 +25,8 @@ export interface UseCancelStreamResult extends UseStreamMutationState {
   isConfirming: boolean;
   isCancelling: boolean;
   settlement: CancelSettlement | null;
+  /** Unstreamed balance the sender would get back if cancelled now; null when unknown (e.g. open-ended streams). */
+  estimatedRefund: bigint | null;
   reset: () => void;
 }
 
@@ -49,7 +55,7 @@ function settlementFor(stream: {
 
 export function useCancelStream(streamId: StreamMutationId): UseCancelStreamResult {
   const { client } = useStreamFiClient();
-  const { stream } = useStream(streamId);
+  const { stream, setStream } = useStream(streamId) as UseStreamResult;
   const mutation = useStreamMutation(streamId, (client, id) => client.streams.cancel(id));
   const [isConfirming, setIsConfirming] = useState(false);
   const settlement = useMemo(() => stream ? settlementFor(stream) : null, [stream]);
@@ -59,17 +65,35 @@ export function useCancelStream(streamId: StreamMutationId): UseCancelStreamResu
     // mutations. A real ConduitClient always exposes streams.get, so browser
     // callers follow the confirmation path above.
     if (typeof client?.streams?.get !== 'function') {
-      await mutation.mutate();
+      const previous = stream;
+      if (stream) {
+        setStream((current) => current ? { ...current, cancelled: true, paused: false, pausedAt: 0 } : current);
+      }
+      try {
+        await mutation.mutate();
+      } catch (error) {
+        if (previous) setStream(previous);
+        throw error;
+      }
       return;
     }
     setIsConfirming(true);
-  }, [client, mutation.mutate]);
+  }, [client, mutation, setStream, stream]);
   const dismissCancel = useCallback(() => setIsConfirming(false), []);
   const confirmCancel = useCallback(async () => {
     if (!settlement) throw new Error('Stream settlement is not available yet.');
+    const previous = stream;
+    if (stream) {
+      setStream((current) => current ? { ...current, cancelled: true, paused: false, pausedAt: 0 } : current);
+    }
     setIsConfirming(false);
-    return mutation.mutate();
-  }, [mutation.mutate, settlement]);
+    try {
+      return await mutation.mutate();
+    } catch (error) {
+      if (previous) setStream(previous);
+      throw error;
+    }
+  }, [mutation, setStream, settlement, stream]);
   const reset = useCallback(() => {
     setIsConfirming(false);
     mutation.reset();
@@ -83,6 +107,7 @@ export function useCancelStream(streamId: StreamMutationId): UseCancelStreamResu
     isConfirming,
     isCancelling: mutation.isPending,
     settlement,
+    estimatedRefund: settlement?.senderRefundAmount ?? null,
     reset,
   };
 }

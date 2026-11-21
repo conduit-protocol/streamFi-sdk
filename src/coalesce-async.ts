@@ -7,15 +7,43 @@
  * which hand-rolled this pattern inline (caching the in-flight `Promise`
  * itself, with cleanup on rejection).
  *
- * Usage with an explicit cache:
+ * Usage:
  *   const cache = new Map<string, Promise<number>>();
  *   const decimals = await coalesceAsync(cache, tokenId, () => fetchDecimals(tokenId));
- *
- * Usage with a self-contained coalescer (convenient for React hooks that must
- * share one in-flight request across component instances, #1186):
- *   const streams = createAsyncCoalescer<string, StreamInfo>();
- *   const stream = await streams.run(streamId, () => client.streams.get(streamId));
  */
+
+/**
+ * Thrown when starting another fetch would exceed `maxQueueDepth` (#1075).
+ * Callers asking for a key that is already in flight still join it; only a
+ * *new* key is refused, so a stalled backend can't grow the map without bound.
+ */
+export class CoalesceQueueFullError extends Error {
+  constructor(public readonly maxQueueDepth: number) {
+    super(`coalesce queue is full: ${maxQueueDepth} requests already pending`);
+    this.name = 'CoalesceQueueFullError';
+  }
+}
+
+/** Options for {@link coalesceAsync}. */
+export interface CoalesceOptions {
+  /** See the `windowMs` parameter of {@link coalesceAsync}. */
+  windowMs?: number | undefined;
+  /**
+   * Maximum number of distinct fetches allowed in flight at once for this
+   * cache. Starting one more rejects with {@link CoalesceQueueFullError}.
+   * Omitted, or a non-finite or non-positive value, means no limit.
+   */
+  maxQueueDepth?: number | undefined;
+}
+
+/** In-flight (not yet settled) promises per cache map, for `maxQueueDepth`. */
+const pendingByCache = new WeakMap<Map<unknown, unknown>, Set<Promise<unknown>>>();
+
+function queueLimit(maxQueueDepth: number | undefined): number | undefined {
+  return maxQueueDepth !== undefined && Number.isFinite(maxQueueDepth) && maxQueueDepth > 0
+    ? Math.trunc(maxQueueDepth) || 1
+    : undefined;
+}
 
 /**
  * Returns the cached in-flight promise for `key` when present, otherwise
@@ -23,62 +51,118 @@
  *
  * A failed fetch is evicted (only if it is still the current entry) so a
  * later call retries instead of awaiting the rejected promise forever.
+ *
+ * `windowMs` (#979) bounds how long a *settled* value is reused. When it is a
+ * positive finite number, a successful entry is evicted `windowMs` after it
+ * resolves, so calls from separate render cycles inside that window share the
+ * value instead of refetching. Omitted, zero, negative or non-finite values
+ * keep the entry until the caller removes it, as before.
+ *
+ * The fourth argument may instead be a {@link CoalesceOptions} object, which
+ * also accepts `maxQueueDepth` (#1075) to cap how many distinct fetches may be
+ * pending at once.
  */
 export async function coalesceAsync<K, V>(
   cache: Map<K, Promise<V>>,
   key: K,
   fn: () => Promise<V>,
+  windowMsOrOptions?: number | CoalesceOptions,
 ): Promise<V> {
+  const options: CoalesceOptions =
+    typeof windowMsOrOptions === 'object' && windowMsOrOptions !== null
+      ? windowMsOrOptions
+      : { windowMs: windowMsOrOptions };
+  const { windowMs } = options;
+
   const cached = cache.get(key);
   if (cached) {
     return cached;
   }
 
+  const limit = queueLimit(options.maxQueueDepth);
+  let pending = pendingByCache.get(cache as Map<unknown, unknown>);
+  if (limit !== undefined && pending && pending.size >= limit) {
+    throw new CoalesceQueueFullError(limit);
+  }
+
   const promise = fn();
 
   cache.set(key, promise);
-  promise.catch(() => {
-    // Don't cache failed fetches — let a later call retry.
-    if (cache.get(key) === promise) cache.delete(key);
-  });
+  if (!pending) {
+    pending = new Set();
+    pendingByCache.set(cache as Map<unknown, unknown>, pending);
+  }
+  const tracked = pending;
+  tracked.add(promise);
+  const untrack = () => {
+    tracked.delete(promise);
+  };
+  promise.then(untrack, untrack);
+  promise.then(
+    () => {
+      if (windowMs === undefined || !Number.isFinite(windowMs) || windowMs <= 0) return;
+      const timer = setTimeout(() => {
+        if (cache.get(key) === promise) cache.delete(key);
+      }, windowMs);
+      // Don't keep a Node process alive just to expire a cache entry.
+      (timer as unknown as { unref?: () => void }).unref?.();
+    },
+    () => {
+      // Don't cache failed fetches — let a later call retry.
+      if (cache.get(key) === promise) cache.delete(key);
+    },
+  );
 
   return promise;
 }
 
 /**
- * A keyed registry of in-flight promises (#1186).
+ * Like {@link coalesceAsync}, but only shares the promise while it is in
+ * flight (#925): the entry is evicted as soon as it settles, success or
+ * failure, so later calls always fetch fresh data. Used to collapse
+ * concurrent identical reads (e.g. several components calling
+ * `streams.get(id)` during the same render) into one network request.
  *
- * Wraps {@link coalesceAsync} so callers do not have to manage a `Map`
- * themselves — useful when several React components mount at once and all
- * request the same stream. Entries live only while their promise is in
- * flight: a fulfilled promise is evicted so later calls can refresh, and a
- * rejected one is evicted by {@link coalesceAsync} so a later call retries.
+ * `maxQueueDepth` (#1075) caps how many distinct keys may be in flight at
+ * once; starting one more rejects with {@link CoalesceQueueFullError}.
+ */
+export function coalesceInFlight<K, V>(
+  inFlight: Map<K, Promise<V>>,
+  key: K,
+  fn: () => Promise<V>,
+  options: Pick<CoalesceOptions, 'maxQueueDepth'> = {},
+): Promise<V> {
+  const existing = inFlight.get(key);
+  if (existing) return existing;
+
+  const limit = queueLimit(options.maxQueueDepth);
+  if (limit !== undefined && inFlight.size >= limit) {
+    return Promise.reject(new CoalesceQueueFullError(limit));
+  }
+
+  const promise = fn();
+  inFlight.set(key, promise);
+  const evict = () => {
+    if (inFlight.get(key) === promise) inFlight.delete(key);
+  };
+  promise.then(evict, evict);
+  return promise;
+}
+
+/**
+ * A stateful wrapper around {@link coalesceInFlight} (#1186).
+ *
+ * Keeps the in-flight map for callers that would otherwise have to share one
+ * (e.g. React components mounted at once that all request the same stream).
+ * Entries exist only while their promise is in flight, so a later call is
+ * always free to fetch fresh data.
  */
 export class AsyncCoalescer<K, V> {
   private readonly inFlight = new Map<K, Promise<V>>();
 
   /** Returns the shared in-flight promise for `key`, starting `fn()` once. */
-  run(key: K, fn: () => Promise<V>): Promise<V> {
-    const result = coalesceAsync(this.inFlight, key, fn);
-    // `coalesceAsync` retains fulfilled promises (it doubles as a cache) and
-    // stores the *inner* promise from `fn()` in the map. Here we want pure
-    // in-flight deduplication, so attach an eviction handler to that stored
-    // promise: a later call must be free to fetch fresh stream info. The
-    // identity check avoids clobbering a newer entry installed meanwhile.
-    // When a request is already in flight, `result === stored` and the first
-    // caller has already attached the handler.
-    const stored = this.inFlight.get(key);
-    if (stored && stored !== result) {
-      void stored.then(
-        () => {
-          if (this.inFlight.get(key) === stored) this.inFlight.delete(key);
-        },
-        () => {
-          // Rejections are already evicted by coalesceAsync.
-        },
-      );
-    }
-    return result;
+  run(key: K, fn: () => Promise<V>, options?: Pick<CoalesceOptions, 'maxQueueDepth'>): Promise<V> {
+    return coalesceInFlight(this.inFlight, key, fn, options);
   }
 
   /** Number of requests currently in flight. */
@@ -92,10 +176,8 @@ export class AsyncCoalescer<K, V> {
   }
 
   /**
-   * Drop an entry. Without `key` every in-flight request is forgotten (the
-   * promises themselves keep running; their results are simply no longer
-   * shared). Useful on account/network switches when cached reads become
-   * stale.
+   * Forget one (or all) in-flight entry without cancelling the underlying
+   * requests. Useful when a network/account switch makes pending reads stale.
    */
   clear(key?: K): void {
     if (key === undefined) this.inFlight.clear();

@@ -39,6 +39,11 @@ vi.mock('../soroban.js', () => ({
     mainnet:  'https://mainnet.sorobanrpc.com',
     local:    'http://localhost:8000/soroban/rpc',
   },
+  DEFAULT_HORIZON: {
+    testnet:  'https://horizon-testnet.stellar.org',
+    mainnet:  'https://horizon.stellar.org',
+    local:    'http://localhost:8000',
+  },
 }));
 
 // `Address.fromScVal` round-trips the real contract-id bytes so each id can

@@ -46,6 +46,48 @@ import type { Network } from './types/index.js';
 export const DEFAULT_BATCH_TIMEOUT_SECONDS = 30;
 
 /**
+ * Split a flat list of batch operations into chunks small enough to fit
+ * Soroban's per-transaction instruction / footprint limits.
+ *
+ * A single Soroban transaction may only carry a bounded amount of work;
+ * trying to invoke 500 payroll withdrawals in one envelope reverts the whole
+ * thing. Callers pass the full list together with a safe `maxChunkSize`
+ * (default 50 — the figure the dashboard uses for payroll batches) and submit
+ * each returned chunk as its own transaction set, so one oversized list never
+ * takes the entire batch down.
+ *
+ * An empty input yields `[]` rather than a single empty chunk, so a caller
+ * that maps over the result does not emit a stray no-op batch. Order is
+ * preserved: `concat(...chunks)` is item-identical to the input.
+ *
+ * @param items - The operations to split (any element type).
+ * @param maxChunkSize - Maximum entries per chunk. Must be a positive integer;
+ *   values below 1 throw rather than silently collapsing the whole list into
+ *   one oversized chunk that would revert on-chain.
+ * @returns An array of chunks; `[items]` when `items.length <= maxChunkSize`.
+ *
+ * @example
+ * ```ts
+ * const chunks = chunkBatchOperations(payroll, 50); // 500 items -> 10 of 50
+ * for (const chunk of chunks) await submitBatch(buildBatchTransactions(chunk, ctx), rpcUrl);
+ * ```
+ */
+export function chunkBatchOperations<T>(items: T[], maxChunkSize = 50): T[][] {
+  if (!Array.isArray(items)) {
+    throw new BatchBuildError('chunkBatchOperations expects an array of items');
+  }
+  if (!Number.isInteger(maxChunkSize) || maxChunkSize < 1) {
+    throw new BatchBuildError(`maxChunkSize must be a positive integer, got ${String(maxChunkSize)}`);
+  }
+  if (items.length === 0) return [];
+  const chunks: T[][] = [];
+  for (let i = 0; i < items.length; i += maxChunkSize) {
+    chunks.push(items.slice(i, i + maxChunkSize));
+  }
+  return chunks;
+}
+
+/**
  * Everything needed to turn a validated operation list into real transactions.
  *
  * Supply `sequence` to build offline, or `rpcUrl` to fetch the sequence and
@@ -90,6 +132,17 @@ export interface BatchSimulationResult {
   method: string;
   success: boolean;
   error?: string;
+}
+
+export interface BatchPayload {
+  operations: BuildableOperation[];
+  context: BatchTransactionContext;
+}
+
+export interface BatchSimulationSummary {
+  success: boolean;
+  results: BatchSimulationResult[];
+  invalidIndices: number[];
 }
 
 export class BatchBuildError extends Error {
@@ -358,6 +411,16 @@ export async function preBatchSimulate(
   return results;
 }
 
+export async function simulateBatch(payload: BatchPayload): Promise<BatchSimulationSummary> {
+  const results = await preBatchSimulate(payload.operations, payload.context);
+  const invalidIndices = results.filter((result) => !result.success).map((result) => result.index);
+  return {
+    success: invalidIndices.length === 0,
+    results,
+    invalidIndices,
+  };
+}
+
 /**
  * Build one transaction per operation and prepare each via RPC simulation, so
  * the returned XDR carries its footprint and auth and is ready to submit.
@@ -462,6 +525,41 @@ export async function buildBatchTransactions(
  * - `'ERROR'`    — a local or RPC error prevented submission; `error` is set.
  */
 export type BatchTxStatus = 'SUCCESS' | 'FAILED' | 'SKIPPED' | 'ERROR';
+
+/**
+ * Lenient batch execution outcome: operations continue even if one fails,
+ * collecting detailed results for each. Used by {@link submitBatchLenient}.
+ */
+export interface LenientBatchOutcome {
+  /** Position of this transaction in the original operations array. */
+  index: number;
+  method: string;
+  status: BatchTxStatus;
+  /** Transaction hash, present when status is 'SUCCESS'. */
+  txHash?: string;
+  /** Human-readable reason, present when status is 'FAILED' or 'ERROR'. */
+  error?: string;
+  /** True when this outcome was produced by a dry-run. */
+  dryRun?: boolean;
+}
+
+/**
+ * Summary of lenient batch execution. Unlike {@link submitBatch}, does not
+ * skip remaining transactions when one fails—all are submitted and outcomes
+ * are collected independently.
+ */
+export interface BatchExecutionReport {
+  /** True only when every transaction succeeded. */
+  allSucceeded: boolean;
+  /** Detailed outcome for each transaction in submission order. */
+  outcomes: LenientBatchOutcome[];
+  /** Number of transactions that succeeded on-chain. */
+  successCount: number;
+  /** Number of transactions that failed on-chain or in submission. */
+  failureCount: number;
+  /** Indices of all failed or errored transactions, for retry. */
+  failedIndices: number[];
+}
 
 export interface BatchTxOutcome {
   /** Position of this transaction in the original array. */
@@ -807,5 +905,198 @@ export async function submitBatch(
   }
 
   return result;
+}
+
+// ── Lenient batch submission ──────────────────────────────────────────────────
+
+/**
+ * Submit a built batch with lenient execution: all transactions are submitted
+ * independently, without skipping on failure. Returns a detailed
+ * {@link BatchExecutionReport} mapping outcomes back to operation indices.
+ *
+ * Unlike {@link submitBatch}, does not enforce strict sequence ordering or
+ * stop on first failure. Useful for payroll runs and other scenarios where
+ * partial success is acceptable and you want to know which operations succeeded.
+ *
+ * @param transactions  The array returned by {@link buildBatchTransactions} or
+ *                      {@link buildBatchTransactionsSync}.
+ * @param rpcUrl        Soroban RPC endpoint used to submit and poll.
+ * @param options       Optional signer, polling tuning, and abort signal.
+ */
+export async function submitBatchLenient(
+  transactions: BuiltBatchTransaction[],
+  rpcUrl: string,
+  options: BatchSubmitOptions = {},
+): Promise<BatchExecutionReport> {
+  if (!rpcUrl || typeof rpcUrl !== 'string') {
+    throw new BatchBuildError('submitBatchLenient requires a valid rpcUrl');
+  }
+  if (!Array.isArray(transactions)) {
+    throw new BatchBuildError('submitBatchLenient requires an array of BuiltBatchTransaction');
+  }
+
+  const pollIntervalMs  = options.pollIntervalMs  ?? DEFAULT_SUBMIT_POLL_INTERVAL_MS;
+  const maxPollAttempts = options.maxPollAttempts ?? DEFAULT_SUBMIT_MAX_POLL_ATTEMPTS;
+  const server = createRpcServer(rpcUrl);
+
+  const outcomes: LenientBatchOutcome[] = [];
+
+  function pushOutcome(outcome: LenientBatchOutcome) {
+    outcomes.push(outcome);
+    if (options.onProgress) {
+      try {
+        options.onProgress({ index: outcome.index, method: outcome.method, status: outcome.status });
+      } catch (handlerErr) {
+        console.warn('[submitBatchLenient] onProgress handler error:', handlerErr);
+      }
+    }
+  }
+
+  // Submit all transactions in parallel, then poll in parallel. No sequence
+  // dependency or early-exit logic — all txs get submitted regardless of
+  // others' outcomes.
+  const submissionPromises = transactions.map(async (built) => {
+    if (options.signal?.aborted) {
+      return {
+        index: built.index,
+        method: built.method,
+        status: 'SKIPPED' as BatchTxStatus,
+        error: 'Aborted',
+      };
+    }
+
+    if (options.dryRun) {
+      return {
+        index: built.index,
+        method: built.method,
+        status: 'SUCCESS' as BatchTxStatus,
+        txHash: `dry-run:${built.index}`,
+        dryRun: true,
+      };
+    }
+
+    let xdrToSubmit = built.xdr;
+    if (options.sign) {
+      try {
+        xdrToSubmit = await options.sign(built.xdr);
+      } catch (err) {
+        const msg = err instanceof Error ? err.message : String(err);
+        return {
+          index: built.index,
+          method: built.method,
+          status: 'ERROR' as BatchTxStatus,
+          error: `Sign failed: ${msg}`,
+        };
+      }
+    }
+
+    let sent: SorobanRpc.Api.SendTransactionResponse;
+    try {
+      const tx = new Transaction(xdrToSubmit, options.networkPassphrase ?? '');
+      sent = await server.sendTransaction(tx);
+    } catch (err) {
+      const msg = err instanceof Error ? err.message : String(err);
+      return {
+        index: built.index,
+        method: built.method,
+        status: 'ERROR' as BatchTxStatus,
+        error: `Submit failed: ${msg}`,
+      };
+    }
+
+    if (sent.status === 'ERROR') {
+      const msg = sent.errorResult ? JSON.stringify(sent.errorResult) : 'Transaction rejected by network';
+      return {
+        index: built.index,
+        method: built.method,
+        status: 'FAILED' as BatchTxStatus,
+        error: msg,
+      };
+    }
+
+    return { index: built.index, method: built.method, hash: sent.hash };
+  });
+
+  const submissions = await Promise.all(submissionPromises);
+
+  // Poll all hashes in parallel. Collect outcomes as they complete.
+  const pollPromises = submissions
+    .filter((result): result is { index: number; method: string; hash: string } => 'hash' in result)
+    .map(async ({ index, method, hash }) => {
+      for (let attempt = 0; attempt < maxPollAttempts; attempt++) {
+        await new Promise<void>(resolve => setTimeout(resolve, pollIntervalMs));
+
+        if (options.signal?.aborted) {
+          return {
+            index,
+            method,
+            status: 'ERROR' as BatchTxStatus,
+            error: 'Aborted during polling',
+          };
+        }
+
+        let status: SorobanRpc.Api.GetTransactionResponse;
+        try {
+          status = await server.getTransaction(hash);
+        } catch (err) {
+          const msg = err instanceof Error ? err.message : String(err);
+          return {
+            index,
+            method,
+            status: 'ERROR' as BatchTxStatus,
+            error: `Poll failed: ${msg}`,
+          };
+        }
+
+        if (status.status === SorobanRpc.Api.GetTransactionStatus.SUCCESS) {
+          return { index, method, status: 'SUCCESS' as BatchTxStatus, txHash: hash };
+        }
+
+        if (status.status === SorobanRpc.Api.GetTransactionStatus.FAILED) {
+          return {
+            index,
+            method,
+            status: 'FAILED' as BatchTxStatus,
+            error: `Transaction failed on-chain: ${hash}`,
+          };
+        }
+      }
+
+      return {
+        index,
+        method,
+        status: 'ERROR' as BatchTxStatus,
+        error: `Transaction timed out after ${maxPollAttempts} poll attempts: ${hash}`,
+      };
+    });
+
+  const pollResults = await Promise.all(pollPromises);
+
+  // Merge submission outcomes and poll outcomes.
+  for (const result of submissions) {
+    if ('hash' in result) {
+      // This was a successful submission; look for its poll result.
+      const pollOutcome = pollResults.find(pr => pr.index === result.index);
+      if (pollOutcome) {
+        pushOutcome(pollOutcome as LenientBatchOutcome);
+      }
+    } else {
+      pushOutcome(result as LenientBatchOutcome);
+    }
+  }
+
+  const successCount = outcomes.filter(o => o.status === 'SUCCESS').length;
+  const failureCount = outcomes.length - successCount;
+  const failedIndices = outcomes
+    .filter(o => o.status === 'FAILED' || o.status === 'ERROR')
+    .map(o => o.index);
+
+  return {
+    allSucceeded: failureCount === 0,
+    outcomes,
+    successCount,
+    failureCount,
+    failedIndices,
+  };
 }
 
