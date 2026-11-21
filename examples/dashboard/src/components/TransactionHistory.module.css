@@ -1,0 +1,197 @@
+/* TransactionHistory.module.css */
+/* Fully scoped — no global selectors (see the CSS Modules notes in vite.config.ts). */
+
+.container {
+  display: flex;
+  flex-direction: column;
+  gap: 1rem;
+  padding: 1.5rem;
+  background-color: #ffffff;
+  border-radius: 8px;
+  box-shadow: 0 1px 3px rgba(0, 0, 0, 0.1);
+}
+
+.header {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  justify-content: space-between;
+  gap: 1rem;
+}
+
+.title {
+  margin: 0;
+  font-size: 1.125rem;
+  font-weight: 600;
+  color: #1a1a1a;
+}
+
+.controls {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 0.5rem;
+}
+
+.search {
+  flex: 1 1 220px;
+  min-width: 180px;
+  padding: 0.5rem 0.75rem;
+  font-size: 0.875rem;
+  border: 1px solid #d0d0d0;
+  border-radius: 6px;
+}
+
+.select {
+  flex-shrink: 0;
+  padding: 0.5rem 0.75rem;
+  font-size: 0.875rem;
+  border: 1px solid #d0d0d0;
+  border-radius: 6px;
+  background-color: #ffffff;
+}
+
+.button {
+  flex-shrink: 0;
+  padding: 0.5rem 1rem;
+  font-size: 0.875rem;
+  font-weight: 500;
+  color: #ffffff;
+  background-color: #2563eb;
+  border: none;
+  border-radius: 6px;
+  cursor: pointer;
+}
+
+.button:disabled {
+  background-color: #9db8ea;
+  cursor: not-allowed;
+}
+
+.linkButton {
+  padding: 0;
+  font: inherit;
+  color: #1d4ed8;
+  background: none;
+  border: none;
+  text-decoration: underline;
+  cursor: pointer;
+}
+
+.errorBanner {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 1rem;
+  padding: 0.75rem 1rem;
+  font-size: 0.875rem;
+  color: #92400e;
+  background-color: #fef3c7;
+  border: 1px solid #fcd34d;
+  border-radius: 6px;
+}
+
+.stateBlock {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 0.5rem;
+  padding: 3rem 1.5rem;
+  text-align: center;
+  color: #4b5563;
+  background-color: #f9fafb;
+  border: 1px dashed #e5e7eb;
+  border-radius: 6px;
+}
+
+.stateTitle {
+  margin: 0;
+  font-size: 1rem;
+  font-weight: 600;
+  color: #1f2937;
+}
+
+.stateBody {
+  margin: 0;
+  font-size: 0.875rem;
+  max-width: 42ch;
+}
+
+.tableWrapper {
+  width: 100%;
+  overflow-x: auto;
+}
+
+.table {
+  width: 100%;
+  border-collapse: collapse;
+  font-size: 0.875rem;
+}
+
+.table th {
+  padding: 0.75rem 1rem;
+  text-align: left;
+  font-weight: 600;
+  color: #6b7280;
+  text-transform: uppercase;
+  font-size: 0.75rem;
+  letter-spacing: 0.04em;
+  border-bottom: 1px solid #e5e7eb;
+  white-space: nowrap;
+}
+
+.table td {
+  padding: 0.75rem 1rem;
+  color: #1f2937;
+  border-bottom: 1px solid #f3f4f6;
+  white-space: nowrap;
+}
+
+.amountCell {
+  font-variant-numeric: tabular-nums;
+}
+
+.badge {
+  display: inline-block;
+  padding: 0.125rem 0.5rem;
+  font-size: 0.75rem;
+  font-weight: 600;
+  border-radius: 999px;
+}
+
+.badgeConfirmed {
+  color: #065f46;
+  background-color: #d1fae5;
+}
+
+.badgePending {
+  color: #92400e;
+  background-color: #fef3c7;
+}
+
+.badgeFailed {
+  color: #991b1b;
+  background-color: #fee2e2;
+}
+
+.badgeCancelled {
+  color: #374151;
+  background-color: #e5e7eb;
+}
+
+.badgeUnknown {
+  color: #3730a3;
+  background-color: #e0e7ff;
+}
+
+.pagination {
+  display: flex;
+  align-items: center;
+  justify-content: flex-end;
+  gap: 1rem;
+}
+
+.pageInfo {
+  font-size: 0.875rem;
+  color: #6b7280;
+}

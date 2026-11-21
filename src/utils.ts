@@ -1,23 +1,68 @@
 import type { StreamInfo } from './types/index.js';
 import { StrKey } from '@stellar/stellar-sdk';
 
-/** Convert a display amount string to stroops (bigint) */
-export function toStroops(amount: string, decimals = 7): bigint {
-  const [whole = '0', frac = ''] = amount.split('.');
-  const fracPadded = frac.slice(0, decimals + 1).padEnd(decimals + 1, '0');
-  const fracValue = BigInt(fracPadded);
-  const roundingDigit = Number(fracPadded[decimals] ?? '0');
-  const roundedFrac = roundingDigit >= 5 ? fracValue / 10n + 1n : fracValue / 10n;
-  return BigInt(whole) * BigInt(10 ** decimals) + roundedFrac;
+const POW10: bigint[] = [
+  1n, 10n, 100n, 1000n, 10000n, 100000n, 1000000n, 10000000n,
+  100000000n, 1000000000n, 10000000000n, 100000000000n,
+  1000000000000n, 10000000000000n, 100000000000000n,
+  1000000000000000n, 10000000000000000n, 100000000000000000n,
+  1000000000000000000n, 10000000000000000000n,
+];
+
+function pow10(decimals: number): bigint {
+  return decimals < POW10.length ? POW10[decimals]! : BigInt(10 ** decimals);
 }
 
-/** Convert stroops (bigint) to a display amount string */
+/**
+ * Convert a display amount string to stroops (bigint).
+ *
+ * @example
+ * toStroops('10')        // 100_000_000n  (10 XLM in stroops)
+ * toStroops('0.0000001') //           1n  (1 stroop)
+ * toStroops('1.5')       //  15_000_000n
+ */
+export function toStroops(amount: string, decimals = 7): bigint {
+  if (!/^\d*(\.\d*)?$/.test(amount) || amount === '.' || amount === '') {
+    throw new Error(`Invalid amount format: "${amount}"`);
+  }
+  const dotIndex = amount.indexOf('.');
+  const whole = dotIndex === -1 ? amount : amount.slice(0, dotIndex);
+  const frac = dotIndex === -1 ? '' : amount.slice(dotIndex + 1);
+  const fracLen = frac.length;
+  const needed = decimals + 1;
+  let fracPadded: string;
+  if (fracLen >= needed) {
+    fracPadded = frac.slice(0, needed);
+  } else {
+    fracPadded = frac + '0'.repeat(needed - fracLen);
+  }
+  const fracValue = BigInt(fracPadded);
+  const roundingDigit = fracPadded.charCodeAt(decimals) - 48;
+  const roundedFrac = roundingDigit >= 5 ? fracValue / 10n + 1n : fracValue / 10n;
+  return BigInt(whole) * pow10(decimals) + roundedFrac;
+}
+
+/**
+ * Convert stroops (bigint) to a display amount string.
+ *
+ * @example
+ * fromStroops(100_000_000n) // '10.0'   (100 000 000 stroops = 10 XLM)
+ * fromStroops(1n)           // '0.0000001'
+ * fromStroops(-50_000_000n) // '-5.0'
+ */
 export function fromStroops(stroops: bigint, decimals = 7): string {
-  const factor  = BigInt(10 ** decimals);
-  const whole   = stroops / factor;
-  const frac    = (stroops % factor).toString().padStart(decimals, '0');
-  const trimmed = frac.replace(/0+$/, '') || '0';
-  return `${whole}.${trimmed}`;
+  const neg = stroops < 0n;
+  const abs = neg ? -stroops : stroops;
+  const factor = pow10(decimals);
+  const whole = abs / factor;
+  const rem = abs % factor;
+  const frac = rem.toString().padStart(decimals, '0');
+  let end = frac.length;
+  while (end > 1 && frac.charCodeAt(end - 1) === 48) {
+    end--;
+  }
+  const trimmed = frac.slice(0, end);
+  return `${neg ? '-' : ''}${whole}.${trimmed}`;
 }
 
 /**
@@ -26,27 +71,80 @@ export function fromStroops(stroops: bigint, decimals = 7): string {
  * @param depositAmount  Display amount string, e.g. '1000'
  * @param durationSecs   Duration in seconds
  * @param decimals       Token decimal places (default 7 for Stellar assets)
+ *
+ * @example
+ * // Stream 3 600 XLM over 1 year (31 536 000 s) ≈ 1141 stroops/s
+ * calculateRate('3600', 31_536_000) // 1141n
+ *
+ * // Stream 100 XLM over 30 days (2 592 000 s)
+ * calculateRate('100', 2_592_000)   // 3858n
  */
 export function calculateRate(depositAmount: string, durationSecs: number, decimals = 7): bigint {
+  if (!Number.isInteger(durationSecs) || durationSecs <= 0) {
+    throw new Error(`durationSecs must be a positive integer, got ${durationSecs}`);
+  }
   const stroops = toStroops(depositAmount, decimals);
   const divisor = BigInt(durationSecs);
   if (divisor === 0n) return 0n;
   const quotient = stroops / divisor;
-  const remainder = stroops % divisor;
-  // Round to nearest: if remainder >= half the divisor, round up
+  const remainder = stroops - quotient * divisor;
   return remainder * 2n >= divisor ? quotient + 1n : quotient;
 }
 
 /**
+ * Calculate the total yield (streamed amount) over a given duration.
+ *
+ * Uses BigInt throughout to avoid precision loss with large amounts.
+ * Returns a formatted display string with 7 decimal places.
+ *
+ * @param ratePerSecond  Stream rate in stroops per second
+ * @param durationSecs   Duration in seconds (default 1 year = 31,536,000)
+ * @param decimals       Token decimal places (default 7 for Stellar assets)
+ */
+export function calculateYield(
+  ratePerSecond: bigint,
+  durationSecs = 31_536_000,
+  decimals = 7,
+): string {
+  if (!Number.isInteger(durationSecs) || durationSecs <= 0) {
+    throw new Error(`durationSecs must be a positive integer, got ${durationSecs}`);
+  }
+  const totalStroops = ratePerSecond * BigInt(durationSecs);
+  return fromStroops(totalStroops, decimals);
+}
+
+/**
  * Current progress fraction (0-1) of a stream.
- * Returns 0 if not started, 1 if ended.
+ * Returns 0 if not started, 1 if ended, and NaN for open-ended streams
+ * that have started but do not have a finite completion percentage.
  */
 export function streamProgress(stream: StreamInfo, nowSec = Math.floor(Date.now() / 1000)): number {
   const { startTime, endTime } = stream;
   if (nowSec < startTime) return 0;
-  if (endTime === 0)       return 0;  // open-ended
+  if (endTime === 0)       return Number.NaN;  // open-ended
   if (nowSec >= endTime)   return 1;
   return (nowSec - startTime) / (endTime - startTime);
+}
+
+/** Seconds remaining until a finite stream is fully vested. */
+export function remainingTime(stream: StreamInfo, nowSec = Math.floor(Date.now() / 1000)): number {
+  if (stream.endTime === 0 || nowSec >= stream.endTime) return 0;
+  return stream.endTime - nowSec;
+}
+
+/** Estimated wall-clock date at which a stream is fully vested. */
+export function estimatedCompletionDate(stream: StreamInfo): Date {
+  return new Date(stream.endTime * 1000);
+}
+
+/**
+ * Normalizes a `streamProgress()` result for display/comparison purposes,
+ * mapping the NaN case (open-ended stream that has started) to the
+ * midpoint 0.5. Shared by Module36 and Module48 so their progress deltas
+ * agree at the edges instead of drifting via independent reimplementations.
+ */
+export function normalizeProgress(value: number): number {
+  return Number.isNaN(value) ? 0.5 : value;
 }
 
 /**
@@ -56,11 +154,14 @@ export function streamProgress(stream: StreamInfo, nowSec = Math.floor(Date.now(
 export function withdrawableLocal(stream: StreamInfo, nowSec = Math.floor(Date.now() / 1000)): bigint {
   if (stream.cancelled) return 0n;
 
-  const effectiveNow = stream.paused
-    ? stream.pausedAt
-    : stream.endTime > 0 && nowSec > stream.endTime
-    ? stream.endTime
-    : nowSec;
+  // Mirror the on-chain `math::streamed_amount` clamp order
+  // (contracts/stream/src/math.rs): clamp to `endTime` first — a stream that
+  // has ended has fully streamed regardless of pause state — then, only while
+  // the stream is still running, freeze accrual at `pausedAt`.
+  const endClamped =
+    stream.endTime > 0 && nowSec > stream.endTime ? stream.endTime : nowSec;
+  const effectiveNow =
+    stream.paused && stream.pausedAt < endClamped ? stream.pausedAt : endClamped;
 
   if (effectiveNow < stream.startTime) return 0n;
 
@@ -73,8 +174,151 @@ export function withdrawableLocal(stream: StreamInfo, nowSec = Math.floor(Date.n
 }
 
 /**
+ * Cumulative amount streamed since the stream started, from a StreamInfo
+ * snapshot, without a contract call. The local counterpart of
+ * `StreamsModule.streamedTotal()`.
+ *
+ * Unlike {@link withdrawableLocal}, `withdrawn` is not subtracted, so the
+ * value keeps counting up after withdrawals. Accounts for pause state and
+ * `endTime` with the same clamp order as {@link withdrawableLocal}.
+ *
+ * `StreamInfo` does not record when a stream was cancelled, so the amount
+ * streamed up to that moment cannot be projected. A cancelled stream
+ * therefore reports `withdrawn`, the amount known to have been paid out (a
+ * lower bound), instead of continuing to accrue.
+ */
+export function streamedTotalLocal(stream: StreamInfo, nowSec = Math.floor(Date.now() / 1000)): bigint {
+  if (stream.cancelled) return stream.withdrawn;
+
+  // Same clamp order as `withdrawableLocal` (see the note there): `endTime`
+  // first, then freeze at `pausedAt` only while the stream is still running.
+  const endClamped =
+    stream.endTime > 0 && nowSec > stream.endTime ? stream.endTime : nowSec;
+  const effectiveNow =
+    stream.paused && stream.pausedAt < endClamped ? stream.pausedAt : endClamped;
+
+  if (effectiveNow < stream.startTime) return 0n;
+
+  const elapsed = effectiveNow - stream.startTime;
+  if (elapsed <= 0) return 0n;
+
+  return stream.ratePerSecond * BigInt(elapsed);
+}
+
+/**
+ * Classifies a stream's current lifecycle state.
+ *
+ * Precedence mirrors the on-chain clamp order used by {@link withdrawableLocal}:
+ * `cancelled` wins outright, then a stream past its `endTime` is `completed`
+ * regardless of pause state (a stream that has ended has fully streamed), then
+ * `paused`, otherwise `active`. A stream that hasn't reached `startTime` yet is
+ * reported as `active` since none of the other three states apply.
+ *
+ * @example
+ * streamStatus(stream)          // 'active'
+ * streamStatus(cancelledStream) // 'cancelled'
+ */
+export function streamStatus(
+  stream: StreamInfo,
+  nowSec = Math.floor(Date.now() / 1000),
+): 'active' | 'paused' | 'completed' | 'cancelled' {
+  if (stream.cancelled) return 'cancelled';
+  if (stream.endTime !== 0 && nowSec >= stream.endTime) return 'completed';
+  if (stream.paused) return 'paused';
+  return 'active';
+}
+
+const DURATION_UNIT_SECONDS: Record<string, number> = {
+  d: 86400,
+  h: 3600,
+  m: 60,
+  s: 1,
+};
+
+/**
+ * Formats a duration in seconds as a short human-readable string.
+ *
+ * @example
+ * formatDuration(45)      // '45s'
+ * formatDuration(90)      // '1m 30s'
+ * formatDuration(5400)    // '1h 30m'
+ * formatDuration(90000)   // '1d 1h'
+ * formatDuration(172800)  // '2d'
+ */
+export function formatDuration(seconds: number): string {
+  if (!Number.isFinite(seconds) || seconds < 0) {
+    throw new Error(`seconds must be a non-negative finite number, got ${seconds}`);
+  }
+  const total = Math.floor(seconds);
+  if (total < 60) return `${total}s`;
+  if (total < 3600) {
+    const minutes = Math.floor(total / 60);
+    const secs = total % 60;
+    return secs > 0 ? `${minutes}m ${secs}s` : `${minutes}m`;
+  }
+  if (total < 86400) {
+    const hours = Math.floor(total / 3600);
+    const minutes = Math.floor((total % 3600) / 60);
+    return minutes > 0 ? `${hours}h ${minutes}m` : `${hours}h`;
+  }
+  const days = Math.floor(total / 86400);
+  const hours = Math.floor((total % 86400) / 3600);
+  return hours > 0 ? `${days}d ${hours}h` : `${days}d`;
+}
+
+/**
+ * Parses a human-readable duration string (as produced by {@link formatDuration})
+ * back into seconds, e.g. for a "create stream" form field.
+ *
+ * Accepts one or more `<number><unit>` tokens (`d`, `h`, `m`, `s`), optionally
+ * space-separated, in any order — `'1h30m'` and `'30m 1h'` both work. Throws on
+ * unparseable input instead of silently returning `NaN` or `0`.
+ *
+ * @example
+ * parseDuration('1h30m') // 5400
+ * parseDuration('2d')    // 172800
+ * parseDuration('45s')   // 45
+ *
+ * @throws {Error} If `input` contains no valid duration tokens, or contains
+ * any characters that aren't part of one.
+ */
+export function parseDuration(input: string): number {
+  if (typeof input !== 'string' || input.trim() === '') {
+    throw new Error(`Invalid duration string: "${input}"`);
+  }
+  const trimmed = input.trim();
+  const re = /(\d+)\s*(d|h|m|s)/gi;
+  let match: RegExpExecArray | null;
+  let totalSeconds = 0;
+  let matchedLength = 0;
+  let foundAny = false;
+
+  while ((match = re.exec(trimmed)) !== null) {
+    foundAny = true;
+    matchedLength += match[0].length;
+    const value = Number(match[1]);
+    const unit = match[2]!.toLowerCase();
+    totalSeconds += value * DURATION_UNIT_SECONDS[unit]!;
+  }
+
+  // The matched tokens (whitespace-stripped) must account for the entire
+  // input; otherwise junk like '1x' or trailing garbage silently drops.
+  const strippedLength = trimmed.replace(/\s+/g, '').length;
+  if (!foundAny || matchedLength !== strippedLength) {
+    throw new Error(`Unparseable duration string: "${input}"`);
+  }
+
+  return totalSeconds;
+}
+
+/**
  * Recursively convert all bigint values in a value to their string
  * representation.  Safe for objects, arrays, and primitives.
+ *
+ * Uses lazy cloning: only allocates a new object or array when at
+ * least one descendant value is a bigint that gets converted to a
+ * string.  When no bigints are present the original value is returned
+ * unchanged, avoiding unnecessary allocations and GC pressure.
  *
  * Safari / WebKit serialises `bigint` values as `{}` inside
  * `JSON.stringify`, which breaks payloads sent to the GraphQL
@@ -82,35 +326,278 @@ export function withdrawableLocal(stream: StreamInfo, nowSec = Math.floor(Date.n
  * interoperability across all browsers.
  */
 export function bigintSafeStringify<T>(value: T): T {
-  if (typeof value === 'bigint') {
+  // Primitives: convert bigint, pass everything else through as-is.
+  if (value === null || typeof value !== 'object') {
     // eslint-disable-next-line @typescript-eslint/no-explicit-any
-    return value.toString() as any;
+    return typeof value === 'bigint' ? (value.toString() as any) : value;
   }
+
+  // Arrays: only allocate a new array if at least one element changed.
   if (Array.isArray(value)) {
-    return value.map(bigintSafeStringify) as unknown as T;
-  }
-  if (value !== null && typeof value === 'object') {
-    const out: Record<string, unknown> = {};
-    for (const [k, v] of Object.entries(value as Record<string, unknown>)) {
-      out[k] = bigintSafeStringify(v);
+    let changed = false;
+    const arr = new Array(value.length);
+    for (let i = 0; i < value.length; i++) {
+      // eslint-disable-next-line @typescript-eslint/no-explicit-any
+      const orig = value[i] as any;
+      const stringified = bigintSafeStringify(orig);
+      if (stringified !== orig) changed = true;
+      arr[i] = stringified;
     }
-    return out as T;
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any
+    return (changed ? arr : value) as any;
   }
-  return value;
+
+  // Plain objects: only allocate a new object if at least one property changed.
+  let changed = false;
+  const out: Record<string, unknown> = {};
+  const keys = Object.keys(value);
+
+  for (let i = 0; i < keys.length; i++) {
+    const k = keys[i]!;
+    const orig = (value as Record<string, unknown>)[k];
+    const stringified = bigintSafeStringify(orig);
+    if (stringified !== orig) changed = true;
+    out[k] = stringified;
+  }
+
+  return (changed ? out : value) as unknown as T;
 }
 
 /**
  * Validates whether a string is a well-formed Stellar public key
- * (account address, e.g. 'GABC...XYZ').
+ * (account address, e.g. 'GABC...XYZ') or Soroban contract address ('CABC...XYZ').
  *
  * Performs static format validation only (StrKey encoding, version byte,
- * checksum) -- it does not check whether the account exists on-chain.
+ * checksum) -- it does not check whether the account or contract exists on-chain.
  * Use this to fail fast before submission, e.g. before passing a recipient
  * into client.streams.create().
+ *
+ * @example
+ * isValidAddress('GAHJJJKMOKYE4RVPZEWZTKH5FVI4PA3VL7GK2LFNUBSGBV3CCWFCNJJJ') // true  — G... account
+ * isValidAddress('CAHJJJKMOKYE4RVPZEWZTKH5FVI4PA3VL7GK2LFNUBSGBV3CCWFCNJJJ') // true  — C... contract
+ * isValidAddress('not-an-address')                                              // false
+ * isValidAddress('')                                                            // false
  */
 export function isValidAddress(address: string): boolean {
   if (typeof address !== 'string' || address.length === 0) {
     return false;
   }
-  return StrKey.isValidEd25519PublicKey(address);
+  return StrKey.isValidEd25519PublicKey(address) || StrKey.isValidContract(address);
+}
+
+/**
+ * Validates and normalizes a Stellar address string.
+ *
+ * Performs full type validation and checksum verification using
+ * {@link StrKey}. Returns a structured result with validation status,
+ * any error message, and the normalized address on success.
+ *
+ * @example
+ * ```ts
+ * validateAndNormalizeAddress('GAHJJJKMOKYE4RVPZEWZTKH5FVI4PA3VL7GK2LFNUBSGBV3CCWFCNJJJ')
+ * // { isValid: true, address: 'GAHJJJKMOKYE4RVPZEWZTKH5FVI4PA3VL7GK2LFNUBSGBV3CCWFCNJJJ' }
+ *
+ * validateAndNormalizeAddress('not-an-address')
+ * // { isValid: false, error: 'Invalid Stellar address' }
+ * ```
+ */
+export function validateAndNormalizeAddress(address: string): { isValid: boolean, error?: string, address?: string } {
+  if (typeof address !== 'string' || address.length === 0) {
+    return { isValid: false, error: 'Address must be a non-empty string' };
+  }
+
+  try {
+    if (StrKey.isValidEd25519PublicKey(address)) {
+      const decoded = StrKey.decodeEd25519PublicKey(address);
+      const normalized = StrKey.encodeEd25519PublicKey(decoded);
+      return { isValid: true, address: normalized };
+    }
+
+    if (StrKey.isValidContract(address)) {
+      const decoded = StrKey.decodeContract(address);
+      const normalized = StrKey.encodeContract(decoded);
+      return { isValid: true, address: normalized };
+    }
+
+    return { isValid: false, error: 'Invalid Stellar address: not a valid ed25519 public key or contract address' };
+  } catch (err) {
+    return {
+      isValid: false,
+      error: err instanceof Error ? err.message : 'Invalid Stellar address',
+    };
+  }
+}
+
+/**
+ * Sum of withdrawable balances across multiple streams.
+ *
+ * Computes the total amount currently withdrawable from an array of streams
+ * without making any contract calls. Each stream's local withdrawable balance
+ * is computed using the same logic as the on-chain `withdrawable()` query,
+ * accounting for stream state (paused/cancelled/completed) and time.
+ *
+ * @param streams Array of StreamInfo objects
+ * @param nowSec  Current time in seconds (defaults to now)
+ * @returns Total withdrawable amount in stroops across all streams
+ */
+export function sumWithdrawable(streams: StreamInfo[], nowSec = Math.floor(Date.now() / 1000)): bigint {
+  return streams.reduce((sum, stream) => sum + withdrawableLocal(stream, nowSec), 0n);
+}
+
+/**
+ * Sum of the cumulative amounts streamed across multiple streams.
+ *
+ * Computes the total amount streamed so far from an array of streams without
+ * making any contract calls, using {@link streamedTotalLocal} for each one.
+ * Unlike {@link sumWithdrawable}, withdrawals are not subtracted, so the total
+ * keeps counting up after recipients withdraw.
+ *
+ * @param streams Array of StreamInfo objects
+ * @param nowSec  Current time in seconds (defaults to now)
+ * @returns Total streamed amount in stroops across all streams
+ */
+export function sumStreamedTotal(streams: StreamInfo[], nowSec = Math.floor(Date.now() / 1000)): bigint {
+  return streams.reduce((sum, stream) => sum + streamedTotalLocal(stream, nowSec), 0n);
+}
+
+/**
+ * A portable `AbortSignal` that aborts after `ms` milliseconds — pass it as
+ * the `signal` option to any SDK method that accepts one, e.g.
+ *
+ *     await client.streams.withdrawable(id, { signal: timeoutSignal(5_000) });
+ *
+ * Uses the native `AbortSignal.timeout()` when the runtime provides it
+ * (Node >= 17.3 / Deno >= 1.20 / Chrome 103 / Firefox 100 / Safari 15.4) and
+ * otherwise falls back to an `AbortController` + `setTimeout`, with `unref()`
+ * on Node so a pending timeout does not keep the process alive.
+ */
+export function timeoutSignal(ms: number): AbortSignal {
+  const AS = AbortSignal as unknown as { timeout?: (ms: number) => AbortSignal };
+  if (typeof AS.timeout === 'function') {
+    return AS.timeout(ms);
+  }
+  const controller = new AbortController();
+  const timer = setTimeout(
+    () => controller.abort(new DOMException('The operation timed out.', 'TimeoutError')),
+    ms,
+  );
+  (timer as unknown as { unref?: () => void }).unref?.();
+  return controller.signal;
+}
+
+/**
+ * Format a raw token amount (in stroops/smallest unit) to a human-readable string
+ * with configurable decimal precision.
+ *
+ * @param amount - The raw amount as bigint or string (e.g., stroops for XLM)
+ * @param decimals - The number of decimals the token uses (e.g., 7 for XLM, 6 for USDC)
+ * @param displayDecimals - Optional: number of decimal places to display (default: decimals)
+ *                          Always shows exactly this many decimal places, padding with zeros if needed.
+ *
+ * @example
+ * ```ts
+ * // XLM with 7 decimals
+ * formatTokenAmount(10_000_000n, 7)        // '1.0000000'
+ * formatTokenAmount(10_000_000n, 7, 2)     // '1.00'
+ * formatTokenAmount(1234567n, 7)           // '0.1234567'
+ *
+ * // USDC with 6 decimals
+ * formatTokenAmount('1000000', 6)          // '1.000000'
+ * formatTokenAmount('1500000', 6, 2)       // '1.50'
+ *
+ * // Custom precision
+ * formatTokenAmount(123456789n, 8, 4)      // '1.2346' (rounded)
+ * ```
+ */
+export function formatTokenAmount(
+  amount: bigint | string,
+  decimals: number,
+  displayDecimals?: number,
+): string {
+  const displayDec = displayDecimals ?? decimals;
+  const factor = pow10(decimals);
+  const displayFactor = pow10(displayDec);
+
+  // Convert amount to bigint if it's a string
+  const amountBI = typeof amount === 'string' ? BigInt(amount) : amount;
+
+  // Handle negative amounts
+  const neg = amountBI < 0n;
+  const absAmount = neg ? -amountBI : amountBI;
+
+  // Calculate whole and fractional parts
+  const whole = absAmount / factor;
+  const rem = absAmount % factor;
+
+  if (displayDec === 0) {
+    // No decimal places needed - just round the whole number
+    const rounded = (rem * 2n >= factor) ? whole + 1n : whole;
+    return `${neg ? '-' : ''}${rounded.toString()}`;
+  }
+
+  // Scale remainder to display precision with rounding
+  // We need to multiply remainder by 10^displayDec and divide by 10^decimals
+  const scaledRem = (rem * displayFactor + factor / 2n) / factor; // rounding
+  const cappedRem = scaledRem >= displayFactor ? 0n : scaledRem; // handle carry
+  const carry = scaledRem >= displayFactor ? 1n : 0n;
+
+  const wholeWithCarry = whole + carry;
+  const fracStr = cappedRem.toString().padStart(displayDec, '0');
+
+  // Always show exactly displayDec decimal places (including trailing zeros)
+  // This matches the expected behavior for token display
+  return `${neg ? '-' : ''}${wholeWithCarry.toString()}.${fracStr}`;
+}
+
+/** Rounding mode for {@link divWithRounding}. */
+export type DivRoundingMode = 'floor' | 'ceil' | 'round';
+
+/**
+ * Integer division with explicit rounding (#1102).
+ *
+ * Native `BigInt` division truncates toward zero, which silently under-counts
+ * when distributing a deposit over a duration (and rounds negative results the
+ * "wrong" way). This makes the direction explicit:
+ *
+ * - `'floor'` rounds toward negative infinity.
+ * - `'ceil'` rounds toward positive infinity.
+ * - `'round'` rounds to the nearest integer, with halves rounded away from zero.
+ *
+ * @throws {RangeError} When `denominator` is `0n`.
+ *
+ * @example
+ * ```ts
+ * divWithRounding(10n, 3n, 'floor'); // 3n
+ * divWithRounding(10n, 3n, 'ceil');  // 4n
+ * divWithRounding(5n, 2n, 'round');  // 3n
+ * ```
+ */
+export function divWithRounding(
+  numerator: bigint,
+  denominator: bigint,
+  mode: DivRoundingMode = 'floor',
+): bigint {
+  if (denominator === 0n) {
+    throw new RangeError('divWithRounding: division by zero');
+  }
+  const quotient = numerator / denominator;
+  const remainder = numerator % denominator;
+  if (remainder === 0n) return quotient;
+
+  // Truncation moved a negative result toward zero, i.e. up.
+  const negative = (numerator < 0n) !== (denominator < 0n);
+  switch (mode) {
+    case 'floor':
+      return negative ? quotient - 1n : quotient;
+    case 'ceil':
+      return negative ? quotient : quotient + 1n;
+    case 'round': {
+      const absRemainder = remainder < 0n ? -remainder : remainder;
+      const absDenominator = denominator < 0n ? -denominator : denominator;
+      if (absRemainder * 2n < absDenominator) return quotient;
+      return negative ? quotient - 1n : quotient + 1n;
+    }
+    default:
+      throw new RangeError(`divWithRounding: unknown rounding mode "${String(mode)}"`);
+  }
 }

@@ -4,14 +4,22 @@ import { WebSocketRelayer } from '../relayer/WebSocketRelayer.js';
 function createMockWs(): { mock: any; onmessage: () => Function | null } {
   let onmessage: Function | null = null;
   let onopen: Function | null = null;
+  let onclose: Function | null = null;
   const mock = {
     readyState: 1,
     send: vi.fn(),
-    close: vi.fn(),
+    close: vi.fn(() => {
+      mock.readyState = 3;
+      setTimeout(() => {
+        if (onclose) onclose();
+      }, 0);
+    }),
     set onmessage(fn: any) { onmessage = fn; },
     get onmessage() { return onmessage; },
     set onopen(fn: any) { onopen = fn; if (fn) setTimeout(fn, 0); },
     get onopen() { return onopen; },
+    set onclose(fn: any) { onclose = fn; },
+    get onclose() { return onclose; },
   };
   return { mock, onmessage: () => onmessage };
 }
@@ -25,7 +33,7 @@ describe('WebSocketRelayer — High-Concurrency Stress Tests', () => {
     const created = createMockWs();
     mockWs = created.mock;
     getOnmessage = created.onmessage;
-    (global as any).WebSocket = vi.fn(() => mockWs) as any;
+    (global as any).WebSocket = vi.fn(function () { return mockWs; }) as any;
     relayer = new WebSocketRelayer('ws://localhost:8080', {
       maxReconnectAttempts: 2,
       reconnectDelayMs: 10,
@@ -55,8 +63,44 @@ describe('WebSocketRelayer — High-Concurrency Stress Tests', () => {
     }
     await Promise.all(promises);
 
+    // connectPromise is now assigned synchronously, before the first await,
+    // so every one of these 20 calls shares the same in-flight promise
+    // instead of some of them racing into the lock queue and only checking
+    // for an existing connection once they're finally granted it — the
+    // previously-tolerated "at most 2" is now a hard guarantee of 1 (#492).
     const wsConstructors = (global as any).WebSocket.mock.calls.length;
-    expect(wsConstructors).toBeLessThanOrEqual(2);
+    expect(wsConstructors).toBe(1);
+  });
+
+  it('rejects connect when the socket emits an error before opening', async () => {
+    class ErroringWebSocket {
+      readyState = 0;
+      onopen: (() => void) | null = null;
+      onmessage: ((event: { data: string }) => void) | null = null;
+      onclose: (() => void) | null = null;
+      onerror: (() => void) | null = null;
+      send = vi.fn();
+      close = vi.fn();
+
+      constructor() {
+        setTimeout(() => {
+          this.onerror?.();
+        }, 0);
+      }
+    }
+
+    (global as any).WebSocket = vi.fn(function () { return new ErroringWebSocket(); }) as any;
+    const failingRelayer = new WebSocketRelayer('ws://localhost:65535', {
+      maxReconnectAttempts: 0,
+      reconnectDelayMs: 1,
+    });
+
+    await expect(failingRelayer.connect()).rejects.toThrow(
+      'WebSocket connection failed: ws://localhost:65535',
+    );
+    expect((global as any).WebSocket).toHaveBeenCalledTimes(1);
+
+    failingRelayer.destroy();
   });
 
   it('queues messages sent before connection and flushes on connect', async () => {
@@ -142,6 +186,21 @@ describe('WebSocketRelayer — High-Concurrency Stress Tests', () => {
     }
   });
 
+  it('does not reconnect after an intentional disconnect close event', async () => {
+    await relayer.connect();
+    expect((global as any).WebSocket).toHaveBeenCalledTimes(1);
+
+    relayer.disconnect();
+    await new Promise((resolve) => setTimeout(resolve, 20));
+
+    expect((global as any).WebSocket).toHaveBeenCalledTimes(1);
+    expect(relayer.state.connected).toBe(false);
+    expect(relayer.state.reconnecting).toBe(false);
+
+    await relayer.connect();
+    expect((global as any).WebSocket).toHaveBeenCalledTimes(2);
+  });
+
   it('delivers messages to the correct handler based on type', async () => {
     const priceHandler = vi.fn();
     const tradeHandler = vi.fn();
@@ -218,5 +277,321 @@ describe('WebSocketRelayer — High-Concurrency Stress Tests', () => {
     relayer.send({ type: 'test', payload: {} }).catch(() => {});
 
     expect(relayer.state.pendingCount).toBe(3);
+  });
+
+  it('bounds the pending queue instead of growing it without limit', async () => {
+    const bounded = new WebSocketRelayer('ws://localhost:8082', {
+      maxReconnectAttempts: 0,
+      maxPendingMessages: 5,
+    });
+
+    for (let i = 0; i < 20; i++) {
+      bounded.send({ type: 'test', payload: { index: i } }).catch(() => {});
+    }
+
+    expect(bounded.state.pendingCount).toBe(5);
+    bounded.destroy();
+  });
+
+  it('drops the oldest queued message once the bound is reached, keeping the newest', async () => {
+    const bounded = new WebSocketRelayer('ws://localhost:8083', {
+      maxReconnectAttempts: 0,
+      maxPendingMessages: 2,
+    });
+
+    await bounded.send({ type: 'msg', payload: {}, id: '1' });
+    await bounded.send({ type: 'msg', payload: {}, id: '2' });
+    await bounded.send({ type: 'msg', payload: {}, id: '3' });
+
+    expect(bounded.state.pendingCount).toBe(2);
+    bounded.destroy();
+  });
+
+  it('rejects send() once reconnect attempts are exhausted instead of queueing forever', async () => {
+    class NeverOpensWebSocket {
+      readyState = 0;
+      onopen: (() => void) | null = null;
+      onmessage: ((event: { data: string }) => void) | null = null;
+      onclose: (() => void) | null = null;
+      onerror: (() => void) | null = null;
+      send = vi.fn();
+      close = vi.fn();
+
+      constructor() {
+        setTimeout(() => {
+          this.onerror?.();
+          this.onclose?.();
+        }, 0);
+      }
+    }
+
+    (global as any).WebSocket = vi.fn(function () { return new NeverOpensWebSocket(); }) as any;
+    const doomed = new WebSocketRelayer('ws://localhost:65534', {
+      maxReconnectAttempts: 0,
+      reconnectDelayMs: 1,
+    });
+
+    await expect(doomed.connect()).rejects.toThrow();
+    // Let the onclose-triggered attemptReconnect() observe attempts are exhausted.
+    await new Promise((resolve) => setTimeout(resolve, 10));
+
+    await expect(doomed.send({ type: 'test', payload: {} })).rejects.toThrow(/exhausted/);
+
+    doomed.destroy();
+  });
+
+  it('notifies subscribers when connection state changes', async () => {
+    const handler = vi.fn();
+    const unsubscribe = relayer.onStateChange(handler);
+
+    await relayer.connect();
+    relayer.disconnect();
+
+    expect(handler.mock.calls.map(([transition]) => transition)).toEqual([
+      'connecting',
+      'connected',
+      'disconnected',
+    ]);
+    expect(handler.mock.calls[1]![1]).toMatchObject({
+      connected: true,
+      destroyed: false,
+    });
+
+    unsubscribe();
+    relayer.destroy();
+
+    expect(handler).toHaveBeenCalledTimes(3);
+  });
+
+  it('resets reconnecting state to false and emits disconnected when reconnect attempts are exhausted (#516)', async () => {
+    class AlwaysFailingWebSocket {
+      readyState = 0;
+      onopen: (() => void) | null = null;
+      onmessage: ((event: { data: string }) => void) | null = null;
+      onclose: (() => void) | null = null;
+      onerror: (() => void) | null = null;
+      send = vi.fn();
+      close = vi.fn();
+
+      constructor() {
+        setTimeout(() => {
+          this.onerror?.();
+          this.onclose?.();
+        }, 0);
+      }
+    }
+
+    (global as any).WebSocket = vi.fn(function () { return new AlwaysFailingWebSocket(); }) as any;
+    const stateHistory: Array<{ transition: string; state: any }> = [];
+    const doomed = new WebSocketRelayer('ws://localhost:65533', {
+      maxReconnectAttempts: 2,
+      reconnectDelayMs: 5,
+      onStateChange: (transition, state) => {
+        stateHistory.push({ transition, state: { ...state } });
+      },
+    });
+
+    await expect(doomed.connect()).rejects.toThrow();
+
+    // Wait for all 2 reconnect attempts to complete and exhaust
+    await new Promise((resolve) => setTimeout(resolve, 80));
+
+    // Reconnection is exhausted; reconnecting must NOT be stuck at true
+    expect(doomed.state.connected).toBe(false);
+    expect(doomed.state.reconnecting).toBe(false);
+    expect(doomed.state.destroyed).toBe(false);
+
+    // Final emitted transition must be disconnected with reconnecting: false
+    const lastEvent = stateHistory[stateHistory.length - 1];
+    expect(lastEvent?.transition).toBe('disconnected');
+    expect(lastEvent?.state.reconnecting).toBe(false);
+    expect(lastEvent?.state.connected).toBe(false);
+
+    // A fresh connect() resets the exhausted state and attempts reconnect again
+    const connectPromise = doomed.connect();
+    expect(doomed.state.reconnecting).toBe(false);
+    await expect(connectPromise).rejects.toThrow();
+
+    doomed.destroy();
+  });
+
+  it('resets reconnecting state to false and aborts mid-reconnect on disconnect() (#619)', async () => {
+    class FailingOnceWebSocket {
+      readyState = 0;
+      onopen: (() => void) | null = null;
+      onmessage: ((event: { data: string }) => void) | null = null;
+      onclose: (() => void) | null = null;
+      onerror: (() => void) | null = null;
+      send = vi.fn();
+      close = vi.fn();
+
+      constructor() {
+        setTimeout(() => {
+          this.onerror?.();
+          this.onclose?.();
+        }, 0);
+      }
+    }
+
+    (global as any).WebSocket = vi.fn(function () { return new FailingOnceWebSocket(); }) as any;
+    
+    let disconnectCount = 0;
+    const relayer = new WebSocketRelayer('ws://localhost:65532', {
+      maxReconnectAttempts: 5,
+      reconnectDelayMs: 20,
+      onStateChange: (transition) => {
+        if (transition === 'disconnected') {
+          disconnectCount++;
+        }
+      },
+    });
+
+    const connectPromise = relayer.connect().catch(() => {});
+
+    await new Promise((resolve) => {
+      const unsub = relayer.onStateChange((transition) => {
+        if (transition === 'reconnecting') {
+          unsub();
+          resolve(undefined);
+        }
+      });
+    });
+
+    expect(relayer.state.reconnecting).toBe(true);
+    
+    disconnectCount = 0;
+    relayer.disconnect();
+    
+    expect(relayer.state.reconnecting).toBe(false);
+    expect(disconnectCount).toBe(1);
+
+    await new Promise((resolve) => setTimeout(resolve, 50));
+    
+    expect((global as any).WebSocket).toHaveBeenCalledTimes(1);
+    expect(disconnectCount).toBe(1);
+
+    await connectPromise;
+    relayer.destroy();
+  });
+});
+
+describe('WebSocketRelayer — Heartbeat/Ping Support', () => {
+  let relayer: WebSocketRelayer;
+  let mockWs: any;
+  let getOnmessage: () => Function | null;
+
+  beforeEach(() => {
+    const created = createMockWs();
+    mockWs = created.mock;
+    getOnmessage = created.onmessage;
+    (global as any).WebSocket = vi.fn(function () { return mockWs; }) as any;
+  });
+
+  afterEach(() => {
+    if (relayer) relayer.destroy();
+    delete (global as any).WebSocket;
+  });
+
+  it('sends ping at configurable heartbeat intervals', async () => {
+    vi.useFakeTimers();
+    relayer = new WebSocketRelayer('ws://localhost:8080', {
+      heartbeatIntervalMs: 1000,
+      heartbeatTimeoutMs: 500,
+    });
+
+    const connectPromise = relayer.connect();
+    await vi.advanceTimersByTimeAsync(1);
+    await connectPromise;
+    expect(mockWs.send).toHaveBeenCalledTimes(0);
+
+    // Advance time to trigger first heartbeat
+    await vi.advanceTimersByTimeAsync(1000);
+
+    expect(mockWs.send).toHaveBeenCalledWith(JSON.stringify({ type: 'ping' }));
+
+    vi.useRealTimers();
+  });
+
+  it('resets heartbeat timeout when pong is received', async () => {
+    vi.useFakeTimers();
+    relayer = new WebSocketRelayer('ws://localhost:8080', {
+      heartbeatIntervalMs: 500,
+      heartbeatTimeoutMs: 300,
+    });
+
+    const connectPromise = relayer.connect();
+    await vi.advanceTimersByTimeAsync(1);
+    await connectPromise;
+    const onmessage = getOnmessage();
+
+    // Trigger heartbeat
+    await vi.advanceTimersByTimeAsync(500);
+
+    const pingCall = mockWs.send.mock.calls.length;
+    expect(pingCall).toBeGreaterThan(0);
+
+    // Receive pong before timeout
+    onmessage?.(new MessageEvent('message', { data: JSON.stringify({ type: 'pong' }) }));
+
+    // Advance time to timeout threshold without closing connection
+    await vi.advanceTimersByTimeAsync(300);
+    expect(mockWs.close).not.toHaveBeenCalled();
+
+    vi.useRealTimers();
+  });
+
+  it('closes connection when pong is not received within heartbeat timeout', async () => {
+    vi.useFakeTimers();
+    relayer = new WebSocketRelayer('ws://localhost:8080', {
+      heartbeatIntervalMs: 500,
+      heartbeatTimeoutMs: 300,
+    });
+
+    const connectPromise = relayer.connect();
+    await vi.advanceTimersByTimeAsync(1);
+    await connectPromise;
+
+    // Trigger heartbeat
+    await vi.advanceTimersByTimeAsync(500);
+
+    // Advance time past pong timeout without sending pong
+    await vi.advanceTimersByTimeAsync(300);
+
+    // Connection should be closed due to missing pong
+    expect(mockWs.close).toHaveBeenCalled();
+
+    vi.useRealTimers();
+  });
+
+  it('stops heartbeat on disconnect', async () => {
+    vi.useFakeTimers();
+    relayer = new WebSocketRelayer('ws://localhost:8080', {
+      heartbeatIntervalMs: 1000,
+    });
+
+    const connectPromise = relayer.connect();
+    await vi.advanceTimersByTimeAsync(1);
+    await connectPromise;
+    relayer.disconnect();
+
+    // Advance time and verify no new pings are sent
+    await vi.advanceTimersByTimeAsync(2000);
+
+    expect(mockWs.send).not.toHaveBeenCalled();
+
+    vi.useRealTimers();
+  });
+
+  it('respects custom heartbeat and timeout options', async () => {
+    relayer = new WebSocketRelayer('ws://localhost:8080', {
+      heartbeatIntervalMs: 10000,
+      heartbeatTimeoutMs: 2000,
+    });
+
+    // Verify options are set (indirectly through behavior)
+    await relayer.connect();
+    expect(relayer.state.connected).toBe(true);
+
+    relayer.disconnect();
   });
 });

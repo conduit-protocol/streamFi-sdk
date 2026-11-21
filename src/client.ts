@@ -1,18 +1,275 @@
-import type { ConduitConfig } from './types/index.js';
-import type { WalletAdapter } from './adapters/types.js';
-import { DEFAULT_RPC }               from './soroban.js';
-import { StreamsModule }             from './streams.js';
-import { FactoryModule }             from './factory.js';
-import { GovernorModule }            from './governor.js';
-import { SUPPORTED_NETWORKS, UnsupportedChainError } from './errors.js';
+import type {
+  ConduitConfig,
+  CreateStreamParams,
+  CreateStreamResult,
+  ListStreamsParams,
+  PaginatedStreams,
+  StreamEventHandlers,
+  StreamInfo,
+  Subscription,
+  FeeEstimate,
+  StreamOperation,
+  Network,
+  BatchGetStreamsOptions,
+  GetStreamInfosResult,
+  StreamProgress,
+  StreamSimulationResult,
+} from "./types/index.js";
+import type { WalletAdapter } from "./adapters/types.js";
+import type { ConnectionHealthStatus } from "./connection-health.js";
+import {
+  DEFAULT_RPC,
+  createRpcServer,
+  registerRpcEndpointGroup,
+  resolveRpcEndpoint,
+} from "./soroban.js";
+import {
+  getEndpointHealth,
+  getRelayerHealth,
+  recordConnectionResult,
+} from "./connection-health.js";
+import { registerCustomFetch } from "./custom-fetch.js";
+import { SorobanRpc } from "@stellar/stellar-sdk";
+import {
+  StreamsModule,
+  getStreamProgress as calculateStreamProgress,
+  getStreamStatus as calculateStreamStatus,
+} from "./streams.js";
+import { FactoryModule } from "./factory.js";
+import { GovernorModule } from "./governor.js";
+import { Module26 } from "./module26.js";
+import { Module36 } from "./module36.js";
+import { Module44 } from "./module44.js";
+import { Module48 } from "./module48.js";
+import { Module49 } from "./module49.js";
+import { TokenModule } from "./token.js";
+import {
+  SUPPORTED_NETWORKS,
+  UnsupportedChainError,
+  CAIP2_TO_NETWORK,
+  CircuitOpenError,
+} from "./errors.js";
 
+let rpcConnectionPoolingConfigured = false;
+
+/**
+ * Configures `@stellar/stellar-sdk`'s shared Soroban RPC axios instance with
+ * keep-alive HTTP(S) agents (#952), so repeated RPC calls reuse TCP/TLS
+ * connections instead of renegotiating a handshake on every request.
+ *
+ * `SorobanRpc.AxiosClient` is a single instance shared by every
+ * `SorobanRpc.Server` in the process (see `soroban.ts`'s server cache), so
+ * this only needs to run once. A no-op outside Node — e.g. an edge/browser
+ * bundle with no `http`/`https` module — where axios falls back to its
+ * normal per-request behaviour, same as before this change.
+ */
+function configureRpcConnectionPooling(): void {
+  if (rpcConnectionPoolingConfigured) return;
+  rpcConnectionPoolingConfigured = true;
+
+  try {
+    // eslint-disable-next-line @typescript-eslint/no-var-requires -- optional Node-only dependency, guarded by the catch below for non-Node bundles
+    const { Agent: HttpAgent } = require("node:http");
+    // eslint-disable-next-line @typescript-eslint/no-var-requires -- see above
+    const { Agent: HttpsAgent } = require("node:https");
+    const axiosDefaults = SorobanRpc.AxiosClient.defaults;
+    axiosDefaults.httpAgent ??= new HttpAgent({ keepAlive: true, maxSockets: 50 });
+    axiosDefaults.httpsAgent ??= new HttpsAgent({ keepAlive: true, maxSockets: 50 });
+  } catch {
+    // Not running under Node — nothing to configure.
+  }
+}
+
+/**
+ * Validate that `wallet`'s network/chain matches the SDK's configured
+ * `network`.  Throws `UnsupportedChainError` when:
+ *
+ * - The wallet exposes a `chainId` property (WalletConnect CAIP-2 string)
+ *   that resolves to a network different from `expectedNetwork`.
+ * - The wallet exposes a `chainId` that is not in the supported CAIP-2
+ *   mapping at all (i.e. it's an EVM chain or an unknown Stellar variant).
+ *
+ * If the wallet has no `chainId` the check is skipped — adapters that do
+ * not expose chain information (e.g. `KeypairWalletAdapter`) are always
+ * accepted, because they sign whatever transaction the SDK constructs and
+ * never independently specify a chain.
+ */
+function assertWalletNetworkMatch(
+  wallet: WalletAdapter,
+  expectedNetwork: string,
+): void {
+  const raw = wallet.chainId;
+  if (raw === undefined || raw === null) return;
+
+  const caip2 = String(raw);
+  const resolved = CAIP2_TO_NETWORK[caip2];
+
+  if (resolved === undefined) {
+    throw new UnsupportedChainError(caip2);
+  }
+
+  if (resolved !== expectedNetwork) {
+    throw new UnsupportedChainError(
+      `${caip2} (wallet is on '${resolved}' but client is configured for '${expectedNetwork}')`,
+    );
+  }
+}
+
+/**
+ * Main entry point for interacting with the StreamFi protocol.
+ *
+ * Provides a high-level API to create, manage, and query streams.
+ *
+ * @example
+ * ```typescript
+ * import { ConduitClient } from '@conduit/streamfi-sdk';
+ * import { Keypair } from '@stellar/stellar-sdk';
+ *
+ * // Example configuration using variables typically loaded from .env
+ * // STELLAR_SECRET=S...
+ * // NEXT_PUBLIC_NETWORK=testnet
+ * const config = {
+ *   network: 'testnet',
+ *   keypair: Keypair.fromSecret('STELLAR_SECRET'),
+ * };
+ *
+ * const client = new ConduitClient(config);
+ * ```
+ */
 export class ConduitClient {
-  readonly streams:  StreamsModule;
-  readonly factory:  FactoryModule;
+  readonly streams: StreamsModule;
   readonly governor: GovernorModule;
+  /** SEP-41 token allowance reads and approvals. */
+  readonly tokens: TokenModule;
 
-  private readonly config: Required<Pick<ConduitConfig, 'network' | 'rpcUrl'>> & ConduitConfig;
+  /**
+   * Access the DripFactory read-query module.
+   *
+   * @throws {Error} if `factoryAddress` was not supplied in `ConduitConfig`.
+   *   Pass `factoryAddress` to the constructor to enable factory queries:
+   *   ```ts
+   *   new ConduitClient({ network: 'testnet', factoryAddress: 'C...' })
+   *   ```
+   */
+  get factory(): FactoryModule {
+    if (!this._factory) {
+      // Construct lazily so that callers who don't use factory queries
+      // (e.g. read-only stream operations) are not forced to supply
+      // factoryAddress.  FactoryModule's constructor will throw with a
+      // clear error if factoryAddress is missing.
+      this._factory = new FactoryModule(this.config);
+    }
+    return this._factory;
+  }
+  private _factory: FactoryModule | undefined;
 
+  /**
+   * Access the Module26 portfolio tracking module.
+   *
+   * Provides stream portfolio aggregation and analysis features.
+   */
+  get portfolio(): Module26 {
+    if (!this._portfolio) {
+      this._portfolio = new Module26();
+    }
+    return this._portfolio;
+  }
+  private _portfolio: Module26 | undefined;
+
+  /**
+   * Access the Module36 stream snapshot/diff module.
+   *
+   * Provides stream snapshot tracking and differential analysis features.
+   */
+  get snapshots(): Module36 {
+    if (!this._snapshots) {
+      this._snapshots = new Module36();
+    }
+    return this._snapshots;
+  }
+  private _snapshots: Module36 | undefined;
+
+  /**
+   * Access the Module44 risk assessment module.
+   *
+   * Provides stream liquidity risk assessment and runway calculation features.
+   */
+  get risk(): Module44 {
+    if (!this._risk) {
+      this._risk = new Module44();
+    }
+    return this._risk;
+  }
+  private _risk: Module44 | undefined;
+
+  /**
+   * Access the Module48 batch analytics evaluation module.
+   *
+   * Provides memoized batch evaluation and yield calculations.
+   */
+  get batchAnalytics(): Module48 {
+    if (!this._batchAnalytics) {
+      this._batchAnalytics = new Module48();
+    }
+    return this._batchAnalytics;
+  }
+  private _batchAnalytics: Module48 | undefined;
+
+  /** Aliased access to Module48. */
+  get module48(): Module48 {
+    return this.batchAnalytics;
+  }
+
+  /**
+   * Access the Module49 high-performance streaming analytics engine.
+   *
+   * Provides full-parameter memoized evaluation and batch yield calculations.
+   */
+  get batchEngine(): Module49 {
+    if (!this._batchEngine) {
+      this._batchEngine = new Module49();
+    }
+    return this._batchEngine;
+  }
+  private _batchEngine: Module49 | undefined;
+
+  /** Aliased access to Module49. */
+  get module49(): Module49 {
+    return this.batchEngine;
+  }
+
+  /**
+   * The Stellar network this client is connected to.
+   */
+  get network(): Network {
+    return this.config.network;
+  }
+
+  /**
+   * The underlying raw {@link SorobanRpc.Server} instance used by
+   * this client. Advanced integrators building custom contract
+   * interactions can use this to call Soroban RPC methods directly
+   * without creating a duplicate connection.
+   */
+  get rpcServer(): SorobanRpc.Server {
+    return createRpcServer(this.config.rpcUrl);
+  }
+
+  private readonly config: Required<Pick<ConduitConfig, "network" | "rpcUrl">> &
+    ConduitConfig;
+
+  private readonly rpcUrls: string[] = [];
+
+  /**
+   * Initializes a new ConduitClient instance.
+   *
+   * Validates the configured network against supported networks to ensure
+   * immediate failure on misconfiguration.
+   *
+   * @param config - Configuration object for the client.
+   * @throws {UnsupportedChainError} If the provided `network` is not supported.
+   * @throws {UnsupportedChainError} If a `wallet` is provided and its chain ID does not match the configured `network`.
+   */
   constructor(config: ConduitConfig) {
     // Validate the network immediately so developers get a clear error at
     // initialisation time rather than an obscure RPC failure later.
@@ -20,22 +277,399 @@ export class ConduitClient {
       throw new UnsupportedChainError(config.network);
     }
 
+    configureRpcConnectionPooling();
+
+    const configuredUrls =
+      config.rpcUrls ?? [config.rpcUrl ?? DEFAULT_RPC[config.network]];
+    const uniqueUrls = [
+      ...new Set(
+        configuredUrls
+          .map((url) => url.trim())
+          .filter((url) => url.length > 0),
+      ),
+    ];
+    const rpcUrl = uniqueUrls[0] ?? DEFAULT_RPC[config.network];
+    this.rpcUrls.push(...uniqueUrls);
+
     this.config = {
       ...config,
-      rpcUrl: config.rpcUrl ?? DEFAULT_RPC[config.network],
+      rpcUrl,
     };
 
-    this.streams  = new StreamsModule(this.config);
-    this.factory  = new FactoryModule(this.config);
+    registerRpcEndpointGroup(this.rpcUrls, {
+      failureThreshold: config.rpcUrlFailureThresholdConsecutive ?? 3,
+    });
+
+    // Must precede module construction: modules may issue RPC calls at once.
+    if (this.config.customFetch) {
+      for (const url of this.rpcUrls) {
+        registerCustomFetch(
+          url,
+          this.config.customFetch,
+          this.config.requestTimeoutMs,
+        );
+      }
+    }
+
+    // If a wallet is provided at construction time, validate its chain too.
+    if (this.config.wallet) {
+      assertWalletNetworkMatch(this.config.wallet, this.config.network);
+    }
+
+    this.streams = new StreamsModule(this.config);
     this.governor = new GovernorModule(this.config);
+    this.tokens = new TokenModule(this.config);
+  }
+
+  /**
+   * Read many streams while staying under RPC rate limits.
+   *
+   * Duplicate IDs are collapsed, the remaining IDs are split into chunks of
+   * `chunkSize` (default 20) and chunks are read one after another, each with
+   * bounded concurrency (`maxConcurrency`, default 8). `chunkDelayMs` adds a
+   * pause between chunks. A failing stream is reported in `failures` rather
+   * than failing the whole batch.
+   *
+   * @example
+   * const { results, failures } = await client.getStreamsBatch(ids, { chunkSize: 10 });
+   */
+  async getStreamsBatch(
+    streamIds: (bigint | string)[],
+    options: BatchGetStreamsOptions = {},
+  ): Promise<GetStreamInfosResult> {
+    const chunkSize = Math.max(1, Math.floor(options.chunkSize ?? 20) || 20);
+    const chunkDelayMs = Math.max(0, options.chunkDelayMs ?? 0);
+    const unique = [...new Set(streamIds.map((id) => BigInt(id)))];
+
+    const results: StreamInfo[] = [];
+    const failures: GetStreamInfosResult["failures"] = [];
+    for (let i = 0; i < unique.length; i += chunkSize) {
+      if (i > 0 && chunkDelayMs > 0) {
+        await new Promise((resolve) => setTimeout(resolve, chunkDelayMs));
+      }
+      const chunk = await this.streams.getStreamInfos(
+        unique.slice(i, i + chunkSize),
+        options.maxConcurrency === undefined
+          ? {}
+          : { maxConcurrency: options.maxConcurrency },
+      );
+      results.push(...chunk.results);
+      failures.push(...chunk.failures);
+    }
+    return { results, failures };
+  }
+
+  /**
+   * Pause an active stream (sender only).
+   *
+   * Freezes the stream clock so no new tokens accrue. The stream can be
+   * resumed later with {@link unpauseStream}.
+   *
+   * @param streamId - The numeric stream ID as a string (e.g. `"42"`).
+   * @returns A promise that resolves to the confirmed transaction hash.
+   * @throws {Error} If the transaction fails to submit or confirm.
+   */
+  async pauseStream(streamId: string): Promise<string> {
+    return this.streams.pause(streamId);
+  }
+
+  /**
+   * Resume a paused stream (sender only).
+   *
+   * Unfreezes the stream clock so tokens begin accruing again. The start
+   * and end times are shifted forward by the duration the stream was paused.
+   *
+   * @param streamId - The numeric stream ID as a string (e.g. `"42"`).
+   * @returns A promise that resolves to the confirmed transaction hash.
+   * @throws {Error} If the transaction fails to submit or confirm.
+   */
+  async unpauseStream(streamId: string): Promise<string> {
+    return this.streams.resume(streamId);
+  }
+
+  // ── Stream operation hoists (fixes #540) ─────────────────────────────────────
+  //
+  // Every public StreamsModule method is hoisted to the top level so the API
+  // surface is consistent — a caller who finds client.pauseStream() can
+  // reasonably expect client.create(), client.withdraw(), etc. to exist too.
+
+  /** Create a new payment stream (sender only). */
+  async createStream(params: CreateStreamParams): Promise<CreateStreamResult> {
+    return this.streams.create(params);
+  }
+
+  /** Get stream details by ID. */
+  async getStream(streamId: string): Promise<StreamInfo> {
+    return this.streams.get(streamId);
+  }
+
+  /** List streams with optional filtering. */
+  async listStreams(params?: ListStreamsParams): Promise<PaginatedStreams> {
+    return this.streams.list(params ?? {});
+  }
+
+  /** Get the withdrawable amount for a stream. */
+  async withdrawable(streamId: string): Promise<bigint> {
+    return this.streams.withdrawable(streamId);
+  }
+
+  /** Withdraw available tokens from a stream (recipient only). */
+  async withdraw(streamId: string): Promise<string> {
+    return this.streams.withdraw(streamId);
+  }
+
+  /** Cancel a stream (sender only). */
+  async cancelStream(streamId: string): Promise<string> {
+    return this.streams.cancel(streamId);
+  }
+
+  /** Top up a stream's deposit (sender only). */
+  async topUp(streamId: string, amount: bigint): Promise<string> {
+    return this.streams.topUp(streamId, amount);
+  }
+
+  /** Claw back unstreamed tokens (sender only, if clawback is enabled). */
+  async clawback(streamId: string): Promise<bigint> {
+    return this.streams.clawback(streamId);
+  }
+
+  /** Force-cancel a stream paused beyond the threshold (recipient only). */
+  async forceCancel(streamId: string): Promise<string> {
+    return this.streams.forceCancel(streamId);
+  }
+
+  /** Transfer the recipient role to a new address (recipient only). */
+  async transferRecipient(
+    streamId: string,
+    newRecipient: string,
+  ): Promise<string> {
+    return this.streams.transferRecipient(streamId, newRecipient);
+  }
+
+  /** Get the cumulative amount streamed since start (regardless of withdrawals). */
+  async streamedTotal(streamId: string): Promise<bigint> {
+    return this.streams.streamedTotal(streamId);
+  }
+
+  /** Get formatted stream progress without an RPC round-trip. */
+  getStreamProgress(
+    stream: StreamInfo,
+    currentTimestamp?: number,
+  ): StreamProgress {
+    return currentTimestamp === undefined
+      ? calculateStreamProgress(stream)
+      : calculateStreamProgress(stream, currentTimestamp);
+  }
+
+  /** Alias for {@link getStreamProgress}. */
+  getStreamStatus(
+    stream: StreamInfo,
+    currentTimestamp?: number,
+  ): StreamProgress {
+    return currentTimestamp === undefined
+      ? calculateStreamStatus(stream)
+      : calculateStreamStatus(stream, currentTimestamp);
+  }
+
+  /** Simulate stream creation to preview fees before signing. */
+  async simulateCreateStream(
+    params: CreateStreamParams,
+  ): Promise<StreamSimulationResult> {
+    return this.streams.simulateCreateStream(params);
+  }
+
+  /** Estimate the network fee for a stream operation. */
+  async estimateFee(operation: StreamOperation): Promise<FeeEstimate> {
+    return this.streams.estimateFee(operation);
+  }
+
+  /** Subscribe to on-chain events for a stream. */
+  subscribe(
+    streamAddress: string,
+    handlers: StreamEventHandlers,
+  ): Subscription {
+    return this.streams.subscribe(streamAddress, handlers);
   }
 
   /**
    * Dynamically attach or change the active wallet adapter.
+   *
+   * Validates that the new wallet's chain matches the client's configured
+   * network before accepting it — prevents silent cross-chain mismatches
+   * from reaching the smart contract (fixes #157).
+   *
+   * **Wallet propagation contract:**
+   * - {@link StreamsModule}: Updated immediately — all subsequent stream
+   *   operations (create, withdraw, cancel, etc.) use the new wallet.
+   * - {@link TokenModule}: Updated immediately — subsequent token approvals
+   *   use the new wallet.
+   * - {@link FactoryModule}: Updated — its read simulations are sourced
+   *   from the active wallet's public key, so a wallet swap re-resolves the
+   *   simulation source instead of leaving it pinned to the previous
+   *   wallet. A `client.factory` that has not been constructed yet picks
+   *   the new wallet up from `config` when it is lazily built (#784).
+   * - {@link GovernorModule}: NOT updated — this module is read-only and
+   *   uses `config.keypair` for simulation fee sourcing. It does not hold
+   *   a wallet reference and is unaffected by `setWallet()`.
+   *
+   * @param wallet - The wallet adapter to use for signing transactions.
+   * @throws {UnsupportedChainError} if the wallet's `chainId` is on a
+   *   different network than the one this client was initialised with.
    */
   setWallet(wallet: WalletAdapter): void {
+    assertWalletNetworkMatch(wallet, this.config.network);
     this.config.wallet = wallet;
     this.streams.setWallet(wallet);
+    this.tokens.setWallet(wallet);
+    // #784 — `FactoryModule` resolves its read-simulation source from a
+    // wallet adapter captured at construction, so it needs the swap too.
+    // Only when already constructed: a factory built later from the updated
+    // `config.wallet` above has nothing to catch up on. GovernorModule
+    // deliberately stays out — it holds no wallet at all.
+    this._factory?.setWallet(wallet);
+  }
+
+  /**
+   * Clear the address cache. Useful for testing or manual memory management.
+   * The cache stores stream ID → contract address mappings and is bounded LRU,
+   * but can be manually cleared if needed.
+   */
+  clearAddressCache(): void {
+    this.streams.clearAddressCache();
+  }
+
+  getConnectionHealth(): ConnectionHealthStatus {
+    const activeRpcUrl = resolveRpcEndpoint(this.config.rpcUrl);
+    const rpc = getEndpointHealth(activeRpcUrl);
+    const endpoints = this.rpcUrls.map((url) => getEndpointHealth(url));
+    const relayer = getRelayerHealth();
+    const connected = rpc.connected || relayer.connected;
+    const statuses = [...endpoints.map((endpoint) => endpoint.status), relayer.status];
+    const status = !connected
+      ? "disconnected"
+      : statuses.includes("degraded")
+        ? "degraded"
+        : "healthy";
+    const packetLossValues = [
+      ...endpoints.map((endpoint) => endpoint.packetLossRate),
+      relayer.packetLossRate,
+    ];
+    const packetLossRate =
+      packetLossValues.length === 0
+        ? 0
+        : Math.round(
+            (packetLossValues.reduce((sum, value) => sum + value, 0) /
+              packetLossValues.length) *
+              100,
+          ) / 100;
+    const updatedAt = [...endpoints, relayer]
+      .map((entry) => entry.updatedAt)
+      .filter((value): value is number => value !== null)
+      .sort((a, b) => b - a)[0] ?? null;
+
+    return {
+      connected,
+      status,
+      latencyMs: rpc.latencyMs ?? relayer.latencyMs,
+      packetLossRate,
+      activeRpcUrl,
+      rpc,
+      endpoints,
+      relayer,
+      updatedAt,
+    };
+  }
+
+  async refreshConnectionHealth(): Promise<ConnectionHealthStatus> {
+    const url = resolveRpcEndpoint(this.config.rpcUrl);
+    const startedAt = Date.now();
+    try {
+      await createRpcServer(this.config.rpcUrl).getLatestLedger();
+      recordConnectionResult(url, true, Date.now() - startedAt, "rpc");
+    } catch (err) {
+      if (!(err instanceof CircuitOpenError)) {
+        recordConnectionResult(url, false, Date.now() - startedAt, "rpc");
+      }
+    }
+    return this.getConnectionHealth();
+  }
+
+  getCurrentRpcUrl(): string {
+    return resolveRpcEndpoint(this.config.rpcUrl);
+  }
+
+  /**
+   * Check connectivity to RPC and indexer endpoints independently.
+   *
+   * Performs lightweight connectivity checks against both dependencies,
+   * distinguishing between RPC-down and indexer-down states. A dashboard
+   * might continue functioning in degraded read-only mode if only one
+   * endpoint is unreachable.
+   *
+   * @returns Promise resolving to { rpc: boolean; indexer: boolean }
+   *   indicating whether each endpoint is reachable.
+   *
+   * @example
+   * ```typescript
+   * const health = await client.health();
+   * if (!health.rpc) console.error('RPC endpoint unreachable');
+   * if (!health.indexer) console.error('Indexer unreachable');
+   * if (health.rpc && health.indexer) {
+   *   // Safe to proceed with full functionality
+   * }
+   * ```
+   */
+  async health(): Promise<{ rpc: boolean; indexer: boolean }> {
+    const [rpcHealth, indexerHealth] = await Promise.all([
+      this._checkRpcHealth(),
+      this._checkIndexerHealth(),
+    ]);
+    return {
+      rpc: rpcHealth,
+      indexer: indexerHealth,
+    };
+  }
+
+  /**
+   * Check RPC endpoint connectivity with a lightweight call.
+   * @private
+   */
+  private async _checkRpcHealth(): Promise<boolean> {
+    try {
+      await createRpcServer(this.config.rpcUrl).getLatestLedger();
+      return true;
+    } catch {
+      return false;
+    }
+  }
+
+  /**
+   * Check indexer endpoint connectivity.
+   * @private
+   */
+  private async _checkIndexerHealth(): Promise<boolean> {
+    try {
+      // If factory address is not configured, we can't check the indexer
+      // but return true since the indexer is optional for read-only RPC operations
+      if (!this.config.factoryAddress) {
+        return true;
+      }
+
+      // Try a simple factory query — streamCount() is the lightest operation
+      // that hits the indexer
+      const count = await this.factory.streamCount();
+      return typeof count === "bigint";
+    } catch {
+      return false;
+    }
+  }
+
+  /**
+   * Expose factory address-cache hit/miss counters so consumers can tune
+   * cache size and concurrency. Returns `null` when the factory module is
+   * not initialized (no factoryAddress was configured).
+   */
+  getCacheMetrics(): { hits: number; misses: number; size: number } | null {
+    return this._factory?.getCacheMetrics() ?? null;
   }
 }
-

@@ -32,6 +32,7 @@ This project follows the [Contributor Covenant Code of Conduct](./CODE_OF_CONDUC
 |------|---------|
 | Node.js | ≥ 20 |
 | npm | ≥ 10 |
+| @stellar/stellar-sdk | ≥ 12.0.0 (peer dependency) |
 
 ### Setup
 
@@ -172,7 +173,7 @@ const half = Number(amount) / 2;
 
 ### Soroban RPC calls
 
-All RPC calls go through `src/soroban.ts`. Do not call `SorobanRpc` directly from module files. This keeps the mock boundary clean for tests.
+All RPC calls go through `src/soroban.ts`. Do not call `SorobanRpc` directly from module files; import `rpc` from `@stellar/stellar-sdk` (v12+) instead. This keeps the mock boundary clean for tests.
 
 Read-only operations must use **simulation only** — never submit a transaction for a read:
 
@@ -188,7 +189,8 @@ await this._sendAndPoll(server, tx);
 
 - `streams.ts` orchestrates — it calls factory to resolve addresses, then calls stream contracts.
 - `factory.ts` and `governor.ts` are thin wrappers — one function per contract call.
-- `soroban.ts` is the only file that imports from `@stellar/stellar-sdk`. No other file should import stellar-sdk directly (this makes it easy to mock in tests).
+- `soroban.ts` is the primary file that imports from `@stellar/stellar-sdk`. Other source files may import specific types/functions as needed, but prefer re-exported SDK types from `soroban.ts` when possible.
+- Use the `rpc` namespace exported by `@stellar/stellar-sdk` (v12+). The legacy `SorobanRpc` alias still exists for backward compatibility, but new code must import `rpc`. An ESLint `no-restricted-imports` rule enforces this in source files.
 
 ### Exports
 

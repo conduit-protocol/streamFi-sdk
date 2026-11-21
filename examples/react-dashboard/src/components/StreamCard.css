@@ -1,0 +1,170 @@
+.stream-card {
+  border: 1px solid var(--color-border);
+  border-radius: 8px;
+  background-color: var(--color-white);
+  overflow: hidden;
+  transition: all 0.2s ease;
+}
+
+.stream-card:hover {
+  box-shadow: 0 4px 12px rgba(0, 0, 0, 0.1);
+  border-color: var(--color-primary);
+}
+
+.stream-card--active {
+  border-left: 4px solid var(--color-success);
+}
+
+.stream-card--paused {
+  border-left: 4px solid var(--color-warning);
+  background-color: #fefce8;
+}
+
+.stream-card--cancelled {
+  border-left: 4px solid var(--color-error);
+  background-color: #fef2f2;
+  opacity: 0.8;
+}
+
+.stream-card--pending {
+  border-left: 4px solid var(--color-primary);
+  background-color: #f0f9ff;
+}
+
+.stream-card--ended {
+  border-left: 4px solid #9ca3af;
+  opacity: 0.7;
+}
+
+.stream-card-header {
+  padding: 1rem 1.5rem;
+  border-bottom: 1px solid var(--color-border);
+  display: flex;
+  justify-content: space-between;
+  align-items: flex-start;
+  background-color: #fafbfc;
+}
+
+.stream-card-header h3 {
+  margin: 0;
+  font-size: 1rem;
+  color: var(--color-text);
+  font-family: 'Courier New', monospace;
+}
+
+.badge {
+  display: inline-block;
+  padding: 0.25rem 0.75rem;
+  border-radius: 12px;
+  font-size: 0.75rem;
+  font-weight: 600;
+  text-transform: uppercase;
+  margin-top: 0.5rem;
+}
+
+.badge--active {
+  background-color: #d1fae5;
+  color: #065f46;
+}
+
+.badge--paused {
+  background-color: #fef3c7;
+  color: #92400e;
+}
+
+.badge--cancelled {
+  background-color: #fee2e2;
+  color: #7f1d1d;
+}
+
+.badge--pending {
+  background-color: #bfdbfe;
+  color: #1e40af;
+}
+
+.badge--ended {
+  background-color: #e5e7eb;
+  color: #374151;
+}
+
+.stream-card-details {
+  padding: 1.5rem;
+}
+
+.detail-row {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  padding: 0.75rem 0;
+  border-bottom: 1px solid var(--color-border);
+  font-size: 0.875rem;
+}
+
+.detail-row:last-child {
+  border-bottom: none;
+}
+
+.detail-row .label {
+  font-weight: 500;
+  color: var(--color-text-light);
+}
+
+.detail-row .value {
+  color: var(--color-text);
+  text-align: right;
+}
+
+.detail-row .mono {
+  font-family: 'Courier New', monospace;
+  font-size: 0.8rem;
+}
+
+.detail-row .highlight {
+  font-weight: 600;
+  color: var(--color-success);
+}
+
+.stream-card-actions {
+  padding: 1.5rem;
+  border-top: 1px solid var(--color-border);
+  background-color: #fafbfc;
+}
+
+.text-muted {
+  color: var(--color-text-light);
+  font-size: 0.875rem;
+  margin: 0;
+}
+
+.withdraw-form {
+  display: flex;
+  flex-direction: column;
+  gap: 0.75rem;
+  margin-top: 1rem;
+}
+
+.input-field {
+  padding: 0.5rem;
+  border: 1px solid var(--color-border);
+  border-radius: 4px;
+  font-size: 0.875rem;
+  font-family: inherit;
+}
+
+.input-field:focus {
+  outline: none;
+  border-color: var(--color-primary);
+  box-shadow: 0 0 0 3px rgba(99, 102, 241, 0.1);
+}
+
+.input-field:disabled {
+  background-color: #f3f4f6;
+  color: var(--color-text-light);
+  cursor: not-allowed;
+}
+
+.error-text {
+  color: var(--color-error);
+  font-size: 0.75rem;
+  margin: 0;
+}

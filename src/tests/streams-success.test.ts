@@ -1,6 +1,6 @@
 import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
 import { Keypair, StrKey, xdr } from '@stellar/stellar-sdk';
-import { ConduitError } from '../errors.js';
+import { ConduitError, RateLimitError, StreamNotFoundError } from '../errors.js';
 import type { ConduitConfig } from '../types/index.js';
 
 // ── Mocks ─────────────────────────────────────────────────────────────────────
@@ -38,6 +38,8 @@ vi.mock('../soroban.js', async () => {
     ...actual,
     buildContractCallTx: vi.fn().mockResolvedValue({ _stub: 'tx' }),
     getTokenDecimals:    mockGetTokenDecimals,
+    getTokenDecimalsCached: mockGetTokenDecimals,
+    catchNetworkError:   <T>(_label: string, promise: Promise<T>) => promise,
   };
 });
 
@@ -64,11 +66,12 @@ const STREAM_ADDR   = StrKey.encodeContract(Buffer.alloc(32, 2));
 const TOKEN         = StrKey.encodeContract(Buffer.alloc(32, 3));
 const RECIPIENT     = Keypair.random().publicKey();
 
-function makeConfig(): ConduitConfig {
+function makeConfig(overrides: Partial<ConduitConfig> = {}): ConduitConfig {
   return {
     network:        'testnet',
     factoryAddress: FACTORY_ADDR,
     keypair:        Keypair.random(),
+    ...overrides,
   };
 }
 
@@ -204,6 +207,128 @@ describe('StreamsModule.create() — success path', () => {
       durationSeconds: 3600,
     }))).rejects.toThrow(/returned no value/);
   });
+
+  it('classifies rate limits thrown while submitting the transaction', async () => {
+    mockSimulate.mockResolvedValue(simSuccess(u64Scv(1n)));
+    // createRpcServer() now retries a rate-limited sendTransaction internally
+    // (3 attempts at the "retry-after"-supplied delay) before giving up, so
+    // the mock must stay rejected across all of them rather than just once.
+    mockSend.mockRejectedValue({ response: { status: 429, headers: { 'retry-after': '3' } } });
+
+    const { StreamsModule } = await import('../streams.js');
+    const sdk = new StreamsModule(makeConfig());
+
+    const promise = sdk.create({
+      recipient:       RECIPIENT,
+      token:           TOKEN,
+      depositAmount:   '1000',
+      durationSeconds: 3600,
+    });
+    promise.catch(() => {});
+
+    // Drain createRpcServer's 3 retry backoffs (3000ms each, from retry-after: 3).
+    await vi.advanceTimersByTimeAsync(3000 * 3);
+
+    await expect(promise).rejects.toMatchObject({
+      name: 'RateLimitError',
+      retryAfterMs: 3000,
+    });
+  });
+
+  it('classifies rate limits thrown while polling for confirmation', async () => {
+    mockSimulate.mockResolvedValue(simSuccess(u64Scv(1n)));
+    // Same reasoning as above: createRpcServer retries getTransaction
+    // internally (500ms, 1000ms, 2000ms backoff, since this JSON-RPC error
+    // shape carries no "retry-after" header) before this surfaces.
+    mockGetTransaction.mockRejectedValue({ code: -32029 });
+
+    const { StreamsModule } = await import('../streams.js');
+    const sdk = new StreamsModule(makeConfig());
+
+    const promise = sdk.create({
+      recipient:       RECIPIENT,
+      token:           TOKEN,
+      depositAmount:   '1000',
+      durationSeconds: 3600,
+    });
+    promise.catch(() => {});
+
+    await vi.advanceTimersByTimeAsync(1000); // pre-existing pre-poll delay
+    await vi.advanceTimersByTimeAsync(500 + 1000 + 2000); // createRpcServer's retry backoff
+
+    await expect(promise).rejects.toBeInstanceOf(RateLimitError);
+  });
+
+  it('uses configured confirmation polling interval and attempts', async () => {
+    mockSimulate.mockResolvedValue(simSuccess(u64Scv(1n)));
+    mockGetTransaction.mockResolvedValue({ status: 'NOT_FOUND' });
+
+    const { StreamsModule } = await import('../streams.js');
+    const sdk = new StreamsModule(makeConfig({
+      confirmationPollIntervalMs: 250,
+      confirmationMaxAttempts: 2,
+    }));
+
+    const promise = sdk.create({
+      recipient:       RECIPIENT,
+      token:           TOKEN,
+      depositAmount:   '1000',
+      durationSeconds: 3600,
+    });
+    promise.catch(() => {});
+
+    await vi.advanceTimersByTimeAsync(249);
+    expect(mockGetTransaction).not.toHaveBeenCalled();
+
+    await vi.advanceTimersByTimeAsync(1);
+    expect(mockGetTransaction).toHaveBeenCalledTimes(1);
+
+    await vi.advanceTimersByTimeAsync(250);
+    await expect(promise).rejects.toThrow('Transaction timed out: deadbeef');
+    expect(mockGetTransaction).toHaveBeenCalledTimes(2);
+  });
+});
+
+describe('StreamsModule.streamedTotal() — read-only wrapper', () => {
+  beforeEach(() => {
+    mockStreamAddress.mockResolvedValue(STREAM_ADDR);
+  });
+
+  it('returns the cumulative streamed amount from the simulation retval', async () => {
+    mockSimulate.mockResolvedValue(simSuccess(i128Scv(123_456n)));
+
+    const { StreamsModule } = await import('../streams.js');
+    const sdk = new StreamsModule(makeConfig());
+
+    const total = await sdk.streamedTotal(7n);
+    expect(total).toBe(123_456n);
+    expect(mockStreamAddress).toHaveBeenCalledWith(7n);
+  });
+
+  it('reflects cumulative vesting even when withdrawals have occurred', async () => {
+    // 1_000_000 stroops streamed total, of which 400_000 were withdrawn —
+    // streamedTotal must return the full cumulative amount, not the remainder.
+    mockSimulate.mockResolvedValue(simSuccess(i128Scv(1_000_000n)));
+
+    const { StreamsModule } = await import('../streams.js');
+    const sdk = new StreamsModule(makeConfig());
+
+    const total = await sdk.streamedTotal(7n);
+    expect(total).toBe(1_000_000n);
+  });
+
+  it('throws StreamNotFoundError when the read reports an unknown stream', async () => {
+    mockSimulate.mockResolvedValue(simError('HostError: Error(Contract, #2)')); // StreamNotFound
+
+    const { StreamsModule } = await import('../streams.js');
+    const sdk = new StreamsModule(makeConfig());
+
+    const err = await sdk.streamedTotal(999n).catch(e => e);
+    expect(err).toBeInstanceOf(StreamNotFoundError);
+    expect((err as ConduitError).contract).toBe('stream');
+    expect((err as ConduitError).code).toBe(2);
+    expect((err as StreamNotFoundError).streamId).toBe(999n);
+  });
 });
 
 describe('StreamsModule.clawback() — success path', () => {
@@ -241,9 +366,22 @@ describe('StreamsModule — withdraw/cancel/pause/resume/topUp success paths', (
   });
 
   it('withdraw() returns the confirmed transaction hash', async () => {
+    // withdraw() with an explicit amount still reads withdrawable() first,
+    // to validate the amount against it, so the mock needs an i128 retval.
+    mockSimulate.mockResolvedValueOnce(simSuccess(i128Scv(100n)));
     const { StreamsModule } = await import('../streams.js');
     const sdk = new StreamsModule(makeConfig());
     const hash = await runThroughFirstPoll(() => sdk.withdraw(1n, 100n));
+    expect(hash).toBe('deadbeef');
+  });
+
+  it('withdraw() without an explicit amount defaults to the withdrawable balance', async () => {
+    // The client-side amount guard must not reject the omitted-amount case;
+    // the withdrawable() read (an i128 retval) supplies the quantity.
+    mockSimulate.mockResolvedValue(simSuccess(i128Scv(250n)));
+    const { StreamsModule } = await import('../streams.js');
+    const sdk = new StreamsModule(makeConfig());
+    const hash = await runThroughFirstPoll(() => sdk.withdraw(1n));
     expect(hash).toBe('deadbeef');
   });
 
@@ -275,6 +413,13 @@ describe('StreamsModule — withdraw/cancel/pause/resume/topUp success paths', (
     expect(hash).toBe('deadbeef');
   });
 
+  it('topUpStream() returns the confirmed transaction hash', async () => {
+    const { StreamsModule } = await import('../streams.js');
+    const sdk = new StreamsModule(makeConfig());
+    const hash = await runThroughFirstPoll(() => sdk.topUpStream('1', '500'));
+    expect(hash).toBe('deadbeef');
+  });
+
   it('throws when the send is rejected', async () => {
     mockSend.mockResolvedValue({ status: 'ERROR', errorResult: 'boom' });
     const { StreamsModule } = await import('../streams.js');
@@ -287,5 +432,123 @@ describe('StreamsModule — withdraw/cancel/pause/resume/topUp success paths', (
     const { StreamsModule } = await import('../streams.js');
     const sdk = new StreamsModule(makeConfig());
     await expect(runThroughFirstPoll(() => sdk.pause(1n))).rejects.toThrow(/failed/);
+  });
+});
+
+describe('StreamsModule.forceCancel() — success path', () => {
+  beforeEach(() => {
+    mockStreamAddress.mockResolvedValue(STREAM_ADDR);
+    mockSimulate.mockResolvedValue(simSuccess(xdr.ScVal.scvVoid()));
+    mockGetTransaction.mockResolvedValue(txSuccess());
+  });
+
+  it('returns the confirmed transaction hash', async () => {
+    const { StreamsModule } = await import('../streams.js');
+    const sdk = new StreamsModule(makeConfig());
+    const hash = await runThroughFirstPoll(() => sdk.forceCancel(1n));
+    expect(hash).toBe('deadbeef');
+  });
+
+  it('maps StreamErrorCode.PauseThresholdNotMet (contract #13) on simulation failure', async () => {
+    mockSimulate.mockResolvedValue(simError('HostError: Error(Contract, #13)'));
+    const { StreamsModule } = await import('../streams.js');
+    const sdk = new StreamsModule(makeConfig());
+
+    const err = await sdk.forceCancel(1n).catch(e => e);
+    expect(err).toBeInstanceOf(ConduitError);
+    expect((err as ConduitError).contract).toBe('stream');
+    expect((err as ConduitError).code).toBe(13);
+  });
+
+  it('maps StreamErrorCode.NotPaused (contract #10) on simulation failure', async () => {
+    mockSimulate.mockResolvedValue(simError('HostError: Error(Contract, #10)'));
+    const { StreamsModule } = await import('../streams.js');
+    const sdk = new StreamsModule(makeConfig());
+
+    const err = await sdk.forceCancel(1n).catch(e => e);
+    expect(err).toBeInstanceOf(ConduitError);
+    expect((err as ConduitError).contract).toBe('stream');
+    expect((err as ConduitError).code).toBe(10);
+  });
+});
+
+describe('StreamsModule.transferRecipient() — success path', () => {
+  beforeEach(() => {
+    mockStreamAddress.mockResolvedValue(STREAM_ADDR);
+    mockSimulate.mockResolvedValue(simSuccess(xdr.ScVal.scvVoid()));
+    mockGetTransaction.mockResolvedValue(txSuccess());
+  });
+
+  it('returns the confirmed transaction hash', async () => {
+    const { StreamsModule } = await import('../streams.js');
+    const sdk = new StreamsModule(makeConfig());
+    const newRecipient = Keypair.random().publicKey();
+    const hash = await runThroughFirstPoll(() => sdk.transferRecipient(1n, newRecipient));
+    expect(hash).toBe('deadbeef');
+  });
+
+  it('invokes transfer_recipient with the new recipient address', async () => {
+    const { buildContractCallTx } = await import('../soroban.js');
+    const { StreamsModule } = await import('../streams.js');
+    const sdk = new StreamsModule(makeConfig());
+    const newRecipient = Keypair.random().publicKey();
+    await runThroughFirstPoll(() => sdk.transferRecipient(1n, newRecipient));
+    expect(buildContractCallTx).toHaveBeenCalledWith(
+      expect.any(String), expect.any(String), expect.any(String),
+      STREAM_ADDR, 'transfer_recipient', [expect.anything()], expect.any(String),
+      undefined, expect.objectContaining({ horizonUrl: expect.any(String) }),
+    );
+  });
+});
+
+describe('StreamsModule — configurable inclusion fee (#509)', () => {
+  beforeEach(() => {
+    mockStreamAddress.mockResolvedValue(STREAM_ADDR);
+    mockSimulate.mockResolvedValue(simSuccess(xdr.ScVal.scvVoid()));
+    mockGetTransaction.mockResolvedValue(txSuccess());
+  });
+
+  it('passes BASE_FEE by default to buildContractCallTx for a submitted operation', async () => {
+    const { buildContractCallTx } = await import('../soroban.js');
+    const { StreamsModule } = await import('../streams.js');
+    const { BASE_FEE } = await import('@stellar/stellar-sdk');
+    const sdk = new StreamsModule(makeConfig());
+
+    await runThroughFirstPoll(() => sdk.pause(1n));
+
+    expect(buildContractCallTx).toHaveBeenLastCalledWith(
+      expect.any(String), expect.any(String), expect.any(String),
+      STREAM_ADDR, 'pause', [], BASE_FEE,
+      undefined, expect.objectContaining({ horizonUrl: expect.any(String) }),
+    );
+  });
+
+  it('honours an explicit config.fee override', async () => {
+    const { buildContractCallTx } = await import('../soroban.js');
+    const { StreamsModule } = await import('../streams.js');
+    const sdk = new StreamsModule(makeConfig({ fee: '5000' }));
+
+    await runThroughFirstPoll(() => sdk.pause(1n));
+
+    expect(buildContractCallTx).toHaveBeenLastCalledWith(
+      expect.any(String), expect.any(String), expect.any(String),
+      STREAM_ADDR, 'pause', [], '5000',
+      undefined, expect.objectContaining({ horizonUrl: expect.any(String) }),
+    );
+  });
+
+  it('honours config.feeMultiplier scaled off BASE_FEE', async () => {
+    const { buildContractCallTx } = await import('../soroban.js');
+    const { StreamsModule } = await import('../streams.js');
+    const { BASE_FEE } = await import('@stellar/stellar-sdk');
+    const sdk = new StreamsModule(makeConfig({ feeMultiplier: 10 }));
+
+    await runThroughFirstPoll(() => sdk.pause(1n));
+
+    expect(buildContractCallTx).toHaveBeenLastCalledWith(
+      expect.any(String), expect.any(String), expect.any(String),
+      STREAM_ADDR, 'pause', [], (BigInt(BASE_FEE) * 10n).toString(),
+      undefined, expect.objectContaining({ horizonUrl: expect.any(String) }),
+    );
   });
 });

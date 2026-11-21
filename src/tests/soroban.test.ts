@@ -1,6 +1,13 @@
 import { describe, it, expect } from 'vitest';
 import { xdr, nativeToScVal } from '@stellar/stellar-sdk';
-import { scValToI128, scValToU64, u64ToScVal, boolToScVal } from '../soroban.js';
+import {
+  scValToI128,
+  scValToU64,
+  u64ToScVal,
+  boolToScVal,
+  estimateRequiredFee,
+  DEFAULT_RESOURCE_FEE_ESTIMATE,
+} from '../soroban.js';
 
 // ── scValToI128 ────────────────────────────────────────────────────────────
 
@@ -72,5 +79,37 @@ describe('boolToScVal', () => {
 
   it('encodes false', () => {
     expect(boolToScVal(false).b()).toBe(false);
+  });
+});
+
+// ── estimateRequiredFee ───────────────────────────────────────────────────
+
+describe('estimateRequiredFee', () => {
+  it('extracts minResourceFee from a successful simulation', () => {
+    expect(estimateRequiredFee({ minResourceFee: '123456' })).toBe(123456n);
+  });
+
+  it('extracts fee when minResourceFee is missing', () => {
+    expect(estimateRequiredFee({ fee: '98765' })).toBe(98765n);
+  });
+
+  it('ignores a zero minResourceFee and falls through', () => {
+    expect(estimateRequiredFee({ minResourceFee: '0' })).toBe(DEFAULT_RESOURCE_FEE_ESTIMATE);
+  });
+
+  it('does not overstate the required fee for an error-response simulation (regression #430)', () => {
+    // An error-response simulation (the shape passed from the
+    // insufficient-balance path in StreamsModule.create()) carries neither
+    // minResourceFee nor fee. The old 500 XLM fallback made the error say
+    // "deposit + 500 XLM" when the real fee is a fraction of an XLM.
+    const sim = { error: 'HostError: Error(WasmVm, InvalidAction)' };
+    const fee = estimateRequiredFee(sim);
+    expect(fee).toBe(DEFAULT_RESOURCE_FEE_ESTIMATE);
+    expect(fee).toBeLessThan(5_000_000_000n); // far below the old 500 XLM default
+    expect(fee).toBe(1_000_000n); // 0.1 XLM
+  });
+
+  it('uses an explicit fallback when provided', () => {
+    expect(estimateRequiredFee(null, 42n)).toBe(42n);
   });
 });

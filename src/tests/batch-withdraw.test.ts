@@ -65,4 +65,30 @@ describe('StreamsModule.batchWithdraw()', () => {
       /keypair, wallet adapter, or signer/,
     );
   });
+
+  it('submits withdrawals one at a time, not concurrently (#504)', async () => {
+    // A concurrent Promise.allSettled(...map) would call withdraw() for every
+    // item before any of them resolve. Serialised submission must instead
+    // wait for withdraw #1 to fully settle before withdraw #2 is even
+    // invoked — otherwise every withdrawal would read the same account
+    // sequence number and only one could ever land on-chain.
+    const sdk = new StreamsModule(makeConfig());
+    let inFlight = 0;
+    let maxConcurrent = 0;
+    const callOrder: bigint[] = [];
+
+    vi.spyOn(sdk, 'withdraw').mockImplementation(async (streamId) => {
+      callOrder.push(BigInt(streamId));
+      inFlight++;
+      maxConcurrent = Math.max(maxConcurrent, inFlight);
+      await new Promise(resolve => setTimeout(resolve, 5));
+      inFlight--;
+      return `hash-${streamId}`;
+    });
+
+    await sdk.batchWithdraw([{ streamId: 1n }, { streamId: 2n }, { streamId: 3n }]);
+
+    expect(maxConcurrent).toBe(1);
+    expect(callOrder).toEqual([1n, 2n, 3n]);
+  });
 });

@@ -43,4 +43,5 @@ export interface WalletAdapter {
    * Disconnects the wallet session if applicable.
    */
   disconnect?(): Promise<void>;
+  chainId?: string;
 }

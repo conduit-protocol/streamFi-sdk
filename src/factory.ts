@@ -2,26 +2,154 @@
  * FactoryModule — DripFactory read queries.
  */
 
-import { nativeToScVal, xdr, Address } from '@stellar/stellar-sdk';
-import type { ConduitConfig } from './types/index.js';
-import { ZERO_ADDR } from './constants.js';
+import { nativeToScVal, xdr, Address, hash, StrKey } from '@stellar/stellar-sdk';
+import type { ConduitConfig, FactoryConfig } from './types/index.js';
+import type { WalletAdapter } from './adapters/types.js';
+import { KeypairWalletAdapter } from './adapters/keypair.js';
+import { ZERO_ADDR, DEFAULT_LIST_LIMIT, clampListLimit, clampOffset } from './constants.js';
 import {
   buildContractCallTx,
   simulateReadOnly,
   scValToU64,
+  scValToU32,
   NETWORK_PASSPHRASE,
   DEFAULT_RPC,
+  DEFAULT_HORIZON,
 } from './soroban.js';
+import { SUPPORTED_NETWORKS, UnsupportedChainError } from './errors.js';
+import { mapWithConcurrency, DEFAULT_LIST_CONCURRENCY } from './map-with-concurrency.js';
+import { coalesceAsync } from './coalesce-async.js';
+
+/**
+ * A `null` (not-found) `streamAddress` result is cached only briefly — a
+ * stream id that is pending or whose `StreamAddr` registry entry is archived
+ * (streamFi-contracts #407) may become resolvable later without a
+ * `clearAddressCache()` (#568). A *found* address is immutable and cached
+ * for the module's lifetime.
+ */
+const NEGATIVE_ADDRESS_CACHE_TTL_MS = 30_000;
+
+/**
+ * How long a {@link FactoryModule.getFactoryConfig} read is reused before
+ * re-simulating (#958). Factory protocol parameters (fee bps, fee
+ * recipient) only change through a governance action, so the window is a
+ * staleness budget rather than a correctness requirement. 5 minutes trades
+ * a little staleness for avoiding a simulation on every stream-creation
+ * call. Override with `ConduitConfig.factoryConfigCacheTtlMs`, or set `0`
+ * to disable caching.
+ */
+const FACTORY_CONFIG_CACHE_TTL_MS = 300_000;
+
+export interface FactoryStreamListResult {
+  ids: bigint[];
+  hasMore: boolean;
+}
+
+/**
+ * Page of stream IDs returned by {@link FactoryModule.getStreamsBySenderPaginated}.
+ *
+ * `cursor` is an opaque token for the next page — pass it back in as the
+ * `cursor` argument to continue. `null` means there is no next page.
+ */
+export interface PaginatedStreamIdsResult {
+  ids: bigint[];
+  /** Opaque cursor for the next page, or `null` when `ids` is the last page. */
+  cursor: string | null;
+  hasMore: boolean;
+}
+
+/**
+ * Encode an offset as the opaque cursor handed to callers of
+ * {@link FactoryModule.getStreamsBySenderPaginated} (#957). The contract's
+ * `streams_by_sender` only understands offset/limit, so the cursor is just
+ * that offset, base64-encoded so callers treat it as opaque rather than
+ * depending on (or hand-editing) the underlying integer.
+ */
+function encodeStreamCursor(offset: number): string {
+  return Buffer.from(String(offset), 'utf8').toString('base64');
+}
+
+/**
+ * Decode a cursor produced by {@link encodeStreamCursor}. `undefined` (no
+ * cursor supplied, i.e. the first page) decodes to offset `0`. Throws on a
+ * malformed cursor rather than silently restarting from the first page,
+ * which would resurface already-seen ids to the caller.
+ */
+function decodeStreamCursor(cursor: string | undefined): number {
+  if (cursor === undefined) return 0;
+  const decoded = Buffer.from(cursor, 'base64').toString('utf8');
+  const offset = Number(decoded);
+  if (!Number.isInteger(offset) || offset < 0) {
+    throw new Error(`getStreamsBySenderPaginated: invalid cursor "${cursor}"`);
+  }
+  return offset;
+}
+
+/** Options for {@link FactoryModule.streamAddresses}. */
+export interface StreamAddressesOptions {
+  /**
+   * Maximum number of `stream_address` simulations in flight at once.
+   * Defaults to 8 — the number of preflight workers a default `stellar-rpc`
+   * serves `simulateTransaction` from. Values below 1 are treated as 1.
+   */
+  maxConcurrency?: number;
+}
 
 export class FactoryModule {
   private readonly rpcUrl:      string;
   private readonly passphrase:  string;
+  private readonly horizonUrl:  string;
   private readonly factoryId:   string;
-  private readonly callerAddr:  string;
+
+  /**
+   * Active wallet adapter, if the client was configured with `wallet` (or a
+   * `keypair`, wrapped). Used to resolve the read-simulation source address
+   * lazily — see {@link _resolveCallerAddress} (#570).
+   */
+  private activeWallet?: WalletAdapter;
+
+  /**
+   * Cached caller address, populated on first resolution and invalidated on
+   * {@link setWallet}. Mirrors `StreamsModule._resolveCallerAddress` so the
+   * same logical "who is calling" resolves identically across modules.
+   */
+  private _cachedCallerAddr: string | null = null;
+
+  // streamId -> contract address. A resolved (non-null) address is immutable
+  // and cached for the module's lifetime; a `null` result is cached with a
+  // short TTL (see NEGATIVE_ADDRESS_CACHE_TTL_MS) so a dashboard polling
+  // list() over a page with a few archived/pending ids does not re-issue a
+  // stream_address simulation for each of them on every refresh (#568).
+  private readonly addressCache = new Map<string, string | null>();
+  private readonly negativeCacheExpiry = new Map<string, number>();
+  private readonly _negativeCacheTtlMs: number;
+  private _cacheHits = 0;
+  private _cacheMisses = 0;
+
+  /**
+   * Cached `getFactoryConfig()` read and the timestamp it goes stale at
+   * (#958). A single entry is enough: a `FactoryModule` reads exactly one
+   * factory contract, so there is only ever one key.
+   */
+  private factoryConfigCache: { value: FactoryConfig; expiresAt: number } | undefined;
+  private readonly factoryConfigCacheTtlMs: number;
+  /**
+   * In-flight `getFactoryConfig()` fetch, keyed by the constant `'config'`.
+   * Coalesces the burst of calls a TTL cache produces the moment its entry
+   * expires — mirrors `GovernorModule`'s `inFlightConfig`.
+   */
+  private readonly inFlightFactoryConfig = new Map<string, Promise<FactoryConfig>>();
 
   constructor(private readonly config: ConduitConfig) {
+    // Guard against direct construction with an unsupported network, which
+    // would bypass the ConduitClient validation gate and produce a confusing
+    // StrKey error deep inside stellar-sdk (fixes #157).
+    if (!(SUPPORTED_NETWORKS as readonly string[]).includes(config.network)) {
+      throw new UnsupportedChainError(config.network);
+    }
     this.rpcUrl     = config.rpcUrl     ?? DEFAULT_RPC[config.network];
     this.passphrase = NETWORK_PASSPHRASE[config.network];
+    this.horizonUrl = config.horizonUrl ?? DEFAULT_HORIZON[config.network];
     // There is no known default DripFactory deployment for any network —
     // shipping a placeholder string here means callers who forget to set
     // this fail deep inside @stellar/stellar-sdk with a confusing StrKey
@@ -32,78 +160,477 @@ export class FactoryModule {
       );
     }
     this.factoryId  = config.factoryAddress;
-    // For read-only calls we use the keypair's public key as the fee source;
-    // if no keypair, we use the zero address (simulation only — no real account needed).
-    this.callerAddr = config.keypair?.publicKey() ?? ZERO_ADDR;
+    this._negativeCacheTtlMs = config.negativeCacheTtlMs ?? NEGATIVE_ADDRESS_CACHE_TTL_MS;
+    this.factoryConfigCacheTtlMs = config.factoryConfigCacheTtlMs ?? FACTORY_CONFIG_CACHE_TTL_MS;
+
+    if (config.wallet) {
+      this.activeWallet = config.wallet;
+    } else if (config.keypair) {
+      this.activeWallet = new KeypairWalletAdapter(config.keypair);
+    }
+  }
+
+  /**
+   * Dynamically set or update the active wallet adapter, invalidating the
+   * cached caller address so it is re-resolved on next use (#570). Mirrors
+   * `StreamsModule.setWallet`.
+   */
+  setWallet(wallet: WalletAdapter): void {
+    this.activeWallet = wallet;
+    this._cachedCallerAddr = null;
+  }
+
+  /**
+   * Options forwarded to every {@link buildContractCallTx} call so the
+   * `getAccount` step can fail over to Horizon when the Soroban RPC
+   * endpoint is unreachable (see #953).
+   */
+  private _txOptions(): { horizonUrl: string; customFetch?: typeof fetch } {
+    return {
+      horizonUrl: this.horizonUrl,
+      ...(this.config.customFetch ? { customFetch: this.config.customFetch } : {}),
+    };
+  }
+
+  /**
+   * Resolve the read-simulation source address, consulting the wallet
+   * adapter (which may be async, e.g. a browser extension or hardware
+   * device) rather than pinning `keypair?.publicKey() ?? ZERO_ADDR` at
+   * construction time (#570). Cached after first resolution once a valid
+   * public key is resolved; does not cache null/ZERO_ADDR (#562);
+   * invalidated by {@link setWallet}. Falls back to `ZERO_ADDR` — Soroban
+   * does not require a real source account for a read-only simulation.
+   */
+  private async _resolveCallerAddress(): Promise<string> {
+    if (this._cachedCallerAddr !== null) {
+      return this._cachedCallerAddr;
+    }
+    let addr: string;
+    if (this.activeWallet) {
+      const pk = await this.activeWallet.getPublicKey();
+      if (pk && pk !== ZERO_ADDR) {
+        this._cachedCallerAddr = pk;
+        return pk;
+      }
+      return ZERO_ADDR;
+    } else if (this.config.signer) {
+      addr = this.config.signer.publicKey();
+    } else if (this.config.keypair) {
+      addr = this.config.keypair.publicKey();
+    } else {
+      addr = ZERO_ADDR;
+    }
+    if (addr && addr !== ZERO_ADDR) {
+      this._cachedCallerAddr = addr;
+    }
+    return addr;
+  }
+
+  /** Drop all cached stream-address resolutions (positive and negative). */
+  clearAddressCache(): void {
+    this.addressCache.clear();
+    this.negativeCacheExpiry.clear();
+  }
+
+  /** Cache performance counters so consumers can tune cache size / TTL. */
+  getCacheMetrics(): { hits: number; misses: number; size: number } {
+    return {
+      hits: this._cacheHits,
+      misses: this._cacheMisses,
+      size: this.addressCache.size,
+    };
+  }
+
+  resetCacheStats(): void {
+    this._cacheHits = 0;
+    this._cacheMisses = 0;
   }
 
   /** Total number of streams ever created through this factory. */
-  async streamCount(): Promise<bigint> {
+  async streamCount(signal?: AbortSignal): Promise<bigint> {
+    if (signal?.aborted) throw new DOMException("Aborted", "AbortError");
+    this._cacheMisses++;
+    const caller = await this._resolveCallerAddress();
     const tx  = await buildContractCallTx(
-      this.rpcUrl, this.passphrase, this.callerAddr,
+      this.rpcUrl, this.passphrase, caller,
       this.factoryId, 'stream_count', [],
+      undefined, undefined, this._txOptions(),
+    );
+    const val = await simulateReadOnly(this.rpcUrl, this.passphrase, tx);
+    return scValToU64(val);
+  }
+
+  /** Total number of streams created with `address` as the sender. */
+  async streamCountBySender(address: string, signal?: AbortSignal): Promise<bigint> {
+    if (signal?.aborted) throw new DOMException("Aborted", "AbortError");
+    this._cacheMisses++;
+    const caller = await this._resolveCallerAddress();
+    const tx  = await buildContractCallTx(
+      this.rpcUrl, this.passphrase, caller,
+      this.factoryId, 'stream_count_by_sender',
+      [new Address(address).toScVal()],
+      undefined, undefined, this._txOptions(),
+    );
+    const val = await simulateReadOnly(this.rpcUrl, this.passphrase, tx);
+    return scValToU64(val);
+  }
+
+  /** Total number of streams created with `address` as the recipient. */
+  async streamCountByRecipient(address: string, signal?: AbortSignal): Promise<bigint> {
+    if (signal?.aborted) throw new DOMException("Aborted", "AbortError");
+    this._cacheMisses++;
+    const caller = await this._resolveCallerAddress();
+    const tx  = await buildContractCallTx(
+      this.rpcUrl, this.passphrase, caller,
+      this.factoryId, 'stream_count_by_recipient',
+      [new Address(address).toScVal()],
+      undefined, undefined, this._txOptions(),
     );
     const val = await simulateReadOnly(this.rpcUrl, this.passphrase, tx);
     return scValToU64(val);
   }
 
   /** Resolve a stream ID to its deployed contract address. Returns null if not found. */
-  async streamAddress(streamId: bigint | string): Promise<string | null> {
+  async streamAddress(streamId: bigint | string, signal?: AbortSignal): Promise<string | null> {
     const id  = BigInt(streamId);
+    const key = id.toString();
+    if (signal?.aborted) throw new DOMException("Aborted", "AbortError");
+
+    const cached = this.addressCache.get(key);
+    if (cached !== undefined) {
+      this._cacheHits++;
+      if (cached !== null) return cached;
+      // Negative hit — honour it only while its TTL is live (#568).
+      const expiresAt = this.negativeCacheExpiry.get(key) ?? 0;
+      if (Date.now() < expiresAt) return null;
+      this.addressCache.delete(key);
+      this.negativeCacheExpiry.delete(key);
+    }
+
+    this._cacheMisses++;
+    const caller = await this._resolveCallerAddress();
     const tx  = await buildContractCallTx(
-      this.rpcUrl, this.passphrase, this.callerAddr,
+      this.rpcUrl, this.passphrase, caller,
       this.factoryId, 'stream_address',
       [nativeToScVal(id, { type: 'u64' })],
+      undefined, undefined, this._txOptions(),
     );
     const val = await simulateReadOnly(this.rpcUrl, this.passphrase, tx);
 
     // Contract returns Option<Address> — void = None
-    if (val.switch().name === 'scvVoid') return null;
+    if (val.switch().name === 'scvVoid') {
+      this._cacheNegative(key);
+      return null;
+    }
     try {
-      return Address.fromScVal(val).toString();
+      const addr = Address.fromScVal(val).toString();
+      this.addressCache.set(key, addr);
+      return addr;
     } catch {
+      this._cacheNegative(key);
       return null;
     }
   }
 
-  /** List stream IDs where `address` is the sender, paginated. */
-  async streamsBySender(address: string, offset = 0, limit = 20): Promise<bigint[]> {
+  private _cacheNegative(key: string): void {
+    this.addressCache.set(key, null);
+    this.negativeCacheExpiry.set(key, Date.now() + this._negativeCacheTtlMs);
+  }
+
+  /**
+   * Resolve many stream IDs to their contract addresses in one call (#783).
+   *
+   * {@link streamAddress} costs one simulated RPC call per id, so rendering a
+   * page of `streamsBySender()` results costs one round trip per row on a
+   * cold cache. This resolves a whole page at once: the already-cached ids
+   * (positive hits, and negative hits still inside their
+   * `negativeCacheTtlMs` window) are served from memory and only the
+   * cache-miss subset is fetched, with at most `maxConcurrency` simulations
+   * in flight so the client does not outrun the RPC's preflight workers.
+   *
+   * Ids may be `bigint` or `string`, and duplicates (including the same id
+   * in both forms) are fetched once. The returned `Map` is keyed by the
+   * decimal id string and preserves first-seen input order; an id the
+   * contract reports as `None` maps to `null`, exactly as
+   * {@link streamAddress} returns.
+   *
+   * Because each id is resolved through {@link streamAddress}, the address
+   * cache, its hit/miss counters and the negative-cache TTL are shared with
+   * single-id lookups in both directions.
+   *
+   * @param ids - Stream IDs to resolve.
+   * @param signal - Abort signal; rejects with an `AbortError` if aborted
+   *   before or during resolution.
+   * @param options - See {@link StreamAddressesOptions}.
+   * @returns A `Map` of decimal stream-id string to contract address, or
+   *   `null` for ids that do not resolve to a deployed stream.
+   * @throws If any single resolution fails. Ids that did resolve stay
+   *   cached, so a retry only re-fetches the ones that failed. A failed
+   *   resolution is never recorded as a not-found result.
+   *
+   * @example
+   * ```typescript
+   * const { ids } = await client.factory.streamsBySender(sender, 0, 50);
+   * const addresses = await client.factory.streamAddresses(ids);
+   * for (const [id, address] of addresses) {
+   *   console.log(id, address ?? 'not found');
+   * }
+   * ```
+   */
+  async streamAddresses(
+    ids: (bigint | string)[],
+    signal?: AbortSignal,
+    options: StreamAddressesOptions = {},
+  ): Promise<Map<string, string | null>> {
+    if (signal?.aborted) throw new DOMException("Aborted", "AbortError");
+
+    // De-duplicate first so a page that repeats an id (or mixes the string
+    // and bigint forms of one) never schedules two simulations for it.
+    const keys: string[] = [];
+    const seen = new Set<string>();
+    for (const id of ids) {
+      const key = BigInt(id).toString();
+      if (!seen.has(key)) {
+        seen.add(key);
+        keys.push(key);
+      }
+    }
+
+    // Cached ids resolve without a network call, so they simply occupy a
+    // slot in the pool for no RPC cost; keeping one code path means the
+    // batch method can never drift from the single-id one.
+    const resolved = await mapWithConcurrency(
+      keys,
+      options.maxConcurrency ?? DEFAULT_LIST_CONCURRENCY,
+      (key) => this.streamAddress(key, signal),
+    );
+
+    const out = new Map<string, string | null>();
+    keys.forEach((key, i) => {
+      out.set(key, resolved[i] ?? null);
+    });
+    return out;
+  }
+
+  /**
+   * Whether `streamId` resolves to a deployed stream contract (#794).
+   *
+   * Thin wrapper over `streamAddress()` so callers can ask "does stream #42
+   * exist" directly instead of repeating the `!== null` idiom everywhere.
+   * Shares `streamAddress()`'s cache, TTL and abort semantics.
+   */
+  async hasStream(streamId: bigint | string, signal?: AbortSignal): Promise<boolean> {
+    return (await this.streamAddress(streamId, signal)) !== null;
+  }
+
+  /**
+   * List stream IDs where `address` is the sender, paginated.
+   * `limit` is clamped to `[0, 100]` (see README) — the contract does not
+   * enforce this itself, so an out-of-range value is silently clamped rather
+   * than sent through as-is (see #489).
+   *
+   * Returns `{ ids, hasMore }` where `hasMore` indicates whether the returned
+   * count equals the clamped limit (truncation metadata, see #780).
+   */
+  async streamsBySender(
+    address: string,
+    offset = 0,
+    limit = DEFAULT_LIST_LIMIT,
+    signal?: AbortSignal,
+  ): Promise<FactoryStreamListResult> {
+    if (signal?.aborted) throw new DOMException("Aborted", "AbortError");
+    this._cacheMisses++;
+    const clampedLimit = clampListLimit(limit);
+    const caller = await this._resolveCallerAddress();
     const tx  = await buildContractCallTx(
-      this.rpcUrl, this.passphrase, this.callerAddr,
+      this.rpcUrl, this.passphrase, caller,
       this.factoryId, 'streams_by_sender',
       [
         new Address(address).toScVal(),
-        nativeToScVal(offset, { type: 'u32' }),
-        nativeToScVal(limit,  { type: 'u32' }),
+        nativeToScVal(clampOffset(offset), { type: 'u32' }),
+        nativeToScVal(clampedLimit, { type: 'u32' }),
       ],
+      undefined, undefined, this._txOptions(),
     );
     const val = await simulateReadOnly(this.rpcUrl, this.passphrase, tx);
-    return this.parseU64Vec(val);
+    const ids = this.parseU64Vec(val);
+    const hasMore = ids.length === clampedLimit;
+    return { ids, hasMore };
   }
 
-  /** List stream IDs where `address` is the recipient, paginated. */
-  async streamsByRecipient(address: string, offset = 0, limit = 20): Promise<bigint[]> {
+  /**
+   * Cursor-paginated variant of {@link streamsBySender} (#957).
+   *
+   * `streamsBySender`'s offset/limit works, but a caller fetching heavy
+   * senders page-by-page has to track the running offset itself. This hands
+   * back an opaque `cursor` instead: pass `undefined` (or omit it) for the
+   * first page, then feed the previous page's `cursor` back in for the
+   * next one, until it comes back `null`.
+   *
+   * Internally this is still offset/limit against the contract — the
+   * cursor is just that offset, opaque-encoded — so it shares
+   * `streamsBySender`'s `limit` clamping and `hasMore` semantics.
+   *
+   * @param address - Sender address to list streams for.
+   * @param cursor - Previous page's cursor, or `undefined` for the first page.
+   * @param limit - Page size; clamped to `[0, 100]` (see README).
+   * @param signal - Abort signal; rejects with an `AbortError` if aborted.
+   * @throws If `cursor` is not a value this method produced.
+   */
+  async getStreamsBySenderPaginated(
+    address: string,
+    cursor?: string,
+    limit = DEFAULT_LIST_LIMIT,
+    signal?: AbortSignal,
+  ): Promise<PaginatedStreamIdsResult> {
+    const offset = decodeStreamCursor(cursor);
+    const { ids, hasMore } = await this.streamsBySender(address, offset, limit, signal);
+    return {
+      ids,
+      hasMore,
+      cursor: hasMore ? encodeStreamCursor(offset + ids.length) : null,
+    };
+  }
+
+  /**
+   * List stream IDs where `address` is the recipient, paginated.
+   * `limit` is clamped to `[0, 100]` (see README) — the contract does not
+   * enforce this itself, so an out-of-range value is silently clamped rather
+   * than sent through as-is (see #489).
+   *
+   * Returns `{ ids, hasMore }` where `hasMore` indicates whether the returned
+   * count equals the clamped limit (truncation metadata, see #780).
+   */
+  async streamsByRecipient(
+    address: string,
+    offset = 0,
+    limit = DEFAULT_LIST_LIMIT,
+    signal?: AbortSignal,
+  ): Promise<FactoryStreamListResult> {
+    if (signal?.aborted) throw new DOMException("Aborted", "AbortError");
+    this._cacheMisses++;
+    const clampedLimit = clampListLimit(limit);
+    const caller = await this._resolveCallerAddress();
     const tx  = await buildContractCallTx(
-      this.rpcUrl, this.passphrase, this.callerAddr,
+      this.rpcUrl, this.passphrase, caller,
       this.factoryId, 'streams_by_recipient',
       [
         new Address(address).toScVal(),
-        nativeToScVal(offset, { type: 'u32' }),
-        nativeToScVal(limit,  { type: 'u32' }),
+        nativeToScVal(clampOffset(offset), { type: 'u32' }),
+        nativeToScVal(clampedLimit, { type: 'u32' }),
       ],
+      undefined, undefined, this._txOptions(),
     );
     const val = await simulateReadOnly(this.rpcUrl, this.passphrase, tx);
-    return this.parseU64Vec(val);
+    const ids = this.parseU64Vec(val);
+    const hasMore = ids.length === clampedLimit;
+    return { ids, hasMore };
   }
 
   /** Current protocol fee in basis points (e.g. 30 = 0.3%). */
-  async protocolFeeBps(): Promise<number> {
+  async protocolFeeBps(signal?: AbortSignal): Promise<number> {
+    if (signal?.aborted) throw new DOMException("Aborted", "AbortError");
+    this._cacheMisses++;
+    const caller = await this._resolveCallerAddress();
     const tx  = await buildContractCallTx(
-      this.rpcUrl, this.passphrase, this.callerAddr,
+      this.rpcUrl, this.passphrase, caller,
       this.factoryId, 'protocol_fee_bps', [],
+      undefined, undefined, this._txOptions(),
     );
     const val = await simulateReadOnly(this.rpcUrl, this.passphrase, tx);
-    return Number(val.u32());
+    return scValToU32(val);
+  }
+
+  /**
+   * Fetch the current factory configuration (`feeBps`, `feeRecipient`) from
+   * the DripFactory contract (#958).
+   *
+   * Every stream creation re-reading these from contract storage costs a
+   * simulation for data that only changes through a governance action, so
+   * the result is cached for `factoryConfigCacheTtlMs` (default 5 minutes).
+   * Concurrent misses share a single simulation pair, and a failed fetch is
+   * never cached. Mirrors `GovernorModule.getConfig()`.
+   *
+   * Call {@link clearFactoryConfigCache} to force the next call to
+   * re-simulate, or set `factoryConfigCacheTtlMs: 0` to disable caching.
+   *
+   * @param signal - Abort signal; rejects with an `AbortError` if already
+   *   aborted. Gates *this* call only — it never aborts an in-flight fetch
+   *   that other concurrent callers are also awaiting.
+   */
+  async getFactoryConfig(signal?: AbortSignal): Promise<FactoryConfig> {
+    if (signal?.aborted) throw new DOMException("Aborted", "AbortError");
+
+    const cached = this.factoryConfigCache;
+    if (cached && Date.now() < cached.expiresAt) {
+      return { ...cached.value };
+    }
+
+    const value = await coalesceAsync(this.inFlightFactoryConfig, 'config', async () => {
+      this._cacheMisses++;
+      const caller = await this._resolveCallerAddress();
+
+      const feeBpsTx = await buildContractCallTx(
+        this.rpcUrl, this.passphrase, caller,
+        this.factoryId, 'protocol_fee_bps', [],
+      );
+      const feeBpsVal = await simulateReadOnly(this.rpcUrl, this.passphrase, feeBpsTx);
+      const feeBps = scValToU32(feeBpsVal);
+
+      const feeRecipientTx = await buildContractCallTx(
+        this.rpcUrl, this.passphrase, caller,
+        this.factoryId, 'fee_recipient', [],
+      );
+      const feeRecipientVal = await simulateReadOnly(this.rpcUrl, this.passphrase, feeRecipientTx);
+      // Contract returns Option<Address> — void = None, matching streamAddress().
+      const feeRecipient = feeRecipientVal.switch().name === 'scvVoid'
+        ? undefined
+        : Address.fromScVal(feeRecipientVal).toString();
+
+      const parsed: FactoryConfig = feeRecipient !== undefined ? { feeBps, feeRecipient } : { feeBps };
+      // Stamped on completion, so the TTL bounds staleness from the moment
+      // the data was actually read rather than from when the call started.
+      this.factoryConfigCache = { value: parsed, expiresAt: Date.now() + this.factoryConfigCacheTtlMs };
+      return parsed;
+    });
+
+    // `coalesceAsync` holds on to a *fulfilled* promise, which would pin the
+    // first result forever and defeat the TTL. Release the entry once the
+    // shared fetch has settled; a rejection was already evicted by
+    // `coalesceAsync` itself.
+    this.inFlightFactoryConfig.delete('config');
+
+    return { ...value };
+  }
+
+  /** Drop the cached `getFactoryConfig()` read so the next call re-simulates. */
+  clearFactoryConfigCache(): void {
+    this.factoryConfigCache = undefined;
+  }
+
+  /**
+   * Check if the factory is paused by governance.
+   * When paused, stream creation will fail.
+   *
+   * Reads the `paused` storage key from the factory contract.
+   */
+  async factoryPaused(signal?: AbortSignal): Promise<boolean> {
+    if (signal?.aborted) throw new DOMException("Aborted", "AbortError");
+    this._cacheMisses++;
+    const caller = await this._resolveCallerAddress();
+    const tx  = await buildContractCallTx(
+      this.rpcUrl, this.passphrase, caller,
+      this.factoryId, 'paused', [],
+      undefined, undefined, this._txOptions(),
+    );
+    const val = await simulateReadOnly(this.rpcUrl, this.passphrase, tx);
+    // Contract returns a boolean (scvBool)
+    if (val.switch().name !== 'scvBool') {
+      throw new Error(`Expected a bool ScVal, got "${val.switch().name}" instead.`);
+    }
+    // TypeScript doesn't narrow the return type of .value() after switch check,
+    // so we assert it as boolean since we've verified the variant.
+    return val.value() as boolean;
   }
 
   private parseU64Vec(val: xdr.ScVal): bigint[] {
@@ -111,4 +638,107 @@ export class FactoryModule {
     if (!items) return [];
     return items.map(v => scValToU64(v));
   }
+}
+
+/**
+ * Parameters for predicting a stream contract address.
+ */
+export interface PredictStreamAddressParams {
+  /** The factory contract address (deployer). */
+  factoryAddress: string;
+  /** The salt used for deployment (32 bytes). Typically derived from stream ID/sequence. */
+  salt: Uint8Array | Buffer | string;
+  /** Network passphrase (e.g., Networks.TESTNET, Networks.PUBLIC). */
+  networkPassphrase: string;
+}
+
+/**
+ * Predicts the Soroban contract address that will be deployed by the factory
+ * using the given salt. This allows integrators to display the future contract
+ * address to users before the transaction is mined.
+ *
+ * The address is computed as:
+ *   contractId = sha256(networkPassphrase + ContractIdPreimageFromAddress(factoryAddress, salt))
+ *
+ * @example
+ * ```ts
+ * import { predictStreamAddress } from '@conduit-protocol/sdk';
+ * import { Networks } from '@stellar/stellar-sdk';
+ *
+ * const streamId = 42n;
+ * const salt = Buffer.alloc(32);
+ * salt.writeBigUInt64BE(streamId); // or use the factory's salt derivation scheme
+ *
+ * const predictedAddress = predictStreamAddress({
+ *   factoryAddress: 'CABC...',
+ *   salt,
+ *   networkPassphrase: Networks.TESTNET,
+ * });
+ * // predictedAddress: 'CDEF...'
+ * ```
+ */
+export function predictStreamAddress(params: PredictStreamAddressParams): string {
+  const { factoryAddress, salt, networkPassphrase } = params;
+
+  // Normalize salt to 32-byte Buffer
+  let saltBytes: Buffer;
+  if (typeof salt === 'string') {
+    // Assume hex string
+    saltBytes = Buffer.from(salt, 'hex');
+  } else if (salt instanceof Uint8Array) {
+    saltBytes = Buffer.from(salt);
+  } else {
+    saltBytes = salt;
+  }
+
+  if (saltBytes.length !== 32) {
+    throw new Error(`Salt must be 32 bytes, got ${saltBytes.length} bytes`);
+  }
+
+  // Decode factory address to get the ScAddress
+  const factoryScAddress = Address.fromString(factoryAddress).toScAddress();
+
+  // Build ContractIdPreimageFromAddress
+  const contractIdPreimage = xdr.ContractIdPreimage.contractIdPreimageFromAddress(
+    new xdr.ContractIdPreimageFromAddress({
+      address: factoryScAddress,
+      salt: xdr.Uint256.fromXDR(saltBytes),
+    }),
+  );
+
+  // Compute network ID (sha256 of network passphrase)
+  const networkId = hash(Buffer.from(networkPassphrase));
+
+  // Build HashIdPreimageContractId
+  const hashIdPreimage = xdr.HashIdPreimage.envelopeTypeContractId(
+    new xdr.HashIdPreimageContractId({
+      networkId: networkId,
+      contractIdPreimage: contractIdPreimage,
+    }),
+  );
+
+  // Hash the preimage to get the contract ID
+  const contractIdBytes = hash(hashIdPreimage.toXDR());
+
+  // Encode as StrKey contract address (C...)
+  return StrKey.encodeContract(contractIdBytes);
+}
+
+/**
+ * Convenience function to derive a salt from a stream ID (u64).
+ * Pads the 8-byte stream ID to 32 bytes (big-endian).
+ *
+ * @example
+ * ```ts
+ * const salt = streamIdToSalt(42n); // 32-byte Buffer with 42 in the last 8 bytes
+ * ```
+ */
+export function streamIdToSalt(streamId: bigint | number): Buffer {
+  const salt = Buffer.alloc(32);
+  const id = BigInt(streamId);
+  // Write as big-endian u64 in the last 8 bytes
+  for (let i = 0; i < 8; i++) {
+    salt[31 - i] = Number((id >> (8n * BigInt(i))) & 0xffn);
+  }
+  return salt;
 }

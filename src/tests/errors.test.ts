@@ -4,6 +4,12 @@ import {
   StreamErrorCode,
   FactoryErrorCode,
   GovernorErrorCode,
+  GovernorInvalidParamError,
+  StreamFiNetworkError,
+  InsufficientBalanceError,
+  RateLimitError,
+  CAIP2_TO_NETWORK,
+  SUPPORTED_NETWORKS,
 } from '../errors.js';
 
 describe('ConduitError', () => {
@@ -99,14 +105,118 @@ describe('ConduitError.fromSorobanMessage', () => {
     expect((err as ConduitError).message).toMatch(/already.*initialized/i);
   });
 
-  it('falls back to a plain Error when no contract code is present', () => {
+  it('detects WasmVm/InvalidAction and returns an InsufficientBalanceError', () => {
     const err = ConduitError.fromSorobanMessage('stream', 'HostError: Error(WasmVm, InvalidAction)');
-    expect(err).not.toBeInstanceOf(ConduitError);
-    expect(err.message).toBe('HostError: Error(WasmVm, InvalidAction)');
+    expect(err).toBeInstanceOf(InsufficientBalanceError);
+    expect(err.message).toContain('XLM');
   });
 
   it('falls back to a plain Error for a network-level failure message', () => {
     const err = ConduitError.fromSorobanMessage('stream', 'fetch failed: ECONNREFUSED');
     expect(err).not.toBeInstanceOf(ConduitError);
+  });
+});
+
+describe('StreamFiNetworkError', () => {
+  it('carries the original cause', () => {
+    const cause = new TypeError('fetch failed');
+    const err = new StreamFiNetworkError('Network error', cause);
+    expect(err.name).toBe('StreamFiNetworkError');
+    expect(err.message).toContain('Network error');
+    expect(err.cause).toBe(cause);
+    expect(err).toBeInstanceOf(Error);
+  });
+});
+
+describe('InsufficientBalanceError', () => {
+  it('formats a human-readable message with XLM amounts', () => {
+    // 5 XLM = 50_000_000 stroops, 10 XLM = 100_000_000 stroops
+    const err = new InsufficientBalanceError(50_000_000n, 100_000_000n);
+    expect(err.name).toBe('InsufficientBalanceError');
+    expect(err.message).toMatch(/10\.0+ XLM.*5\.0+ XLM/);
+    expect(err.currentBalance).toBe(50_000_000n);
+    expect(err.requiredBalance).toBe(100_000_000n);
+  });
+
+  it('includes the Soroban VM detail when provided', () => {
+    const err = new InsufficientBalanceError(10_000_000n, 50_000_000n, 'HostError: Error(WasmVm, InvalidAction)');
+    expect(err.message).toContain('WasmVm');
+  });
+});
+
+describe('RateLimitError', () => {
+  it('parses a 429 error from an axios-style error object', () => {
+    const raw = { response: { status: 429, headers: { 'retry-after': '5' } } };
+    const err = RateLimitError.fromRpcError(raw);
+    expect(err).toBeInstanceOf(RateLimitError);
+    expect(err!.retryAfterMs).toBe(5000);
+    expect(err!.message).toContain('429');
+  });
+
+  it('parses JSON-RPC error code -32029', () => {
+    const raw = { code: -32029 };
+    const err = RateLimitError.fromRpcError(raw);
+    expect(err).toBeInstanceOf(RateLimitError);
+  });
+
+  it('returns null for non-rate-limit errors', () => {
+    const raw = { response: { status: 500 } };
+    const err = RateLimitError.fromRpcError(raw);
+    expect(err).toBeNull();
+  });
+});
+
+describe('CAIP2_TO_NETWORK', () => {
+  it('maps every supported CAIP-2 chain to a supported network name', () => {
+    for (const network of Object.values(CAIP2_TO_NETWORK)) {
+      expect(SUPPORTED_NETWORKS as readonly string[]).toContain(network);
+    }
+  });
+
+  it('is the map both ConduitClient and WalletConnectAdapter validate against', async () => {
+    // ConduitClient rejects a wallet whose chainId is not a key here...
+    const { ConduitClient } = await import('../client.js');
+    const badWallet = { chainId: 'eip155:1', getPublicKey: () => 'G', signTransaction: async (t: unknown) => t };
+    expect(() => new ConduitClient({
+      network: 'testnet',
+      factoryAddress: 'C',
+      wallet: badWallet as never,
+    })).toThrow();
+
+    // ...and WalletConnectAdapter rejects the same unknown chainId at construction.
+    const { WalletConnectAdapter } = await import('../adapters/walletconnect.js');
+    expect(() => new WalletConnectAdapter({ chainId: 'eip155:1' })).toThrow(/unsupported chainId/);
+    expect(() => new WalletConnectAdapter({ chainId: 'stellar:testnet' })).not.toThrow();
+  });
+});
+
+describe('GovernorInvalidParamError (#772)', () => {
+  it('is a ConduitError for the governor InvalidParam code', () => {
+    const err = new GovernorInvalidParamError();
+    expect(err).toBeInstanceOf(ConduitError);
+    expect(err).toBeInstanceOf(GovernorInvalidParamError);
+    expect(err.name).toBe('GovernorInvalidParamError');
+    expect(err.contract).toBe('governor');
+    expect(err.code).toBe(GovernorErrorCode.InvalidParam);
+    expect(err.isKnown).toBe(true);
+  });
+
+  it('is what fromSorobanMessage returns for governor error #2', () => {
+    const err = ConduitError.fromSorobanMessage('governor', 'HostError: Error(Contract, #2)');
+    expect(err).toBeInstanceOf(GovernorInvalidParamError);
+    expect(err.message).toContain('Parameter failed validation');
+    expect(err.message).toContain('Error(Contract, #2)');
+  });
+
+  it('is what fromContractError returns for a governor InvalidParam code', () => {
+    expect(ConduitError.fromContractError('governor', { code: 2 })).toBeInstanceOf(
+      GovernorInvalidParamError,
+    );
+  });
+
+  it('leaves the other governor errors as plain ConduitErrors', () => {
+    const err = ConduitError.fromSorobanMessage('governor', 'HostError: Error(Contract, #1)');
+    expect(err).toBeInstanceOf(ConduitError);
+    expect(err).not.toBeInstanceOf(GovernorInvalidParamError);
   });
 });

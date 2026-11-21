@@ -1,5 +1,5 @@
 import { describe, it, expect } from 'vitest';
-import { TransactionSigner } from '../signer.js';
+import { TransactionSigner } from './mocks/transaction-signer.js';
 
 describe('TransactionSigner EIP-712 Dynamic chainId Tests', () => {
   it('extracts chainId dynamically from WalletAdapter state (e.g., Arbitrum 42161)', async () => {

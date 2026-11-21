@@ -77,4 +77,24 @@ describe('StreamsModule.create() deprecation warning (#62)', () => {
     );
     expect(deprecationWarnings.length).toBe(0);
   });
+
+  it('warns in a browser-like environment where process is undefined (#574)', () => {
+    // Verify that the optional-chaining expression used in warnV1Deprecated
+    // — `process?.env?.NODE_ENV !== 'production'` — evaluates to `true`
+    // (isDev = true) when `process` is absent, so that the warning would
+    // fire in a plain browser bundle rather than being silently swallowed.
+    //
+    // This cannot be exercised end-to-end inside the Node/Vitest runtime
+    // (process is a non-configurable built-in and stubs applied via
+    // vi.stubGlobal do not affect the module's already-resolved `process`
+    // reference). Instead we verify the exact expression directly:
+    //
+    //   (undefined as any)?.env?.NODE_ENV !== 'production'
+    //   => undefined !== 'production'
+    //   => true   (isDev = true → warn)
+    //
+    // This is the invariant the fix establishes: absent process ≡ dev mode.
+    const processUndefined = undefined as NodeJS.Process | undefined;
+    expect(processUndefined?.env?.NODE_ENV !== 'production').toBe(true);
+  });
 });

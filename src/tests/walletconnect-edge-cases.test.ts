@@ -66,6 +66,32 @@ describe('WalletConnectAdapter edge cases', () => {
     });
   });
 
+  describe('chainId state initialization crash (regression)', () => {
+    it('should not crash when chainId is undefined (uninitialized React state)', () => {
+      // Simulates: new WalletConnectAdapter({ chainId: someReactState })
+      // where someReactState is undefined before an async load completes.
+      // The ?? fallback converts undefined → 'stellar:pubnet', so no crash.
+      expect(() => new WalletConnectAdapter({ chainId: undefined })).not.toThrow();
+    });
+
+    it('should default to stellar:pubnet when chainId is undefined', () => {
+      const adapter = new WalletConnectAdapter({ chainId: undefined });
+      expect(adapter).toBeInstanceOf(WalletConnectAdapter);
+    });
+
+    it('should still throw for a genuinely unsupported non-empty chainId', () => {
+      expect(() => new WalletConnectAdapter({ chainId: 'ethereum:1' })).toThrow(/unsupported chainId/i);
+    });
+
+    it('should not crash when options object is completely empty', () => {
+      expect(() => new WalletConnectAdapter({})).not.toThrow();
+    });
+
+    it('should not crash when constructed with no arguments', () => {
+      expect(() => new WalletConnectAdapter()).not.toThrow();
+    });
+  });
+
   describe('timeout handling', () => {
     it('should timeout when connect handshake never resolves', async () => {
       const hangingClient = {

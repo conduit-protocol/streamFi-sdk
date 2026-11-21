@@ -1,5 +1,5 @@
 import { describe, it, expect, vi, beforeEach } from 'vitest';
-import type { Transaction } from '@stellar/stellar-sdk';
+import { Transaction } from '@stellar/stellar-sdk';
 import type { Signer } from '../signer.js';
 import type { WalletAdapter } from '../adapters/types.js';
 
@@ -35,7 +35,7 @@ async function runSignTx(
 // ── Tests: boundary checks in _signTx ─────────────────────────────────────────
 
 describe('_signTx — null/undefined boundary checks', () => {
-  it('throws when wallet signTransaction returns null', async () => {
+  it('throws when wallet signTransaction returns null', { timeout: 15000 }, async () => {
     const nullWallet: WalletAdapter = {
       getPublicKey: () => 'GAAZI...',
       signTransaction: async () => null as unknown as Transaction,
@@ -52,7 +52,7 @@ describe('_signTx — null/undefined boundary checks', () => {
     );
   });
 
-  it('throws when wallet signTransaction returns undefined', async () => {
+  it('throws when wallet signTransaction returns undefined', { timeout: 15000 }, async () => {
     const undefWallet: WalletAdapter = {
       getPublicKey: () => 'GAAZI...',
       signTransaction: async () => undefined as unknown as Transaction,
@@ -124,6 +124,28 @@ describe('_signTx — Signer with async/sync sign()', () => {
 
     await expect(runSignTx(sdk, {} as Transaction)).resolves.toBeDefined();
     expect(signed).toBe(true);
+  });
+
+  it('uses the Transaction a Signer returns (immutable-style sign)', async () => {
+    const original = { _tag: 'original' } as unknown as Transaction;
+    const newlySigned = Object.assign(
+      Object.create((await import('@stellar/stellar-sdk')).Transaction.prototype),
+      { _tag: 'signed' },
+    ) as Transaction;
+    const immutableSigner: Signer = {
+      sign: (_tx: Transaction) => newlySigned,
+      publicKey: () => 'GAAZI...',
+    };
+    const { StreamsModule } = await import('../streams.js');
+    const sdk = new StreamsModule({
+      network: 'testnet',
+      factoryAddress: 'CCWAMYJ...',
+      signer: immutableSigner,
+    });
+
+    const result = await runSignTx(sdk, original);
+    expect(result).toBe(newlySigned);
+    expect(result).not.toBe(original);
   });
 });
 

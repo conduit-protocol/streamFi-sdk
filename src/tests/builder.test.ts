@@ -1,70 +1,117 @@
 import { describe, it, expect } from 'vitest';
 import { StreamBuilder } from '../builder.js';
+import { ValidationError } from '../errors.js';
 
 describe('StreamBuilder', () => {
   it('correctly builds a stream configuration when all fields are provided', () => {
     const builder = new StreamBuilder()
-      .token('CD...')
-      .sender('GA...')
-      .recipient('GB...')
+      .token('CAAQCAIBAEAQCAIBAEAQCAIBAEAQCAIBAEAQCAIBAEAQCAIBAEAQC526')
+      .sender('GAAQCAIBAEAQCAIBAEAQCAIBAEAQCAIBAEAQCAIBAEAQCAIBAEAQDZ7H')
+      .recipient('GABAEAQCAIBAEAQCAIBAEAQCAIBAEAQCAIBAEAQCAIBAEAQCAIBAEJXA')
       .amount(1000);
 
     const stream = builder.build();
 
     expect(stream).toEqual({
-      token: 'CD...',
-      sender: 'GA...',
-      recipient: 'GB...',
-      amount: 1000,
+      token: 'CAAQCAIBAEAQCAIBAEAQCAIBAEAQCAIBAEAQCAIBAEAQCAIBAEAQC526',
+      sender: 'GAAQCAIBAEAQCAIBAEAQCAIBAEAQCAIBAEAQCAIBAEAQCAIBAEAQDZ7H',
+      recipient: 'GABAEAQCAIBAEAQCAIBAEAQCAIBAEAQCAIBAEAQCAIBAEAQCAIBAEJXA',
+      amount: '1000',
     });
   });
 
   it('throws an error if any required field is missing', () => {
     expect(() => {
       new StreamBuilder()
-        .sender('GA...')
-        .recipient('GB...')
+        .sender('GAAQCAIBAEAQCAIBAEAQCAIBAEAQCAIBAEAQCAIBAEAQCAIBAEAQDZ7H')
+        .recipient('GABAEAQCAIBAEAQCAIBAEAQCAIBAEAQCAIBAEAQCAIBAEAQCAIBAEJXA')
         .amount(1000)
         .build();
-    }).toThrow('Missing required parameters for StreamBuilder');
+    }).toThrow('token is required');
 
     expect(() => {
       new StreamBuilder()
-        .token('CD...')
-        .recipient('GB...')
+        .token('CAAQCAIBAEAQCAIBAEAQCAIBAEAQCAIBAEAQCAIBAEAQCAIBAEAQC526')
+        .recipient('GABAEAQCAIBAEAQCAIBAEAQCAIBAEAQCAIBAEAQCAIBAEAQCAIBAEJXA')
         .amount(1000)
         .build();
-    }).toThrow('Missing required parameters for StreamBuilder');
+    }).toThrow('sender is required');
 
     expect(() => {
       new StreamBuilder()
-        .token('CD...')
-        .sender('GA...')
+        .token('CAAQCAIBAEAQCAIBAEAQCAIBAEAQCAIBAEAQCAIBAEAQCAIBAEAQC526')
+        .sender('GAAQCAIBAEAQCAIBAEAQCAIBAEAQCAIBAEAQCAIBAEAQCAIBAEAQDZ7H')
         .amount(1000)
         .build();
-    }).toThrow('Missing required parameters for StreamBuilder');
+    }).toThrow('recipient is required');
 
     expect(() => {
       new StreamBuilder()
-        .token('CD...')
-        .sender('GA...')
-        .recipient('GB...')
+        .token('CAAQCAIBAEAQCAIBAEAQCAIBAEAQCAIBAEAQCAIBAEAQCAIBAEAQC526')
+        .sender('GAAQCAIBAEAQCAIBAEAQCAIBAEAQCAIBAEAQCAIBAEAQCAIBAEAQDZ7H')
+        .recipient('GABAEAQCAIBAEAQCAIBAEAQCAIBAEAQCAIBAEAQCAIBAEAQCAIBAEJXA')
         .build();
-    }).toThrow('Missing required parameters for StreamBuilder');
+    }).toThrow('amount is required');
+  });
+
+  it('aggregates multiple missing required fields', () => {
+    expect(() => {
+      new StreamBuilder().build();
+    }).toThrow('4 validation issue(s)');
+  });
+
+  it('allows start times up to 30 days in the past and rejects older dates', () => {
+    const now = Math.floor(Date.now() / 1000);
+    expect(() => new StreamBuilder().startTime(now - 30 * 24 * 60 * 60 + 60)).not.toThrow();
+    expect(() => new StreamBuilder().startTime(now - 30 * 24 * 60 * 60 - 60))
+      .toThrow(/30 days in the past/);
+  });
+
+  it('rejects non-positive amounts with a ValidationError during build', () => {
+    const builder = new StreamBuilder()
+      .token('CAAQCAIBAEAQCAIBAEAQCAIBAEAQCAIBAEAQCAIBAEAQCAIBAEAQC526')
+      .sender('GAAQCAIBAEAQCAIBAEAQCAIBAEAQCAIBAEAQCAIBAEAQCAIBAEAQDZ7H')
+      .recipient('GABAEAQCAIBAEAQCAIBAEAQCAIBAEAQCAIBAEAQCAIBAEAQCAIBAEJXA')
+      .amount(1000);
+    Reflect.set(builder, '_amount', 0n);
+
+    expect(() => builder.build()).toThrow(ValidationError);
+  });
+
+  it('exposes all issues on ValidationError without throwing from validate()', () => {
+    const builder = new StreamBuilder();
+    expect(builder.validate()).toEqual([
+      'token is required',
+      'sender is required',
+      'recipient is required',
+      'amount is required',
+    ]);
+
+    try {
+      builder.build();
+    } catch (err: any) {
+      expect(err.name).toBe('ValidationError');
+      expect(err.issues).toEqual([
+        'token is required',
+        'sender is required',
+        'recipient is required',
+        'amount is required',
+      ]);
+    }
   });
 
 
 
   it('rejects malformed builder inputs before producing a stream configuration', () => {
     const malformedBuilders = [
-      () => new StreamBuilder().token('').sender('GA...').recipient('GB...').amount(1000).build(),
-      () => new StreamBuilder().token('   ').sender('GA...').recipient('GB...').amount(1000).build(),
-      () => new StreamBuilder().token('CD...').sender('').recipient('GB...').amount(1000).build(),
-      () => new StreamBuilder().token('CD...').sender('GA...').recipient('   ').amount(1000).build(),
-      () => new StreamBuilder().token('CD...').sender('GA...').recipient('GB...').amount(0).build(),
-      () => new StreamBuilder().token('CD...').sender('GA...').recipient('GB...').amount(-1).build(),
-      () => new StreamBuilder().token('CD...').sender('GA...').recipient('GB...').amount(Number.NaN).build(),
-      () => new StreamBuilder().token('CD...').sender('GA...').recipient('GB...').amount(Number.POSITIVE_INFINITY).build(),
+      () => new StreamBuilder().token('').sender('GAAQCAIBAEAQCAIBAEAQCAIBAEAQCAIBAEAQCAIBAEAQCAIBAEAQDZ7H').recipient('GABAEAQCAIBAEAQCAIBAEAQCAIBAEAQCAIBAEAQCAIBAEAQCAIBAEJXA').amount(1000).build(),
+      () => new StreamBuilder().token('   ').sender('GAAQCAIBAEAQCAIBAEAQCAIBAEAQCAIBAEAQCAIBAEAQCAIBAEAQDZ7H').recipient('GABAEAQCAIBAEAQCAIBAEAQCAIBAEAQCAIBAEAQCAIBAEAQCAIBAEJXA').amount(1000).build(),
+      () => new StreamBuilder().token('CAAQCAIBAEAQCAIBAEAQCAIBAEAQCAIBAEAQCAIBAEAQCAIBAEAQC526').sender('').recipient('GABAEAQCAIBAEAQCAIBAEAQCAIBAEAQCAIBAEAQCAIBAEAQCAIBAEJXA').amount(1000).build(),
+      () => new StreamBuilder().token('CAAQCAIBAEAQCAIBAEAQCAIBAEAQCAIBAEAQCAIBAEAQCAIBAEAQC526').sender('GAAQCAIBAEAQCAIBAEAQCAIBAEAQCAIBAEAQCAIBAEAQCAIBAEAQDZ7H').recipient('   ').amount(1000).build(),
+      () => new StreamBuilder().token('CAAQCAIBAEAQCAIBAEAQCAIBAEAQCAIBAEAQCAIBAEAQCAIBAEAQC526').sender('GAAQCAIBAEAQCAIBAEAQCAIBAEAQCAIBAEAQCAIBAEAQCAIBAEAQDZ7H').recipient('GABAEAQCAIBAEAQCAIBAEAQCAIBAEAQCAIBAEAQCAIBAEAQCAIBAEJXA').amount(0).build(),
+      () => new StreamBuilder().token('CAAQCAIBAEAQCAIBAEAQCAIBAEAQCAIBAEAQCAIBAEAQCAIBAEAQC526').sender('GAAQCAIBAEAQCAIBAEAQCAIBAEAQCAIBAEAQCAIBAEAQCAIBAEAQDZ7H').recipient('GABAEAQCAIBAEAQCAIBAEAQCAIBAEAQCAIBAEAQCAIBAEAQCAIBAEJXA').amount(-1).build(),
+      () => new StreamBuilder().token('CAAQCAIBAEAQCAIBAEAQCAIBAEAQCAIBAEAQCAIBAEAQCAIBAEAQC526').sender('GAAQCAIBAEAQCAIBAEAQCAIBAEAQCAIBAEAQCAIBAEAQCAIBAEAQDZ7H').recipient('GABAEAQCAIBAEAQCAIBAEAQCAIBAEAQCAIBAEAQCAIBAEAQCAIBAEJXA').amount(Number.NaN).build(),
+      () => new StreamBuilder().token('CAAQCAIBAEAQCAIBAEAQCAIBAEAQCAIBAEAQCAIBAEAQCAIBAEAQC526').sender('GAAQCAIBAEAQCAIBAEAQCAIBAEAQCAIBAEAQCAIBAEAQCAIBAEAQDZ7H').recipient('GABAEAQCAIBAEAQCAIBAEAQCAIBAEAQCAIBAEAQCAIBAEAQCAIBAEJXA').amount(Number.POSITIVE_INFINITY).build(),
     ];
 
     for (const buildMalformed of malformedBuilders) {
@@ -75,37 +122,42 @@ describe('StreamBuilder', () => {
   it('allows chaining calls in any order', () => {
     const stream = new StreamBuilder()
       .amount(500)
-      .recipient('GB...')
-      .token('CD...')
-      .sender('GA...')
+      .recipient('GABAEAQCAIBAEAQCAIBAEAQCAIBAEAQCAIBAEAQCAIBAEAQCAIBAEJXA')
+      .token('CAAQCAIBAEAQCAIBAEAQCAIBAEAQCAIBAEAQCAIBAEAQCAIBAEAQC526')
+      .sender('GAAQCAIBAEAQCAIBAEAQCAIBAEAQCAIBAEAQCAIBAEAQCAIBAEAQDZ7H')
       .build();
 
     expect(stream).toEqual({
-      token: 'CD...',
-      sender: 'GA...',
-      recipient: 'GB...',
-      amount: 500,
+      token: 'CAAQCAIBAEAQCAIBAEAQCAIBAEAQCAIBAEAQCAIBAEAQCAIBAEAQC526',
+      sender: 'GAAQCAIBAEAQCAIBAEAQCAIBAEAQCAIBAEAQCAIBAEAQCAIBAEAQDZ7H',
+      recipient: 'GABAEAQCAIBAEAQCAIBAEAQCAIBAEAQCAIBAEAQCAIBAEAQCAIBAEJXA',
+      amount: '500',
     });
   });
 
-  it('includes ratePerSecond as a number when set with a number', () => {
+  it('serialises a numeric ratePerSecond to a string to match the declared type', () => {
     const stream = new StreamBuilder()
-      .token('CD...')
-      .sender('GA...')
-      .recipient('GB...')
+      .token('CAAQCAIBAEAQCAIBAEAQCAIBAEAQCAIBAEAQCAIBAEAQCAIBAEAQC526')
+      .sender('GAAQCAIBAEAQCAIBAEAQCAIBAEAQCAIBAEAQCAIBAEAQCAIBAEAQDZ7H')
+      .recipient('GABAEAQCAIBAEAQCAIBAEAQCAIBAEAQCAIBAEAQCAIBAEAQCAIBAEJXA')
       .amount(1000)
       .ratePerSecond(500)
       .build();
 
-    expect(stream.ratePerSecond).toBe(500);
+    // build()'s return type promises `ratePerSecond?: string` — the runtime
+    // value must match the declared type (see #459).
+    expect(stream.ratePerSecond).toBe('500');
+    expect(typeof stream.ratePerSecond).toBe('string');
+    const json = JSON.parse(JSON.stringify(stream));
+    expect(json.ratePerSecond).toBe('500');
   });
 
   it('serialises bigint ratePerSecond to string', () => {
     const rate = BigInt('9007199254740993'); // > Number.MAX_SAFE_INTEGER
     const stream = new StreamBuilder()
-      .token('CD...')
-      .sender('GA...')
-      .recipient('GB...')
+      .token('CAAQCAIBAEAQCAIBAEAQCAIBAEAQCAIBAEAQCAIBAEAQCAIBAEAQC526')
+      .sender('GAAQCAIBAEAQCAIBAEAQCAIBAEAQCAIBAEAQCAIBAEAQCAIBAEAQDZ7H')
+      .recipient('GABAEAQCAIBAEAQCAIBAEAQCAIBAEAQCAIBAEAQCAIBAEAQCAIBAEJXA')
       .amount(1000)
       .ratePerSecond(rate)
       .build();
@@ -118,9 +170,9 @@ describe('StreamBuilder', () => {
 
   it('omits ratePerSecond from output when not set', () => {
     const stream = new StreamBuilder()
-      .token('CD...')
-      .sender('GA...')
-      .recipient('GB...')
+      .token('CAAQCAIBAEAQCAIBAEAQCAIBAEAQCAIBAEAQCAIBAEAQCAIBAEAQC526')
+      .sender('GAAQCAIBAEAQCAIBAEAQCAIBAEAQCAIBAEAQCAIBAEAQCAIBAEAQDZ7H')
+      .recipient('GABAEAQCAIBAEAQCAIBAEAQCAIBAEAQCAIBAEAQCAIBAEAQCAIBAEJXA')
       .amount(1000)
       .build();
 
@@ -130,9 +182,9 @@ describe('StreamBuilder', () => {
   it('rejects non-positive ratePerSecond values', () => {
     const builder = () =>
       new StreamBuilder()
-        .token('CD...')
-        .sender('GA...')
-        .recipient('GB...')
+        .token('CAAQCAIBAEAQCAIBAEAQCAIBAEAQCAIBAEAQCAIBAEAQCAIBAEAQC526')
+        .sender('GAAQCAIBAEAQCAIBAEAQCAIBAEAQCAIBAEAQCAIBAEAQCAIBAEAQDZ7H')
+        .recipient('GABAEAQCAIBAEAQCAIBAEAQCAIBAEAQCAIBAEAQCAIBAEAQCAIBAEJXA')
         .amount(1000)
         .ratePerSecond(0);
 
@@ -140,9 +192,9 @@ describe('StreamBuilder', () => {
 
     const builderNeg = () =>
       new StreamBuilder()
-        .token('CD...')
-        .sender('GA...')
-        .recipient('GB...')
+        .token('CAAQCAIBAEAQCAIBAEAQCAIBAEAQCAIBAEAQCAIBAEAQCAIBAEAQC526')
+        .sender('GAAQCAIBAEAQCAIBAEAQCAIBAEAQCAIBAEAQCAIBAEAQCAIBAEAQDZ7H')
+        .recipient('GABAEAQCAIBAEAQCAIBAEAQCAIBAEAQCAIBAEAQCAIBAEAQCAIBAEJXA')
         .amount(1000)
         .ratePerSecond(-1n);
 
@@ -161,9 +213,9 @@ describe('StreamBuilder', () => {
     };
 
     const builder = new StreamBuilder({ concurrency: 3 })
-      .token('CD...')
-      .sender('GA...')
-      .recipient('GB...')
+      .token('CAAQCAIBAEAQCAIBAEAQCAIBAEAQCAIBAEAQCAIBAEAQCAIBAEAQC526')
+      .sender('GAAQCAIBAEAQCAIBAEAQCAIBAEAQCAIBAEAQCAIBAEAQCAIBAEAQDZ7H')
+      .recipient('GABAEAQCAIBAEAQCAIBAEAQCAIBAEAQCAIBAEAQCAIBAEAQCAIBAEJXA')
       .amount(1000);
 
     // Launch 10 concurrent submissions
@@ -181,9 +233,9 @@ describe('StreamBuilder', () => {
     };
 
     const builder = new StreamBuilder({ concurrency: 1, maxQueueSize: 2 })
-      .token('CD...')
-      .sender('GA...')
-      .recipient('GB...')
+      .token('CAAQCAIBAEAQCAIBAEAQCAIBAEAQCAIBAEAQCAIBAEAQCAIBAEAQC526')
+      .sender('GAAQCAIBAEAQCAIBAEAQCAIBAEAQCAIBAEAQCAIBAEAQCAIBAEAQDZ7H')
+      .recipient('GABAEAQCAIBAEAQCAIBAEAQCAIBAEAQCAIBAEAQCAIBAEAQCAIBAEJXA')
       .amount(1000);
 
     // First submission will acquire the semaphore
@@ -196,5 +248,25 @@ describe('StreamBuilder', () => {
     // Clean up
     await p1;
     await p2;
+  });
+
+  it('accepts Soroban contract addresses (C...) for sender and recipient (#512)', () => {
+    const contractSender = 'CAAQCAIBAEAQCAIBAEAQCAIBAEAQCAIBAEAQCAIBAEAQCAIBAEAQC526';
+    const contractRecipient = 'CABAEAQCAIBAEAQCAIBAEAQCAIBAEAQCAIBAEAQCAIBAEAQCAIBAFNSZ';
+    const token = 'CAAQCAIBAEAQCAIBAEAQCAIBAEAQCAIBAEAQCAIBAEAQCAIBAEAQC526';
+
+    const builder = new StreamBuilder()
+      .token(token)
+      .sender(contractSender)
+      .recipient(contractRecipient)
+      .amount(1000)
+      .ratePerSecond(10n);
+
+    const stream = builder.build();
+    expect(stream.sender).toBe(contractSender);
+    expect(stream.recipient).toBe(contractRecipient);
+
+    const args = builder.toContractArgs();
+    expect(args).toHaveLength(8);
   });
 });

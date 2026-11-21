@@ -2,20 +2,25 @@
  * Example: List streams for a given address with pagination.
  *
  * Run with:
- *   ADDRESS=G... npx ts-node examples/list-streams.ts
+ *   ADDRESS=G... FACTORY_ADDRESS=C... npx ts-node examples/list-streams.ts
  */
 
 import { ConduitClient }   from '../src/index.js';
 import { streamProgress }  from '../src/utils.js';
 
-const address = process.env['ADDRESS'];
+const address        = process.env['ADDRESS'];
+const factoryAddress = process.env['FACTORY_ADDRESS'];
 
 if (!address) {
   console.error('Set ADDRESS environment variable.');
   process.exit(1);
 }
+if (!factoryAddress) {
+  console.error('Set FACTORY_ADDRESS environment variable (DripFactory contract ID for testnet).');
+  process.exit(1);
+}
 
-const client = new ConduitClient({ network: 'testnet' });
+const client = new ConduitClient({ network: 'testnet', factoryAddress });
 
 async function main() {
   let offset = 0;

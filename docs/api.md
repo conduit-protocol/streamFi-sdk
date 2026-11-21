@@ -17,8 +17,81 @@ new ConduitClient(config: ConduitConfig)
 | `network` | `'mainnet' \| 'testnet' \| 'local'` | ✓ | — |
 | `keypair` | `Keypair` | For writes | — |
 | `rpcUrl` | `string` | | Network default |
+| `rpcUrls` | `string[]` | | Fallback RPC endpoints; takes precedence over `rpcUrl` |
+| `rpcUrlFailureThresholdConsecutive` | `number` | | Consecutive failures before rotating endpoints. Default `3` |
 | `factoryAddress` | `string` | | Deployed factory |
 | `governorAddress` | `string` | | Deployed governor |
+| `wallet` | `WalletAdapter` | | — |
+| `fee` | `string` | | Explicit inclusion (bid) fee in stroops for submitted transactions. Takes precedence over `feeMultiplier`. Defaults to `BASE_FEE` (100 stroops) |
+| `feeMultiplier` | `number` | | Multiplier applied to `BASE_FEE` to compute the inclusion fee, e.g. `10` bids 10x the network minimum. Ignored when `fee` is set |
+| `negativeCacheTtlMs` | `number` | | How long a not-found `streamAddress()` result is cached. Default 30_000 |
+| `governorConfigCacheTtlMs` | `number` | | How long a `governor.getConfig()` read is reused. Default 30_000. `0` disables the cache |
+
+> **Inclusion fee.** Every submitted transaction previously used `BASE_FEE`
+> (the network minimum, 100 stroops) unconditionally, with no way to raise
+> it. Under inclusion-fee pressure (surge pricing, congested ledgers) a
+> 100-stroop bid is not selected, and the SDK's confirmation polling
+> eventually throws a misleading `Transaction timed out` instead of
+> surfacing "fee too low". Set `fee` (an exact stroops amount) or
+> `feeMultiplier` (a multiple of `BASE_FEE`) on `ConduitConfig` to bid
+> higher; `fee` wins if both are set.
+
+### Convenience methods
+
+* `pauseStream(streamId: string) → Promise<string>` — equivalent to `client.streams.pause(streamId)`.
+* `unpauseStream(streamId: string) → Promise<string>` — equivalent to `client.streams.resume(streamId)`.
+* `getConnectionHealth(): ConnectionHealthStatus` — synchronous snapshot of active RPC and relayer health: `connected`, `status`, average successful `latencyMs`, `packetLossRate`, `activeRpcUrl`, per-endpoint samples, and relayer heartbeat stats.
+* `refreshConnectionHealth(): Promise<ConnectionHealthStatus>` — performs a lightweight `getLatestLedger()` probe and returns the updated snapshot.
+* `getCurrentRpcUrl(): string` — the endpoint currently selected by the failover group.
+* `getStreamProgress(stream, currentTimestamp?)` / `getStreamStatus(stream, currentTimestamp?)` — formatted local progress and remaining time; no RPC call.
+* `simulateCreateStream(params): Promise<StreamSimulationResult>` — dry-run stream creation to preview resource fees, storage/rent estimate, and required balance without signing or submitting.
+* `setWallet(wallet: WalletAdapter): void` — dynamically attach or change the active wallet adapter. Throws `UnsupportedChainError` if the wallet's `chainId` is on a different network than the client was configured for. See [Wallet Adapters](#wallet-adapters) below. Propagates to `client.streams` and `client.tokens`, and to an already-constructed `client.factory` (whose read simulations are sourced from the active wallet). `client.governor` is read-only, uses `config.keypair` for simulation fee sourcing, and is unaffected.
+
+---
+
+## `client.tokens`
+
+SEP-41 token allowance reads and approvals. The owner must match the configured
+keypair, wallet, or signer when submitting an approval.
+
+### `allowance(tokenAddress, ownerAddress, spenderAddress, signal?) → Promise<bigint>`
+
+Returns the current allowance in the token contract's smallest unit.
+
+### `approve(tokenAddress, ownerAddress, spenderAddress, amount, expirationLedger) → Promise<string>`
+
+Sets the spender's allowance and returns the confirmed transaction hash.
+`amount` is a `bigint`; `expirationLedger` is a u32 ledger sequence. Use an
+amount and expiration ledger appropriate for the stream operation that will
+consume the allowance.
+
+---
+
+## Network explorer constants
+
+`NETWORK_NAMES` provides display labels for `mainnet`, `testnet`, and
+`futurenet`. `EXPLORER_URLS` provides transaction, contract, and account URL
+bases for the same `NetworkType` keys:
+
+```typescript
+const transactionUrl = `${EXPLORER_URLS.testnet.transaction}${txHash}`;
+const contractUrl = `${EXPLORER_URLS.mainnet.contract}${contractId}`;
+```
+
+## RPC network presets and contract IDs
+
+`NETWORK_CONFIG` gives the Soroban RPC URL and network passphrase for
+`futurenet` and `standalone` (a local container on `http://localhost:8000`).
+`CONTRACT_IDS` lists the deployed `factory` and `governor` IDs per network.
+The SDK publishes no IDs for these two networks because each ID depends on the
+deployer, so every entry is `null` until a deployment is recorded. Use
+`getContractId(network, role)` to check, and pass your own addresses through
+`factoryAddress` or `governorAddress` when it returns `null`:
+
+```typescript
+const { rpcUrl, networkPassphrase } = NETWORK_CONFIG.standalone;
+const factory = getContractId('standalone', 'factory') ?? myLocalFactoryAddress;
+```
 
 ---
 
@@ -40,6 +113,18 @@ new ConduitClient(config: ConduitConfig)
 
 ---
 
+### `simulateCreateStream(params) → Promise<StreamSimulationResult>`
+
+Runs the same `create_stream` simulation as `create()` but never signs or submits a transaction. Returns `minResourceFee`, `resourceFee`, `storageDeposit`, `depositAmount`, `requiredBalance`, `inclusionFee`, `totalFee`, CPU/read/write usage, and `storageEntries`. `storageDeposit` is the best available Soroban resource-fee estimate; the RPC does not expose a separate rent amount.
+
+---
+
+### `getStreamProgress(stream, currentTimestamp?)` / `getStreamStatus(stream, currentTimestamp?)`
+
+Pure helpers returning `StreamProgress`: ratio and percentage complete, elapsed/remaining seconds, lifecycle status, cumulative `streamed`, `withdrawable`, and display strings such as `"45%"` and `"1h 30m"`. Open-ended streams report `durationSeconds: null` and `formattedRemaining: "Open-ended"`.
+
+---
+
 ### `get(streamId) → Promise<StreamInfo>`
 
 Fetches the complete stream state from the chain.
@@ -52,6 +137,20 @@ Current withdrawable balance in stroops. Read-only, no transaction.
 
 ---
 
+### `streamedTotal(streamId) → Promise<bigint>`
+
+Cumulative amount streamed since the stream started, in stroops — regardless of
+withdrawals. Unlike `withdrawable()`, which reflects only the unwithdrawn
+portion, this value never resets after a withdrawal, so it is suitable for
+progress displays that should keep counting up. Read-only, no transaction.
+
+```typescript
+const total = await client.streams.streamedTotal(streamId);
+// Returns: bigint (cumulative stroops streamed since start)
+```
+
+---
+
 ### `withdraw(streamId, amount?) → Promise<string>`
 
 | Param | Type | Notes |
@@ -61,7 +160,39 @@ Current withdrawable balance in stroops. Read-only, no transaction.
 
 **Returns:** Transaction hash  
 **Requires:** `keypair` set (recipient)  
-**Throws:** `ConduitError` with `contract: 'stream'` — `StreamErrorCode.NothingToWithdraw`, `.NotAuthorized`, `.StreamCancelled`, `.InvalidAmount`
+**Throws:** `Error` (client-side) if an explicit `amount` is `<= 0n` — validated before any RPC round-trip, mirroring the contract's `InvalidAmount` guard; `ConduitError` with `contract: 'stream'` — `StreamErrorCode.NothingToWithdraw`, `.NotAuthorized`, `.StreamCancelled`, `.InvalidAmount`
+
+---
+
+### `batchWithdraw(withdrawals) → Promise<BatchWithdrawResult[]>`
+
+| Param | Type | Notes |
+|-------|------|-------|
+| `withdrawals` | `{ streamId: bigint \| string; amount?: bigint }[]` | One entry per stream to withdraw from |
+
+```typescript
+interface BatchWithdrawResult {
+  streamId: bigint;
+  success:  boolean;
+  txHash?:  string;  // present when success is true
+  error?:   string;  // present when success is false
+}
+```
+
+Withdraws from multiple streams. Soroban permits only one
+`invoke_host_function` operation per transaction, so this cannot be a single
+atomic transaction — each withdrawal is submitted as its own transaction and
+reported independently, so a failure on one streamId (e.g.
+`StreamNotFound`, insufficient balance) does not fail the others.
+
+Withdrawals are submitted **one at a time, not concurrently**. Each
+transaction is built from the caller account's current sequence number;
+submitting all N withdrawals at once means every one of them would read the
+same sequence number and collide, so with a single keypair/wallet at most
+one could ever land on-chain. Awaiting each withdrawal in turn guarantees
+every submission gets a distinct, ordered sequence number.
+
+**Requires:** `keypair`, `wallet`, or `signer` set (recipient)
 
 ---
 
@@ -92,12 +223,44 @@ Resumes a paused stream. Paused duration is excluded from streaming time.
 
 ---
 
-### `topUp(streamId, amount) → Promise<string>`
+### `topUp(streamId, amount, signal?) → Promise<string>`
 
 Adds tokens to the stream balance. Extends effective stream duration.
 
+`amount` is a `bigint` in stroops. For callers that already hold the amount as a string,
+`topUpStream(streamId, amount)` is a thin string-typed wrapper that coerces it and delegates —
+prefer `topUp` in new code, since it also accepts an `signal`.
+
 **Requires:** `keypair` set (sender)  
-**Throws:** `ConduitError` with `contract: 'stream'` — `StreamErrorCode.StreamCancelled`, `.InvalidAmount`
+**Throws:** `Error` (client-side) if `amount` is `<= 0n` — validated before any RPC round-trip; `ConduitError` with `contract: 'stream'` — `StreamErrorCode.StreamCancelled`, `.InvalidAmount`
+
+---
+
+### `forceCancel(streamId) → Promise<string>`
+
+Force-cancels a **paused** stream as the recipient, once the 30-day pause threshold has
+elapsed. Settles atomically like `cancel()`: the recipient's earned-but-unwithdrawn tokens are
+paid out and the unstreamed remainder is refunded to the sender. Prevents a sender from
+indefinitely pausing a stream to hold unstreamed tokens hostage.
+
+**Requires:** `keypair` set (recipient)  
+**Throws:** `ConduitError` with `contract: 'stream'` — `StreamErrorCode.NotPaused`, `.PauseThresholdNotMet`, `.StreamCancelled`, `.NotAuthorized`
+
+---
+
+### `transferRecipient(streamId, newRecipient) → Promise<string>`
+
+Transfers the recipient role to a new address (current recipient only). The new recipient
+inherits all rights, including the withdrawable balance accrued up to the moment of transfer.
+
+| Param | Type | Notes |
+|-------|------|-------|
+| `streamId` | `bigint \| string` | |
+| `newRecipient` | `string` | Stellar G-address of the new recipient |
+
+**Returns:** Transaction hash  
+**Requires:** `keypair` set (recipient)  
+**Throws:** `Error` (client-side) if `newRecipient` is empty; `ConduitError` with `contract: 'stream'` — `StreamErrorCode.NotAuthorized`, `.StreamCancelled`
 
 ---
 
@@ -111,7 +274,7 @@ Reclaims unstreamed tokens. Only works if `clawbackEnabled` was `true` at creati
 
 ---
 
-### `list(params) → Promise<StreamInfo[]>`
+### `list(params) → Promise<PaginatedStreams>`
 
 | Param | Type | Notes |
 |-------|------|-------|
@@ -119,6 +282,26 @@ Reclaims unstreamed tokens. Only works if `clawbackEnabled` was `true` at creati
 | `recipient` | `string?` | Filter by recipient address |
 | `offset` | `number?` | Default `0` |
 | `limit` | `number?` | Default `20`, max `100` |
+| `cursor` | `string?` | Opaque base64-encoded cursor from a previous page's `nextCursor`; takes precedence over `offset` when both are provided. Throws `Invalid cursor` on malformed input |
+
+**Returns:** a page of results plus pagination metadata:
+
+```typescript
+interface PaginatedStreams {
+  streams:     StreamInfo[];  // stream info for this page
+  hasNextPage: boolean;       // whether more results exist after this page
+  totalCount:  bigint;        // number of filtered stream IDs seen through the end of this page
+  offset:      number;        // the offset used for this page
+  limit:       number;        // the limit used for this page
+  nextCursor?: string;        // opaque cursor for the next page; present only when hasNextPage is true
+}
+```
+
+Pass a page's `nextCursor` back as `cursor` to fetch the next page (see [`examples/list-streams.ts`](../examples/list-streams.ts)).
+
+When **both** `sender` and `recipient` are given, the result is the **union** of the two
+filters (streams where the address is either sender or recipient), de-duplicated — neither
+filter is silently dropped.
 
 ---
 
@@ -134,43 +317,180 @@ const sub = client.streams.subscribe(streamId, {
   onResume:    e => console.log('Resumed at:', e.resumedAt),
   onTopUp:     e => console.log('Topped up:', e.amount),
   onClawback:  e => console.log('Clawback:', e.amount),
-  pollInterval: 3000,  // ms; default 5000
+  onCreated:            e => console.log('Created:', e.recipient),
+  onForceCancel:        e => console.log('Force-cancelled by:', e.recipient),
+  onRecipientTransfer:  e => console.log('Recipient transferred to:', e.newRecipient),
+  onOperatorSet:        e => console.log('Operator set:', e.operator),
+  onOperatorRevoke:     e => console.log('Operator revoked:', e.operator),
+  onError:     err => console.warn('Polling error:', err),
+  pollInterval:            3000,   // ms; default 5000
+  maxBackoffMs:            30000,  // ms; default 60000
+  maxConsecutiveFailures:  5,      // default 10
 });
 
 sub.unsubscribe();
 ```
 
-> **Only `amount` (on `onWithdraw`/`onClawback`) is real.** Every other numeric/timestamp field —
-> `totalWithdrawn`, `remaining`, `refundAmount`, `withdrawnSoFar`, `pausedAt`, `withdrawable`,
-> `resumedAt`, `newBalance` — is a hardcoded `0` / `0n` placeholder in `src/events.ts`
-> (`dispatchEvent`), marked `// TODO: parse tuple data`. The contracts emit these as multi-value
-> tuples (e.g. `stream_withdrawn` → `{ amount, total_withdrawn, remaining }`), and the parser
-> doesn't decode tuple `ScVal`s yet — only the single-value case. Don't rely on these fields
-> until that's implemented; re-fetch via `client.streams.get(streamId)` instead.
+> The first poll seeds its start ledger from `getLatestLedger()` (Soroban RPC's
+> `getEvents` requires one); a failed seed is retried on the next poll. After a
+> polling failure the retry delay grows exponentially
+> (`pollInterval · 2^(failures−1)`, capped at `maxBackoffMs`); a successful poll
+> resets it. Once `maxConsecutiveFailures` failures occur in a row the
+> subscription stops (a final `onError` is delivered first).
+
+> **All event payload fields are decoded.** `src/events.ts`'s `dispatchEvent()` parses every
+> multi-field event from its tuple `ScVal`s: `onWithdraw` → `{ recipient, amount,
+> totalWithdrawn, remaining }`, `onCancel` → `{ sender, refundAmount, withdrawnSoFar }`,
+> `onPause` → `{ sender, pausedAt, withdrawable }`, `onTopUp` → `{ sender, amount, newBalance }`,
+> `onCreated` → `{ sender, recipient, token, depositAmount, ratePerSecond, startTime, endTime }`,
+> `onForceCancel` → `{ recipient, payoutAmount, refundAmount }`. Single-field events are decoded
+> from their bare scalar: `onResume` → `{ sender, resumedAt }`, `onClawback` → `{ sender, amount }`,
+> `onRecipientTransfer` → `{ previousRecipient, newRecipient }`, `onOperatorSet` → `{ sender,
+> operator }`, `onOperatorRevoke` → `{ sender, operator }`. These fields are real values from the
+> chain — no placeholder `0`/`0n` values remain.
+>
+> `onRecipientTransfer`, `onForceCancel`, `onOperatorSet`, and `onOperatorRevoke` were previously
+> silently ignored — a live subscriber was never notified when the recipient role moved to
+> another address, a paused stream was force-cancelled, or an operator was delegated/revoked.
+
+The first poll seeds its start ledger from `getLatestLedger()` before calling `getEvents()` (Soroban
+RPC's `getEvents` rejects without a start ledger). If that seeding call itself fails, it's retried on
+the next poll rather than leaving the subscription permanently unable to seed a cursor.
+
+A polling failure calls `onError` and reschedules the next poll with exponential backoff —
+`pollInterval * 2^(consecutiveFailures - 1)`, capped at `maxBackoffMs` — instead of retrying at a
+fixed interval. A successful poll resets the failure count and the delay back to `pollInterval`. If
+`maxConsecutiveFailures` consecutive polls fail in a row, the subscription stops polling entirely
+(after the final `onError` call for that failure) rather than retrying forever against a dead
+endpoint; call `subscribe()` again to restart it.
+
+> `subscribe()`/`subscribeAsync()` also accept an `onLedgerGap: (gap: LedgerGap) => void`
+> handler, called when two dispatched events are not from consecutive ledgers
+> (`nextLedger !== currentLedger + 1`). Unlike `onGap` (keyed on the contract's own sequence
+> topic), this is derived from every event's `ledger` field, so it also catches a skipped
+> ledger range that contained no events carrying a sequence topic at all. A detected gap
+> triggers an automatic backfill fetch for the missed range. See `LedgerGapDetector` under
+> `GraphQLIndexer` below.
+
+### `onStreamEvent(streamId, type, callback, options?) → Promise<Subscription>`
+
+A strongly-typed listener for a single named stream notification, decoding the payload
+automatically so callers don't wrangle raw Soroban XDR.
+
+```typescript
+const sub = await client.streams.onStreamEvent(streamId, 'Cancelled', (e) => {
+  console.log('refunded', e.refundAmount);
+});
+
+const cliffSub = await client.streams.onStreamEvent(streamId, 'CliffReached', (e) => {
+  console.log('cliff reached at', e.cliffTime);
+}, { cliffTime: vestingParams.cliffEndTime });
+```
+
+`'Cancelled'` is a real on-chain event — this delegates to the same decoding `subscribe()`
+uses for `onCancel`. `'CliffReached'` has no on-chain counterpart: the stream contract emits
+no cliff event, since a vesting cliff is a client-side scheduling convention (the stream's
+`startTime` set to the cliff end — see `examples/vesting-schedule.ts`), not contract state. It
+is a one-shot timer that calls `callback` once the wall clock reaches the required
+`options.cliffTime` (Unix seconds); `options.pollInterval` (default 5000ms) controls how often
+the clock is checked. Throws if `'CliffReached'` is requested without `options.cliffTime`.
+
+### `replayEvents(streamId, handlers, fromLedger, options?) → Promise<ReplayEventsResult>`
+
+Replays a stream's historical events over `[fromLedger, toLedger]`, dispatching each through
+the same decoder `subscribe()` uses for live polling.
+
+```typescript
+const result = await client.streams.replayEvents(streamId, {
+  onWithdraw: (e) => console.log('withdrew', e.amount),
+  onCancel:   (e) => console.log('cancelled', e.refundAmount),
+}, lastProcessedLedger + 1);
+
+console.log(`replayed ${result.dispatched} events up to ledger ${result.lastLedger}`);
+```
+
+An application reconnecting after being offline has no way to recover events it missed while
+down — `subscribe()` only sees events from the moment it (re)starts. Pass the last ledger the
+application successfully processed (or one past it) as `fromLedger` to backfill exactly what
+was missed, then resume `subscribe()`/`subscribeAsync()` for new events going forward.
+
+| Option | Type | Default |
+|--------|------|---------|
+| `toLedger` | `number` | the chain's latest ledger at call time |
+| `pageSize` | `number` (1–200) | 200 |
+| `maxPages` | `number` | 1000 |
+
+Returns `{ dispatched: number, lastLedger: number \| undefined }`. Throws if `fromLedger` is
+not a positive integer, if `toLedger` is less than `fromLedger`, or if more than `maxPages`
+pages are fetched before reaching `toLedger`.
 
 ---
 
 ## `client.factory`
 
 ### `streamCount() → Promise<bigint>`
+
 ### `streamAddress(id) → Promise<string | null>`
+
+Resolved (non-null) addresses are cached in-memory for the lifetime of the client, since a
+stream's contract address is fixed at creation and never changes. A `null` result (stream not
+yet found) is cached for `ConduitConfig.negativeCacheTtlMs` (default 30s) so a polled list page
+does not re-simulate every missing id on every refresh; call `clearAddressCache()` to drop it
+earlier. This cache is what `StreamsModule` relies on to avoid re-resolving the same address on
+every `get`/`withdraw`/`cancel`/`pause`/`resume`/`topUp`/`clawback` call and when paginating
+`list()`.
+
+### `streamAddresses(ids, signal?, options?) → Promise<Map<string, string | null>>`
+
+Resolves a whole page of stream IDs in one call, instead of one simulated RPC round trip per id.
+
+```typescript
+const { ids } = await client.factory.streamsBySender(sender, 0, 50);
+const addresses = await client.factory.streamAddresses(ids);
+
+for (const [id, address] of addresses) {
+  // address is null when the id does not resolve to a deployed stream
+}
+```
+
+| Param | Type | Notes |
+|-------|------|-------|
+| `ids` | `(bigint \| string)[]` | Duplicates — including the same id in both forms — are fetched once |
+| `signal` | `AbortSignal?` | Rejects with an `AbortError` if aborted before or during resolution |
+| `options.maxConcurrency` | `number?` | Max simulations in flight; default 8 (a default `stellar-rpc` serves `simulateTransaction` from 8 preflight workers). Values below 1 are treated as 1 |
+
+The returned `Map` is keyed by the decimal stream-id string and preserves first-seen input
+order. Every id is resolved through `streamAddress()`, so the address cache, its hit/miss
+counters and the negative-cache TTL above are shared with single-id lookups in both directions —
+only the cache-miss subset costs a network call. A resolution that *fails* (as opposed to
+resolving to "not found") rejects the whole call and is never cached as a not-found result; ids
+that did resolve stay cached, so a retry re-fetches only the failures.
+
 ### `protocolFeeBps() → Promise<number>`
 
 ---
 
 ## `client.governor`
 
-### `config() → Promise<GovernorConfig>`
+### `getConfig(signal?) → Promise<GovernorConfig>`
 
 ```typescript
 interface GovernorConfig {
   feeBps:             number;
-  feeRecipient:       string;
+  feeRecipient?:      string;
   minDurationSeconds: number;
+  maxDurationSeconds: number;
   maxRatePerSecond:   bigint;
-  factoryAddress:     string;
+  factoryAddress?:    string;
 }
 ```
+
+The result is reused for `ConduitConfig.governorConfigCacheTtlMs` (default 30s, ~6 ledgers at
+the 5s close cadence), since protocol parameters only change when a governance proposal passes —
+a dashboard polling `getConfig()` no longer pays a simulation per tick. Concurrent misses share
+a single simulation, a failed simulation is never cached, and each caller receives its own object
+so mutating a result cannot change what the next caller sees. Set `governorConfigCacheTtlMs: 0`
+to re-simulate on every call, or call `clearConfigCache()` to force the next call to re-simulate.
 
 ---
 
@@ -247,10 +567,112 @@ in each one.
 
 ---
 
+## Bounds & Limits
+
+Every min/max constraint the SDK is aware of, whether it's enforced on-chain by the
+contract, client-side by the SDK, or both. If a bound is enforced by the contract, an
+out-of-range call still reaches the network and fails there (see [Error Codes](#error-codes))
+— the SDK only pre-validates the ones marked "SDK" below to fail fast without a round trip.
+
+| Bound | Value | Enforced by | Constant |
+|-------|-------|-------------|----------|
+| Minimum stream duration | 3600 seconds (1 hour) | Contract (`DripGovernor.min_duration_seconds`) | Not exported — see [#736](https://github.com/conduit-protocol/streamFi-sdk/issues/736)-adjacent companion constants issue; currently only documented in the [Quickstart](../README.md#quickstart) code comment and the `create()` [Validation](../README.md#create-params) list |
+| Maximum rate per second | Governor-configured (`max_rate_per_second`) | Contract (`DripGovernor`) | Not exported; surfaced only via `FactoryErrorCode.RateExceedsMax` (code 8) if exceeded |
+| Deposit amount | `> 0` | Contract (`FactoryErrorCode.InvalidDeposit`) | Not exported |
+| Withdraw / top-up amount | `> 0` | Contract (`StreamErrorCode.InvalidAmount`) | Not exported |
+| Rate per second | `> 0` | Contract (`FactoryErrorCode.InvalidRate`) | Not exported |
+| `startTime` | `>= now` | Contract (`FactoryErrorCode.BackdatedStream`) | Not exported |
+| List pagination page size (default) | 20 | SDK, client-side | [`DEFAULT_LIST_LIMIT`](../src/constants.ts) |
+| List pagination page size (max) | 100 | SDK, client-side — clamped before the request is sent so an oversized `limit` never reaches `streams_by_sender` / `streams_by_recipient` (see [#489](https://github.com/conduit-protocol/streamFi-sdk/issues/489)) | [`MAX_LIST_LIMIT`](../src/constants.ts) via [`clampListLimit()`](../src/constants.ts) |
+| Pagination `offset` | `[0, 2^32 - 1]` (valid `u32` range) | SDK, client-side | [`clampOffset()`](../src/constants.ts) |
+| `batchWithdraw` / builder batch size (default max) | 50 | SDK, client-side | `DEFAULT_MAX_BATCH_SIZE` in [`src/builder.ts`](../src/builder.ts) — not re-exported from `src/constants.ts`; override via `maxBatchSize` in `TransactionBatcher` options |
+| Soroban CPU instructions per transaction (mainnet) | 100,000,000 | Contract/network (Soroban resource limits) | [`DEFAULT_CPU_INSTRUCTION_LIMIT`](../src/fee-estimator.ts) — pre-flight-checked client-side via `estimateBatchFootprint()`, not enforced by the SDK before submission |
+
+**Note on client-side vs. contract enforcement:** where a bound is contract-enforced only
+(no SDK-side constant), the SDK does not pre-validate the value — it relies on the
+contract to reject the call and surfaces the resulting error code (see
+[Error Codes](#error-codes)). Only the list-pagination and batch-size bounds have a
+dedicated exported constant in [`src/constants.ts`](../src/constants.ts); the duration,
+rate, deposit, and amount bounds above are contract-side only and should be treated as
+subject to change without a corresponding SDK release — always confirm against the
+deployed `DripGovernor` values for production use.
+
+---
+
+## Batch resource estimation
+
+### `estimateBatchFootprint(itemCount, options?) → ResourceEstimate`
+
+A synchronous, pre-execution estimate of a multi-stream batch withdrawal's Soroban CPU
+instruction footprint — no RPC call, nothing submitted or simulated on-chain. Soroban caps CPU
+instructions per transaction; a batch sized without regard for that limit only fails
+simulation after it's already been built. This gives a cheap pre-flight check so an oversized
+batch (e.g. 25 withdrawals) can be split before submission.
+
+```typescript
+import { estimateBatchFootprint } from '@conduit-protocol/sdk';
+
+const estimate = estimateBatchFootprint(25);
+if (estimate.exceedsThreshold) {
+  // split into chunks of estimate.recommendedMaxItems
+}
+```
+
+| Option | Type | Default |
+|--------|------|---------|
+| `instructionsPerItem` | `number` | `DEFAULT_INSTRUCTIONS_PER_BATCH_ITEM` (4,000,000) |
+| `fixedOverheadInstructions` | `number` | `DEFAULT_BATCH_FIXED_OVERHEAD_INSTRUCTIONS` (2,000,000) |
+| `cpuInstructionLimit` | `number` | `DEFAULT_CPU_INSTRUCTION_LIMIT` (100,000,000) |
+| `warnThreshold` | `number` (0, 1] | `DEFAULT_BATCH_WARN_THRESHOLD` (0.9) |
+
+Returns a `ResourceEstimate`: `{ itemCount, cpuInstructions, cpuInstructionLimit,
+utilizationRatio, exceedsThreshold, recommendedMaxItems }`. The per-item and overhead costs are
+heuristics calibrated from observed mainnet `withdraw` simulations — pass `options` to
+recalibrate them against your own contract's measured footprint. Throws if `itemCount` is not
+a positive integer, or if any option is out of its valid range.
+
+---
+
+## Waiting for confirmation
+
+### `waitForConfirmation(rpcUrl, txHash, options?) → Promise<ConfirmedTransaction>`
+
+Waits for an already-submitted transaction to confirm. Use it when you submit
+a transaction yourself (a raw `sendTransaction` call, or a wallet's own
+submission flow) and still want the SDK's poll-until-confirmed behavior. It is
+the same loop `StreamsModule` uses internally after it submits a transaction.
+
+| Option | Type | Default | Notes |
+| --- | --- | --- | --- |
+| `pollIntervalMs` | `number` | `1000` | Wait before each poll. |
+| `maxAttempts` | `number` | `30` | Polls before giving up. |
+| `signal` | `AbortSignal` | — | Abort the wait. |
+
+```typescript
+import { waitForConfirmation } from '@conduit-protocol/sdk';
+
+// `hash` came from a sendTransaction call made outside the SDK.
+const confirmed = await waitForConfirmation(rpcUrl, hash, {
+  pollIntervalMs: 2_000,
+  maxAttempts: 20,
+  signal: AbortSignal.timeout(60_000),
+});
+console.log(confirmed.returnValue);
+```
+
+Resolves with `{ hash, returnValue }` once the transaction succeeds. Rejects
+with an `Error` (`Transaction failed: <hash>`) if it fails,
+`ConfirmationTimeoutError` if it does not confirm within `maxAttempts` polls,
+an `AbortError` if `signal` aborts, and `RateLimitError` (or the underlying
+error) if the RPC call fails.
+
+---
+
 ## Utility functions
 
 ```typescript
-import { toStroops, fromStroops, calculateRate, streamProgress, withdrawableLocal }
+import { toStroops, fromStroops, calculateRate, streamProgress, withdrawableLocal,
+  streamedTotalLocal, sumWithdrawable, sumStreamedTotal, bigintSafeStringify, isValidAddress }
   from '@conduit-protocol/sdk/utils';
 
 toStroops('100.5')             // → 1005000000n
@@ -258,9 +680,276 @@ fromStroops(1005000000n)       // → '100.5'
 calculateRate('1000', 2592000) // → 3858n  stroops/sec
 streamProgress(streamInfo)     // → 0.42   (0–1 fraction elapsed)
 withdrawableLocal(streamInfo)  // → bigint (client-side estimate, no RPC call)
+streamedTotalLocal(streamInfo) // → bigint (cumulative streamed, ignores withdrawals)
+sumWithdrawable(streams)       // → bigint (withdrawable across many streams)
+sumStreamedTotal(streams)      // → bigint (streamed total across many streams)
 ```
 
 `withdrawableLocal` is useful for building live counters without polling the chain on every render tick.
+
+`streamedTotalLocal` and `sumStreamedTotal` are the local counterparts of `streamedTotal()`: they do not subtract `withdrawn`, so a "total streamed so far" display keeps counting up after withdrawals. `StreamInfo` has no cancellation time, so a cancelled stream reports its `withdrawn` amount (a lower bound) rather than continuing to accrue.
+
+`toStroops`, `fromStroops`, `calculateRate`, and `calculateYield` use a precomputed `POW10`
+lookup table for decimal values 0–19, avoiding repeated `BigInt(10 ** decimals)` computation
+on every call. See [`docs/architecture.md`](./architecture.md#performance) for the full
+write-up of this and the other `StreamsModule` caching optimizations.
+
+### `bigintSafeStringify(value)`
+
+Recursively converts all `bigint` values in an object or array to their string
+representation, ensuring safe JSON serialisation across all browsers (Safari/WebKit
+serialises bare `bigint` as `{}` instead of throwing). Used internally by the SDK
+before network submission and in `StreamInfo.toJSON()`.
+
+**Lazy cloning:** The function only allocates a new object or array when at least one
+descendant value is a `bigint` that gets converted. If no `bigint` values are present,
+the original input reference is returned unchanged — avoiding unnecessary allocations
+and GC pressure. This makes it safe to call in hot paths like `StreamBuilder.build()`
+and `ConduitBatcher.execute()`.
+
+```typescript
+import { bigintSafeStringify } from '@conduit-protocol/sdk/utils';
+
+// Object with bigints → new object allocated
+const sanitized = bigintSafeStringify({ rate: 38580n });
+// → { rate: '38580' }
+
+// Object without bigints → same reference returned
+const plain = { name: 'test', amount: 100 };
+const result = bigintSafeStringify(plain);
+console.log(result === plain); // → true
+```
+
+### `isValidAddress(address)`
+
+Static format validation for Stellar public keys (G-addresses). Checks StrKey encoding,
+version byte, and checksum — does not verify on-chain existence. Returns `true` for
+valid Ed25519 public keys, `false` otherwise.
+
+```typescript
+import { isValidAddress } from '@conduit-protocol/sdk/utils';
+
+isValidAddress('GABC...XYZ');           // → true
+isValidAddress(Keypair.random().publicKey()); // → true
+isValidAddress('not-an-address');      // → false
+```
+
+---
+
+## RPC Server Lifecycle
+
+The SDK maintains an internal cache of `SorobanRpc.Server` instances keyed by URL. Reusing server
+instances avoids creating new HTTP agents on every RPC call, which reduces TCP/TLS handshake
+overhead, lowers GC pressure, and improves throughput — particularly for operations like
+`client.streams.list()` that issue multiple RPC calls in quick succession.
+
+### `getServer(rpcUrl)`
+
+Returns a cached `SorobanRpc.Server` for the given URL. Subsequent calls with the same URL
+return the same instance. This is the recommended way to obtain an RPC server when calling
+low-level Soroban helpers directly.
+
+```typescript
+import { getServer } from '@conduit-protocol/sdk';
+
+const server = getServer('https://soroban-mainnet.stellar.org');
+```
+
+### `clearServerCache()`
+
+Clears the internal server cache. Useful in test suites between test cases that switch
+network configurations, or when you need to force a fresh server instance.
+
+```typescript
+import { clearServerCache } from '@conduit-protocol/sdk';
+
+clearServerCache();
+```
+
+> **Internal usage:** All SDK functions that interact with the Soroban RPC (`buildContractCallTx`,
+> `simulateReadOnly`, `invokeContract`, `StreamsModule`, `subscribeToStream`, etc.) build their
+> server through an internal wrapper that calls `getServer` for the cached instance and adds
+> automatic retry-with-backoff on rate-limit errors (HTTP 429). HTTP 503 (Service Unavailable) is
+> **not** retried — it is surfaced as a `RpcServiceUnavailableError` so callers can fail over to a
+> different RPC URL instead of retrying a node that is down. Calling `getServer` yourself
+> gives you the cached-but-unwrapped instance — no automatic retry — so you do not need to call
+> it yourself unless you are using the low-level Soroban helpers directly and want to manage
+> retries on your own.
+
+### Multi-endpoint failover
+
+When `rpcUrls` contains more than one endpoint, the SDK registers a process-wide failover group keyed by the first URL. A call is attempted against the active endpoint with no same-endpoint retries: HTTP 429, HTTP 503, transport timeouts/network errors, and open circuits immediately rotate to the next untried endpoint. `rpcUrlFailureThresholdConsecutive` also rotates after that many generic consecutive failures. `getCurrentRpcUrl()` reports the active endpoint, and `getConnectionHealth()` reports latency and packet loss for every configured endpoint.
+
+### Connection health
+
+`recordConnectionResult(scope, ok, durationMs, kind)` and the exported `getEndpointHealth(url)` / `getRelayerHealth()` track a rolling 60-second window (max 200 samples). Relayer heartbeat ping/pong results are recorded under the relayer scope; RPC calls record successes and failures under their endpoint URL. `ConnectionHealthStatus.status` is `'healthy'` while the last sample succeeded and fewer than half the recent samples failed, `'degraded'` when the last sample succeeded but packet loss is at least 50%, and `'disconnected'` when the last sample failed or none exist.
+
+### `getTokenDecimals(rpcUrl, passphrase, callerAddr, tokenId) → Promise<number>`
+
+Queries a SEP-41 token contract's `decimals()`. A token's decimals cannot change after
+deployment, so results are cached per `rpcUrl:tokenId` for the lifetime of the process —
+repeated calls for the same token (e.g. across multiple `client.streams.create()` calls) resolve
+from cache instead of issuing another RPC simulation. Concurrent calls for the same token also
+dedupe onto a single in-flight simulation. A failed simulation is not cached, so the next call
+retries against the network.
+
+```typescript
+import { getTokenDecimals, clearTokenDecimalsCache } from '@conduit-protocol/sdk';
+
+clearTokenDecimalsCache(); // force a fresh simulation on the next call
+```
+
+---
+
+## Wallet Adapters
+
+`WalletAdapter` is the interface `client.streams` signs transactions through — implement it to
+support any wallet. The SDK ships two implementations:
+
+### `KeypairWalletAdapter`
+
+Wraps a raw `@stellar/stellar-sdk` `Keypair` so `config.keypair` can be used through the same
+`WalletAdapter` interface as a browser or WalletConnect wallet. Constructed automatically by
+`ConduitClient`/`StreamsModule` when `config.keypair` is supplied and no `config.wallet` is given.
+
+```typescript
+new KeypairWalletAdapter(keypair: Keypair)
+```
+
+* `getPublicKey(): string` — the keypair's G-address.
+* `signTransaction(tx: Transaction | string, opts?: SignTransactionOptions): Promise<Transaction | string>` — signs and returns a `Transaction` instance as-is; for a raw XDR string, requires `opts.networkPassphrase` (throws otherwise) and returns signed XDR. `opts.accountToSign` is not applicable — a keypair only ever signs as itself.
+* `isConnected(): boolean` — always `true`.
+
+### `WalletConnectAdapter`
+
+Wraps a WalletConnect v2 session. See its JSDoc in `src/adapters/walletconnect.ts` for the full
+option set.
+
+---
+
+## `GraphQLIndexer`
+
+A client for a Conduit indexer's GraphQL endpoint — one-shot queries plus live subscriptions.
+
+```typescript
+new GraphQLIndexer(endpoint: string)
+```
+
+Throws if `endpoint` is empty.
+
+### `query<T = unknown>(options) → Promise<T>`
+
+Issues a single GraphQL query as an HTTP POST and returns the unwrapped `data` payload.
+
+> [!NOTE]
+> **Return Contract (Unwrapped Data)**: Unlike standard GraphQL clients that return the raw
+> `{ data, errors }` envelope, `query()` automatically unpacks the response and returns `body.data`
+> directly. If the GraphQL endpoint returns any errors in `errors[]`, `query()` throws a
+> `ConduitError` containing the aggregated error messages. Pass a type parameter
+> `query<T>()` to strongly type the returned data.
+
+| Field | Type | Required |
+|-------|------|----------|
+| `query` | `string` | ✓ |
+| `variables` | `Record<string, unknown>` | |
+| `headers` | `Record<string, string>` | |
+| `timeoutMs` | `number` | |
+| `signal` | `AbortSignal` | |
+
+The request is wired to a per-request `AbortController`. If the indexer has not responded within
+`timeoutMs` (default `DEFAULT_INDEXER_TIMEOUT_MS`, 15_000) the fetch is aborted and `query()`
+rejects with an `IndexerTimeoutError` (whose `endpoint` and `timeoutMs` fields describe what
+timed out). Pass `timeoutMs: 0`/`Infinity` to disable the SDK timeout. A caller-supplied `signal`
+aborts the in-flight request and rejects with the underlying `AbortError` — use it to cancel on
+unmount or navigation.
+
+**Throws** if `query` is empty, if the HTTP response is not `ok`, if GraphQL errors are returned
+(as a `ConduitError`), or with an `IndexerTimeoutError` when the request exceeds `timeoutMs`.
+
+### `subscribe(options) → IndexerSubscription`
+
+Opens a live subscription. Prefers a `graphql-transport-ws` WebSocket connection derived from
+`endpoint` (`https://` → `wss://`, `http://` → `ws://`); when no `WebSocket` constructor is
+available (e.g. some non-browser, non-Node runtimes) it falls back to reading a
+`text/event-stream` HTTP response and parsing its `data:` lines.
+
+| Field | Type | Required |
+|-------|------|----------|
+| `query` | `string` | ✓ |
+| `variables` | `Record<string, unknown>` | |
+| `headers` | `Record<string, string>` | |
+| `onData` | `(data: unknown) => void` | ✓ |
+| `onError` | `(error: Error) => void` | |
+| `maxReconnectAttempts` | `number` (0–32, default 5) | |
+| `reconnectDelayMs` | `number` (0–60000, default 1000) | |
+
+On the WebSocket path, an unexpected socket close calls `onError` (if provided) and retries
+with linear backoff (`reconnectDelayMs * attempt`), matching `WebSocketRelayer`. The
+subscription stays active until `unsubscribe()`, `cleanup()`, or the retry budget is
+exhausted. Exhaustion calls `onError` again with a message containing `exhausted` and then
+tears the subscription down. The SSE fallback does not reconnect.
+
+`maxReconnectAttempts` / `reconnectDelayMs` must be integers in the ranges above; out-of-range
+values throw before a socket is opened. `maxReconnectAttempts: 0` reports the close and
+tears down immediately.
+
+Returns `{ unsubscribe(): void }`. Calling `unsubscribe()` is idempotent — it sends a
+`complete` message (WebSocket transport) or aborts the underlying fetch (SSE fallback),
+cancels any pending reconnect timer, and is safe to call more than once.
+
+### `getSubscriptionCount() → number`
+
+Number of subscriptions currently active on this indexer instance.
+
+### `cleanup(): void`
+
+Unsubscribes every active subscription and marks the indexer destroyed — subsequent calls to
+`query()` or `subscribe()` throw.
+
+```typescript
+import { GraphQLIndexer } from '@conduit-protocol/sdk';
+
+const indexer = new GraphQLIndexer('https://indexer.streamfi.io/graphql');
+
+const sub = indexer.subscribe({
+  query: 'subscription { streamUpdated(id: "1") { id withdrawn } }',
+  onData: (data) => console.log(data),
+  onError: (err) => console.error(err),
+});
+
+// later
+sub.unsubscribe();
+indexer.cleanup();
+```
+
+### `LedgerGapDetector`
+
+Tracks a monotonically increasing ledger sequence and flags a skip, independently of any
+particular RPC transport — feed it any sequence of ledger numbers (e.g. `event.ledger` from a
+poller) and it reports a gap without needing to know where those numbers came from.
+
+```typescript
+import { LedgerGapDetector } from '@conduit-protocol/sdk';
+
+const detector = new LedgerGapDetector();
+detector.observe(100);        // undefined — first observation
+detector.observe(105);        // { expected: 101, actual: 105 }
+detector.currentLedger;       // 105
+detector.reset();             // forget tracked state
+```
+
+* `observe(ledger: number): LedgerGap | undefined` — records the next observed ledger.
+  Returns `{ expected, actual }` when `ledger` is not exactly one past the previously observed
+  value; returns `undefined` for a contiguous, duplicate, or re-ordered (behind-current) value.
+  Throws if `ledger` is not a non-negative integer.
+* `currentLedger: number | undefined` — the last observed ledger, or `undefined` before the
+  first `observe()` call.
+* `reset(): void` — clears the tracked ledger so the next `observe()` call can't be flagged.
+
+`client.streams.subscribe()`/`subscribeAsync()` (see `client.streams` above) use this
+internally to catch a skipped ledger during a network hiccup even when no event carrying the
+contract's own sequence topic bracketed it, firing `onLedgerGap` and an automatic backfill
+fetch.
 
 ---
 
@@ -278,7 +967,21 @@ A helper class to build stream configurations with method chaining.
 * `sender(address: string): this` - Sets the sender address.
 * `recipient(address: string): this` - Sets the recipient address.
 * `amount(val: number): this` - Sets the deposit amount in the smallest unit (stroops).
-* `build(): StreamConfig` - Validates and returns the built stream configuration. Throws if any required field is missing.
+* `ratePerSecond(val: number | bigint): this` - Sets the stream rate in stroops per second, as an alternative to `amount()`-only streams. Accepts a `number` or `bigint`; `bigint` values are serialised to strings before network submission to avoid Safari/WebKit `JSON.stringify` quirks.
+* `startTime(val: number): this` - Sets the stream's start time (Unix timestamp, seconds). Optional; `toContractArgs()`/`toBatchOperation()` default to "now" when omitted. Throws if `val` is in the past.
+* `endTime(val: number): this` - Sets the stream's end time (Unix timestamp, seconds). Optional; `toContractArgs()`/`toBatchOperation()` default to `0` (open-ended) when omitted.
+* `clawbackEnabled(val: boolean): this` - Sets whether the sender may claw back unstreamed tokens. Optional; defaults to `false`.
+* `build(): StreamConfig` - Validates and returns the built stream configuration. Throws if any required field is missing. Includes `ratePerSecond`/`startTime`/`endTime`/`clawbackEnabled` in the result when set.
+* `toContractArgs(): unknown[]` - Produces the exact 8 positional arguments the real `DripFactory.create_stream` contract call expects — `(sender, recipient, token, deposit_amount: i128, rate_per_sec: i128, start_time: u64, end_time: u64, clawback_enabled: bool)`. Throws everything `build()` throws, plus a dedicated error if `ratePerSecond` was never set (the contract has no way to derive a rate on its own).
+* `toBatchOperation(method?: string): BatchOperation` - Wraps `toContractArgs()` in a `BatchOperation` (`{ method: 'create_stream', params: {}, args }`) ready to pass to `ConduitBatcher.executeAsync()`. This is the supported way to take a `StreamBuilder` all the way to a real, submittable `create_stream` transaction — see the note under `ConduitBatcher` below.
+* `submit(submitFn, options?): Promise<unknown>` - Builds the payload and submits it through `submitFn` with automatic retries (exponential backoff), concurrency control via an internal semaphore, a pending queue with backpressure, and `AbortSignal` support. Throws if the builder was destroyed or the queue is full.
+
+  Options (`SubmitOptions`):
+  * `maxRetries?: number` - Max retry attempts per payload (default `3`).
+  * `retryDelayMs?: number` - Base backoff delay in ms, doubled per retry (default `100`).
+  * `concurrency?: number` - Max concurrent in-flight submissions (default `10`).
+  * `maxQueueSize?: number` - Max pending queue size before backpressure kicks in (default `100`).
+  * `signal?: AbortSignal` - Aborts an in-flight submission.
 
 ```typescript
 import { StreamBuilder } from '@conduit-protocol/sdk';
@@ -289,15 +992,35 @@ const stream = new StreamBuilder()
   .recipient('GB...')
   .amount(1000)
   .build();
+
+// ratePerSecond is an alternative to amount():
+const drip = new StreamBuilder()
+  .token('USDC')
+  .sender('GD...')
+  .recipient('GB...')
+  .ratePerSecond(10n) // 10 stroops/sec
+  .build();
+
+// submit() handles retries, backpressure and abort for you:
+const result = await new StreamBuilder()
+  .token('USDC')
+  .sender('GD...')
+  .recipient('GB...')
+  .amount(1000)
+  .submit(async (payload) => submitToNetwork(payload), { maxRetries: 5 });
 ```
 
 ### `ConduitBatcher`
 
-A utility class to bundle multiple stream operations with mandatory client-side validation.
+A utility class to bundle multiple stream operations with mandatory client-side validation. `execute`/`executeAsync` are **instance methods** — instantiate with `new ConduitBatcher()` first (see [`examples/fluent-builder.ts`](../examples/fluent-builder.ts)).
+
+> **Building real `create_stream` calls:** `execute()` takes plain `Record<string, unknown>[]`. With the default `create_stream` method it builds the exact positional, ABI-typed args (`deposit_amount`/`rate_per_sec` as `i128`, `start_time`/`end_time` as `u64`, honoring `startTime`/`endTime`/`clawbackEnabled` when present); for other methods it encodes each item as a single sorted map keyed by whatever properties it happens to have. `execute()` does no ABI validation (a missing `ratePerSecond` silently becomes `0`, for example), so for a fully validated `create_stream` invocation build a `BatchOperation` with `StreamBuilder.toBatchOperation()` (which supplies the correct positional, ABI-typed `args`) and pass it to `executeAsync()`.
+>
+> **Integer encoding:** `paramToScVal()` no longer forces every integer `number` to `i64` and every `bigint` to `i128`. Untyped positive integers now encode as `u64` (matching the contract's `start_time`/`end_time`/stream-ID types) and negatives as `i64`; pass an explicit type (`paramToScVal(value, 'i128')`) or a per-field `BatchOperation.types` hint (e.g. `{ streamId: 'u64', amount: 'i128' }`) to force a specific width, and already-encoded `xdr.ScVal`s pass through untouched (#497).
 
 #### Methods
 
-* `static execute(streams: Record<string, unknown>[]): BatchResult` - Validates and bundles the list of stream configurations into a single transaction. Returns `{ success: false, errors: [...] }` if validation fails instead of throwing.
+* `execute(streams: Record<string, unknown>[], options?: BatchExecuteOptions): BatchResult` - Validates and bundles the list of stream configurations into a single transaction. Returns `{ success: false, errors: [...] }` if validation fails instead of throwing. Each item becomes an ABI-agnostic sorted-map argument unless you build `BatchOperation`s with explicit `args` (see `toBatchOperation()` above) and go through `executeAsync()` instead.
 
 **Validation Rules:**
 - Payload must be a non-null, non-empty array
@@ -305,16 +1028,188 @@ A utility class to bundle multiple stream operations with mandatory client-side 
 - Invalid payloads are rejected at the client before submission
 
 ```typescript
-import { ConduitBatcher } from '@conduit-protocol/sdk';
+import { StreamBuilder, ConduitBatcher } from '@conduit-protocol/sdk';
 
-const result = ConduitBatcher.execute([stream1, stream2]);
+// Real create_stream invocation: build ABI-exact args, then executeAsync().
+const operation = new StreamBuilder()
+  .token('USDC')
+  .sender('GD...')
+  .recipient('GB...')
+  .amount(1000)
+  .ratePerSecond(10n)
+  .toBatchOperation();
+
+const result = await new ConduitBatcher().executeAsync([operation], { context });
 if (!result.success) {
   console.error('Validation errors:', result.errors);
   return;
 }
 ```
 
-* `static executeAsync(operations: BatchOperation[], signal?: AbortSignal): Promise<BatchResult>` - Asynchronously execute a batch with abort signal support.
+* `executeAsync(operations: BatchOperation[], signalOrOptions?: AbortSignal | BatchExecuteAsyncOptions): Promise<BatchResult>` - Asynchronously execute a batch with abort signal / options support. `BatchOperation.args`, when present, is used verbatim as the contract's positional arguments (see `StreamBuilder.toBatchOperation()`). `BatchOperation.types` supplies per-field ScVal type hints for the `params` map (e.g. `{ method: 'withdraw', params: { streamId: 1n }, types: { streamId: 'u64' } }`) so u64 stream IDs and i128 amounts encode with the correct width instead of the default inference (#497).
 
-**Throws:** `ConduitError` if batcher is destroyed.
+**Throws:** `Error` if batcher is destroyed.
 
+---
+
+### `buildBatchTransactions(operations, context) → Promise<BuiltBatchTransaction[]>`
+
+Builds one transaction per operation and, when `context.rpcUrl` is set, simulates and assembles
+each via RPC so the returned XDR is ready to submit. Simulations for the batch's operations run
+**concurrently** (not one at a time) since each operation's transaction and simulation are
+independent of every other operation's. Each result's `index` field reflects its position in the
+input `operations` array — use it to submit transactions in order, since sequence numbers are
+still consumed sequentially even though simulation itself is not.
+
+---
+
+## `NonceManager`
+
+```typescript
+const nonces = new NonceManager({ startNonce: 0n, maxNonce: 1_000_000n });
+const lock = await nonces.acquire();
+// ... use lock.nonce ...
+lock.release();
+```
+
+A single-lock queue that hands out sequential nonces one caller at a time. `acquire()` resolves
+immediately if the lock is free, or queues behind the current holder otherwise.
+
+* `acquire(): Promise<NonceLock>` — waits for the lock, then resolves with `{ nonce, release }`.
+* `acquireWithFallback(timeoutMs = 5000): Promise<NonceLock>` — like `acquire`, but rejects if the
+  lock isn't granted within `timeoutMs`. A timed-out call is cancelled out of the wait queue, so
+  it never holds the lock hostage — a later `release()` from the current holder correctly hands
+  the lock to the next live waiter (or frees it) instead of dead-ending on an abandoned caller.
+* `safeAcquire(retries = 3, delayMs = 100): Promise<NonceLock>` — retries `acquireWithFallback`
+  with linear backoff.
+* `reset(nonce?)`, `destroy()`, `.current`, `.remaining`, `.acquired` — state inspection/reset.
+
+---
+
+## `Module36` (Feature #36)
+
+Stream snapshot diff engine implementing Feature #36. Uses LRU-memoized comparisons to avoid recomputing deltas for repeated identical stream state comparisons; actual speedup is workload-dependent (proportional to cache hit rate).
+
+### Constructor
+
+```typescript
+new Module36(config?: Module36Config)
+```
+
+| Option | Type | Default | Notes |
+|--------|------|---------|-------|
+| `cacheSize` | `number` | `1000` | Max entries in the LRU memoization cache |
+| `enableOptimization` | `boolean` | `true` | Enables LRU-memoized diffing |
+
+### Methods
+
+* `diffSnapshots(previous: StreamSnapshot, current: StreamSnapshot): StreamDiff` — Computes withdrawable/progress deltas and status-change detection between two observations.
+* `diffBatch(pairs: Array<{ previous: StreamSnapshot; current: StreamSnapshot }>): StreamDiff[]` — Diffs many snapshot pairs in one pass.
+* `computeAccrual(ratePerSecond: bigint, fromSec: number, toSec: number): bigint` — Fast BigInt accrual between timestamps.
+* `clearCache(): void` — Clears the LRU cache and performance counters.
+* `getPerformanceMetrics(): Module36Metrics` — Returns `totalDiffs`, `cacheHits`, `cacheMisses`, `averageExecutionTimeMs`, and `measuredSpeedupPercent` (a real measurement derived from this instance's own accumulated hit/miss timings, `null` until both have occurred at least once — not a fixed assumed percentage).
+
+---
+
+## `Module26` (Feature #26)
+
+Stream portfolio aggregator implementing Feature #26. Uses LRU-memoized summaries to avoid recomputing totals for repeated identical portfolio comparisons; actual speedup is workload-dependent (proportional to cache hit rate).
+
+### Constructor
+
+```typescript
+new Module26(config?: Module26Config)
+```
+
+| Option | Type | Default | Notes |
+|--------|------|---------|-------|
+| `cacheSize` | `number` | `1000` | Max entries in the LRU memoization cache |
+| `enableOptimization` | `boolean` | `true` | Enables LRU-memoized aggregation |
+| `batchChunkSize` | `number` | `50` | Chunk size for large portfolio scans |
+
+### Methods
+
+* `aggregatePortfolio(items: PortfolioStreamItem[], nowSec?: number): PortfolioSummary` — Totals withdrawable balance, active rate, and lifecycle counts.
+* `projectRemaining(stream: StreamInfo, horizonSecs: number, nowSec?: number): bigint` — Projects remaining accrual over a time horizon.
+* `clearCache(): void` — Clears the LRU cache and performance counters.
+* `getPerformanceMetrics(): Module26Metrics` — Returns `totalAggregations`, `cacheHits`, `cacheMisses`, `averageExecutionTimeMs`, and `measuredSpeedupPercent` (a real measurement derived from this instance's own accumulated hit/miss timings, `null` until both have occurred at least once — not a fixed assumed percentage).
+
+---
+
+## `Module48` (Feature #48)
+
+Streaming analytics and batch-evaluation engine implementing Feature #48. Uses a memoized lookup cache to avoid recomputing withdrawable/progress for repeated identical stream evaluations; actual speedup is workload-dependent (proportional to cache hit rate).
+
+### Constructor
+
+```typescript
+new Module48(config?: Module48Config)
+```
+
+| Option | Type | Default | Notes |
+|--------|------|---------|-------|
+| `cacheSize` | `number` | `1000` | Max entries in memoization cache |
+| `enableOptimization` | `boolean` | `true` | Enables memoized lookup caching |
+| `batchChunkSize` | `number` | `50` | Stream chunk size for batch processing |
+
+### Methods
+
+* `processSingleItem(item: StreamBatchItem): Module48Result` - Evaluates a stream's withdrawable balance and progress.
+* `processStreamBatch(items: StreamBatchItem[]): Module48Result[]` - Processes batch array of streams in chunks.
+* `computeOptimizedYield(ratePerSecond: bigint, durationSecs: number): bigint` - Fast BigInt yield calculation.
+* `clearCache(): void` - Clears the internal lookup cache and metrics.
+* `getPerformanceMetrics(): Module48Metrics` - Returns `totalProcessed`, `cacheHits`, `cacheMisses`, `averageExecutionTimeMs`, and `measuredSpeedupPercent` (a real measurement derived from this instance's own accumulated hit/miss timings, `null` until both have occurred at least once — not a fixed assumed percentage).
+
+---
+
+## `Module49` (Feature #49)
+
+Streaming analytics and evaluation engine implementing Feature #49. Built with memoized cache algorithms and pre-allocated buffer iteration for fast stream batch evaluation.
+
+### Constructor
+
+```typescript
+new Module49(config?: Module49Config)
+```
+
+| Option | Type | Default | Notes |
+|--------|------|---------|-------|
+| `cacheSize` | `number` | `1000` | Max entries in memoization cache |
+| `enableOptimization` | `boolean` | `true` | Enables memoized lookup caching |
+| `batchChunkSize` | `number` | `50` | Stream chunk size for batch processing |
+
+### Methods
+
+* `processSingleItem(item: StreamBatchItem49): Module49Result` - Evaluates a stream's withdrawable balance and progress.
+* `processStreamBatch(items: StreamBatchItem49[]): Module49Result[]` - Processes batch array of streams in chunks.
+* `computeOptimizedYield(ratePerSecond: bigint, durationSecs: number): bigint` - Fast BigInt yield calculation.
+* `clearCache(): void` - Clears the internal lookup cache and metrics.
+* `getPerformanceMetrics(): Module49Metrics` - Returns real-time metrics (`totalProcessed`, `cacheHits`, `cacheMisses`, `hitRate`, `averageExecutionTimeMs`).
+
+---
+
+## `Module44` (Feature #44)
+
+Stream liquidity-risk / runway calculator implementing Feature #44. For each stream, computes the remaining `runwaySecs` until `endTime` and classifies it into a `LiquidityRiskLevel` (`'inactive' | 'critical' | 'warning' | 'healthy'`), so a dashboard can flag streams about to run out of scheduled balance. Uses the same LRU-memoized lookup pattern as `Module26`/`Module36`/`Module48`; actual speedup is workload-dependent (proportional to cache hit rate) — see `getPerformanceMetrics()` for a measured value, never a fixed assumed percentage.
+
+### Constructor
+
+```typescript
+new Module44(config?: Module44Config)
+```
+
+| Option | Type | Default | Notes |
+|--------|------|---------|-------|
+| `cacheSize` | `number` | `1000` | Max entries in memoization cache |
+| `enableOptimization` | `boolean` | `true` | Enables memoized lookup caching |
+| `batchChunkSize` | `number` | `50` | Stream chunk size for batch processing |
+| `criticalThresholdSecs` | `number` | `86400` (1 day) | Runway below this is `'critical'`. Throws if negative |
+| `warningThresholdSecs` | `number` | `604800` (7 days) | Runway below this (and at/above `criticalThresholdSecs`) is `'warning'`. Throws if not greater than `criticalThresholdSecs` |
+
+### Methods
+
+* `assessSingleItem(item: StreamRiskItem): StreamRiskAssessment` — Computes one stream's `runwaySecs` and `riskLevel`. A cancelled, paused, or zero-rate stream is `'inactive'` with `runwaySecs: 0`. An open-ended stream (`endTime === 0`) is `'healthy'` with `runwaySecs: null` — its runway isn't bounded by a schedule, only by the sender keeping the balance topped up.
+* `assessBatch(items: StreamRiskItem[]): StreamRiskAssessment[]` — Assesses an array of streams in `batchChunkSize` chunks.
+* `estimateTopUpNeeded(stream: StreamInfo, targetRunwaySecs: number, nowSec?: number): bigint` — Stroops needed via `top_up()` for the stream's runway to reach `targetRunwaySecs`. Returns `0n` if the stream is inactive/paused/cancelled, the target is non-positive, or the target is already met (including any open-ended stream, whose runway is treated as unbounded).
+* `clearCache(): void` — Clears the internal lookup cache and metrics.
+* `getPerformanceMetrics(): Module44Metrics` — Returns `totalAssessed`, `cacheHits`, `cacheMisses`, `averageExecutionTimeMs`, and `measuredSpeedupPercent` (a real measurement derived from this instance's own accumulated hit/miss timings, `null` until both have occurred at least once).

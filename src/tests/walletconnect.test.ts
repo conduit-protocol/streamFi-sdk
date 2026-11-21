@@ -87,6 +87,51 @@ describe('WalletConnectAdapter', () => {
     });
   });
 
+  it('clears local session when remote disconnect rejects', async () => {
+    const mockClient = {
+      disconnect: vi.fn().mockRejectedValue(new Error('wallet unavailable')),
+    };
+    const session = {
+      topic: 'test-topic',
+      account: dummyPubKey,
+    };
+    const adapter = new WalletConnectAdapter({ client: mockClient, session });
+
+    await expect(adapter.disconnect()).rejects.toThrow('wallet unavailable');
+    expect(adapter.isConnected()).toBe(false);
+  });
+
+  it('times out a stalled remote disconnect and clears local session', async () => {
+    vi.useFakeTimers();
+    try {
+      const mockClient = {
+        disconnect: vi.fn().mockReturnValue(new Promise<void>(() => undefined)),
+      };
+      const session = {
+        topic: 'test-topic',
+        account: dummyPubKey,
+      };
+      const adapter = new WalletConnectAdapter({
+        client: mockClient,
+        session,
+        connectTimeoutMs: 25,
+      });
+
+      const disconnectPromise = adapter.disconnect();
+      // Attach a handler immediately (fake timers mean the rejection can
+      // settle before the `.rejects` assertion below attaches its own),
+      // otherwise Node reports an "unhandled rejection handled asynchronously"
+      // warning that vitest can misattribute to an unrelated test.
+      disconnectPromise.catch(() => undefined);
+      await vi.advanceTimersByTimeAsync(25);
+
+      await expect(disconnectPromise).rejects.toThrow(/disconnect\(\).*timed out/i);
+      expect(adapter.isConnected()).toBe(false);
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
   it('signs transaction XDR via stellar_signTransaction RPC request', async () => {
     const keypair = Keypair.random();
     const account = new Account(keypair.publicKey(), '100');

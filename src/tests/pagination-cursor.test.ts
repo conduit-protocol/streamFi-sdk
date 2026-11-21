@@ -3,7 +3,7 @@ import type { ConduitConfig } from '../types/index.js';
 
 const mockStreamsBySender = vi.fn();
 const mockStreamCount = vi.fn();
-const mockStreamAddress = vi.fn().mockResolvedValue('CCWAMYJME27OHTPKVSV252YRPXEO4BSKBHVLQ7ML3OWYNMB5RQEVHSM');
+const mockStreamAddress = vi.fn().mockResolvedValue('CAAQCAIBAEAQCAIBAEAQCAIBAEAQCAIBAEAQCAIBAEAQCAIBAEAQC526');
 const mockSimulate = vi.fn();
 
 vi.mock('../factory.js', () => ({
@@ -32,7 +32,7 @@ vi.mock('../soroban.js', async () => {
 });
 
 function makeConfig(): ConduitConfig {
-  return { network: 'testnet', factoryAddress: 'CCWAMYJME27OHTPKVSV252YRPXEO4BSKBHVLQ7ML3OWYNMB5RQEVHSM' };
+  return { network: 'testnet', factoryAddress: 'CAAQCAIBAEAQCAIBAEAQCAIBAEAQCAIBAEAQCAIBAEAQCAIBAEAQC526' };
 }
 
 describe('StreamsModule.list — cursor pagination', () => {
@@ -51,21 +51,22 @@ describe('StreamsModule.list — cursor pagination', () => {
 
     const cursor = Buffer.from('40', 'utf8').toString('base64');
 
-    await sdk.list({ sender: 'GAAZI4TCR3TY5OJHCTJC2A4QSY6CJWJH5IAJTGKIN2ER7LBNVKOCCWN', cursor, limit: 20 });
+    await sdk.list({ sender: 'GAAQCAIBAEAQCAIBAEAQCAIBAEAQCAIBAEAQCAIBAEAQCAIBAEAQDZ7H', cursor, limit: 20 });
 
     expect(mockStreamsBySender).toHaveBeenCalledWith(
-      'GAAZI4TCR3TY5OJHCTJC2A4QSY6CJWJH5IAJTGKIN2ER7LBNVKOCCWN', 40, 20,
+      'GAAQCAIBAEAQCAIBAEAQCAIBAEAQCAIBAEAQCAIBAEAQCAIBAEAQDZ7H', 40, 20,
     );
   });
 
   it('returns a nextCursor when there are more results', async () => {
-    mockStreamsBySender.mockResolvedValue([1n, 2n, 3n]);
-    mockStreamCount.mockResolvedValue(100n);
+    // hasNextPage is derived from a full page being returned (ids.length ===
+    // limit), not from the unrelated global streamCount() — see #179/#183.
+    mockStreamsBySender.mockResolvedValue(Array.from({ length: 20 }, (_, i) => BigInt(i + 1)));
 
     const { StreamsModule } = await import('../streams.js');
     const sdk = new StreamsModule(makeConfig());
 
-    const result = await sdk.list({ sender: 'GAAZI4TCR3TY5OJHCTJC2A4QSY6CJWJH5IAJTGKIN2ER7LBNVKOCCWN', limit: 20 });
+    const result = await sdk.list({ sender: 'GAAQCAIBAEAQCAIBAEAQCAIBAEAQCAIBAEAQCAIBAEAQCAIBAEAQDZ7H', limit: 20 });
 
     expect(result.hasNextPage).toBe(true);
     expect(result.nextCursor).toBeDefined();
@@ -79,7 +80,7 @@ describe('StreamsModule.list — cursor pagination', () => {
     const { StreamsModule } = await import('../streams.js');
     const sdk = new StreamsModule(makeConfig());
 
-    const result = await sdk.list({ sender: 'GAAZI4TCR3TY5OJHCTJC2A4QSY6CJWJH5IAJTGKIN2ER7LBNVKOCCWN' });
+    const result = await sdk.list({ sender: 'GAAQCAIBAEAQCAIBAEAQCAIBAEAQCAIBAEAQCAIBAEAQCAIBAEAQDZ7H' });
 
     expect(result.hasNextPage).toBe(false);
     expect(result.nextCursor).toBeUndefined();
@@ -90,10 +91,10 @@ describe('StreamsModule.list — cursor pagination', () => {
     const sdk = new StreamsModule(makeConfig());
     const cursor = Buffer.from('40', 'utf8').toString('base64');
 
-    await sdk.list({ sender: 'GAAZI4TCR3TY5OJHCTJC2A4QSY6CJWJH5IAJTGKIN2ER7LBNVKOCCWN', cursor, offset: 999 });
+    await sdk.list({ sender: 'GAAQCAIBAEAQCAIBAEAQCAIBAEAQCAIBAEAQCAIBAEAQCAIBAEAQDZ7H', cursor, offset: 999 });
 
     expect(mockStreamsBySender).toHaveBeenCalledWith(
-      'GAAZI4TCR3TY5OJHCTJC2A4QSY6CJWJH5IAJTGKIN2ER7LBNVKOCCWN', 40, 20,
+      'GAAQCAIBAEAQCAIBAEAQCAIBAEAQCAIBAEAQCAIBAEAQCAIBAEAQDZ7H', 40, 20,
     );
   });
 
@@ -102,7 +103,7 @@ describe('StreamsModule.list — cursor pagination', () => {
     const sdk = new StreamsModule(makeConfig());
 
     await expect(
-      sdk.list({ sender: 'GAAZI4TCR3TY5OJHCTJC2A4QSY6CJWJH5IAJTGKIN2ER7LBNVKOCCWN', cursor: 'not-a-valid-cursor!!' })
+      sdk.list({ sender: 'GAAQCAIBAEAQCAIBAEAQCAIBAEAQCAIBAEAQCAIBAEAQCAIBAEAQDZ7H', cursor: 'not-a-valid-cursor!!' })
     ).rejects.toThrow(/invalid cursor/i);
   });
 });

@@ -1,6 +1,6 @@
 {
   "name": "@conduit-protocol/sdk",
-  "version": "0.1.0",
+  "version": "0.2.0",
   "description": "TypeScript SDK for the Conduit streaming payments protocol on Stellar.",
   "license": "MIT",
   "author": "Conduit Protocol contributors",
@@ -17,10 +17,35 @@
       "require": "./dist/cjs/index.js",
       "types": "./dist/types/index.d.ts"
     },
+    "./indexer": {
+      "import": "./dist/esm/indexer.js",
+      "require": "./dist/cjs/indexer.js",
+      "types": "./dist/types/indexer.d.ts"
+    },
+    "./batch": {
+      "import": "./dist/esm/batch-tx.js",
+      "require": "./dist/cjs/batch-tx.js",
+      "types": "./dist/types/batch-tx.d.ts"
+    },
+    "./nonce": {
+      "import": "./dist/esm/nonce/NonceManager.js",
+      "require": "./dist/cjs/nonce/NonceManager.js",
+      "types": "./dist/types/nonce/NonceManager.d.ts"
+    },
     "./utils": {
       "import": "./dist/esm/utils.js",
       "require": "./dist/cjs/utils.js",
       "types": "./dist/types/utils.d.ts"
+    },
+    "./dashboard": {
+      "import": "./dist/esm/dashboard/transaction-history.js",
+      "require": "./dist/cjs/dashboard/transaction-history.js",
+      "types": "./dist/types/dashboard/transaction-history.d.ts"
+    },
+    "./relayer": {
+      "import": "./dist/esm/relayer/WebSocketRelayer.js",
+      "require": "./dist/cjs/relayer/WebSocketRelayer.js",
+      "types": "./dist/types/relayer/WebSocketRelayer.d.ts"
     }
   },
   "files": [
@@ -28,11 +53,13 @@
     "src"
   ],
   "scripts": {
-    "build": "tsc -p tsconfig.build.json && rollup -c rollup.config.mjs",
+    "build": "rm -rf dist && tsc -p tsconfig.build.json && rollup -c rollup.config.mjs",
     "prepare": "npm run build",
     "prepublishOnly": "npm run build",
     "dev": "tsc -p tsconfig.build.json --watch",
     "test": "vitest run",
+    "test:cli": "npm --prefix create-streamfi-app test",
+    "test:e2e": "playwright test --config tests/browser/playwright.config.ts",
     "test:watch": "vitest",
     "typecheck": "tsc --noEmit",
     "lint": "eslint src --ext .ts"
@@ -41,18 +68,32 @@
     "@stellar/stellar-sdk": "^12.0.0"
   },
   "devDependencies": {
+    "@playwright/test": "^1.62.0",
     "@rollup/plugin-node-resolve": "^15.2.3",
+    "@rollup/plugin-terser": "^1.0.0",
     "@rollup/plugin-typescript": "^11.1.6",
+    "@size-limit/file": "11.2.0",
     "@stellar/stellar-sdk": "^12.0.0",
+    "@testing-library/dom": "^10.4.2",
+    "@testing-library/react": "^16.3.3",
     "@types/node": "^20.14.0",
+    "@types/react": "^19.3.0",
+    "@types/react-dom": "^19.3.0",
     "@typescript-eslint/eslint-plugin": "^7.14.0",
     "@typescript-eslint/parser": "^7.14.0",
+    "@vitest/coverage-v8": "^4.1.10",
     "eslint": "^8.57.0",
+    "jsdom": "^29.1.1",
+    "react": "^19.3.0",
+    "react-dom": "^19.3.0",
     "rollup": "^4.18.0",
+    "rollup-plugin-visualizer": "^7.0.1",
+    "size-limit": "11.2.0",
     "typescript": "^5.5.3",
     "vitest": "^4.1.10"
   },
   "dependencies": {
     "tslib": "^2.8.1"
-  }
+  },
+  "sideEffects": false
 }

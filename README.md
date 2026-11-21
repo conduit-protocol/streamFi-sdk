@@ -2,6 +2,16 @@
 
 TypeScript client library for the Conduit streaming payments protocol. Integrate per-second token streams into any application on Stellar.
 
+## Create a StreamFi app
+
+Use the included CLI package to start a Next.js project configured for Stellar testnet:
+
+```bash
+npx create-streamfi-app my-streamfi-app
+```
+
+It clones a Next.js starter, installs `@conduit-protocol/sdk`, and writes testnet RPC settings to `.env.local`. See [create-streamfi-app/README.md](create-streamfi-app/README.md) for options.
+
 ```bash
 npm install @conduit-protocol/sdk
 ```
@@ -10,33 +20,64 @@ npm install @conduit-protocol/sdk
 
 ## Quickstart
 
+A complete, copy-pasteable create -> withdraw script on **testnet**. A runnable
+version lives at [`examples/quickstart.ts`](examples/quickstart.ts).
+
 ```typescript
-import { ConduitClient } from '@conduit-protocol/sdk';
+import { ConduitClient, fromStroops } from '@conduit-protocol/sdk';
 import { Keypair } from '@stellar/stellar-sdk';
 
+// Generate a testnet key and fund it once:
+//   const kp = Keypair.random();
+//   await fetch(`https://friendbot.stellar.org?addr=${kp.publicKey()}`);
+const keypair = Keypair.fromSecret(process.env.STELLAR_SECRET!);
+
 const client = new ConduitClient({
-  network:  'testnet',
-  keypair:  Keypair.fromSecret('S...'),
+  network:        'testnet',
+  keypair,
+  factoryAddress: process.env.FACTORY_ADDRESS!,   // testnet DripFactory contract id
 });
 
-// Create a 30-day USDC stream
-const { streamId } = await client.streams.create({
-  recipient:       'GABC...XYZ',
-  token:           'USDC',
-  depositAmount:   '1000',              // 1 000 USDC
-  durationSeconds: 30 * 24 * 3600,     // 30 days
-});
+async function main() {
+  // Stream 100 XLM to the recipient over one hour (the 1-hour minimum).
+  const { streamId, txHash } = await client.streams.create({
+    recipient:       keypair.publicKey(),   // self, for a runnable demo
+    token:           'native',              // XLM
+    depositAmount:   '100',
+    durationSeconds: 60 * 60,
+  });
+  console.log('stream', streamId, 'created  (tx', txHash + ')');
 
-console.log('Stream created:', streamId);
-// Recipient earns ≈ 0.000386 USDC / second
+  // Let value accrue, then withdraw the full available balance as the recipient.
+  await new Promise((r) => setTimeout(r, 15_000));
+  const available = await client.streams.withdrawable(streamId);
+  console.log('withdrawable:', fromStroops(available), 'XLM');
 
-// Check withdrawable balance
-const available = await client.streams.withdrawable(streamId);
-console.log('Available:', available, 'USDC');
+  const withdrawTx = await client.streams.withdraw(streamId, available);
+  console.log('withdrawn  (tx', withdrawTx + ')');
+}
 
-// Withdraw
-await client.streams.withdraw(streamId, available);
+main().catch(console.error);
 ```
+
+---
+
+## Security
+
+This SDK signs transactions using a `Keypair` (see [Quickstart](#quickstart)), which means it
+directly handles secret keys. Before you paste a secret key into anything:
+
+- **Never bundle a mainnet secret client-side.** A raw `Keypair` in browser-shipped code is
+  readable by anyone who opens dev tools. Keep `keypair`-based config to server-side code,
+  scripts, or testnet demos only.
+- **Prefer a `WalletAdapter` in browser contexts.** For any app a real user interacts with in a
+  browser, use `WalletConnectAdapter` (or another `WalletAdapter` implementation) so signing
+  happens in the user's own wallet, not in your app's memory. See
+  [WalletConnect v2 Integration](#walletconnect-v2-integration-mobile--browser-wallets) below,
+  and [Migrating from a keypair to a WalletAdapter](#migrating-from-a-keypair-to-a-walletadapter)
+  if you're starting from the quickstart pattern.
+- **Found a vulnerability?** Do not open a public issue. See [`SECURITY.md`](./SECURITY.md) for
+  the private disclosure process and a fuller list of SDK-level security considerations.
 
 ---
 
@@ -77,8 +118,56 @@ const client = new ConduitClient(config: ConduitConfig);
 | `keypair` | `Keypair` | Optional | Signing keypair (for secret key workflows) |
 | `wallet` | `WalletAdapter` | Optional | Custom wallet adapter (e.g. `WalletConnectAdapter`) |
 | `rpcUrl` | `string` | No | Override default Soroban RPC URL |
+| `rpcUrls` | `string[]` | No | Multiple Soroban RPC endpoints with automatic failover; takes precedence over `rpcUrl` |
+| `rpcUrlFailureThresholdConsecutive` | `number` | No | Consecutive failures before rotating endpoints. Default `3` |
 | `factoryAddress` | `string` | No | Override deployed factory contract ID |
 | `governorAddress` | `string` | No | Override deployed governor contract ID |
+| `fee` | `string` | No | Explicit inclusion fee in stroops (overrides feeMultiplier) |
+| `feeMultiplier` | `number` | No | Multiplier applied to BASE_FEE when fee is not set |
+| `customFetch` | `typeof fetch` | No | `fetch` used for Soroban RPC and fee-estimator requests (edge runtimes, proxies, tracing headers, timeouts). Registered per configured RPC endpoint, process-wide |
+
+### RPC failover and connection health
+
+Pass `rpcUrls: [primary, backup, ...]` to rotate endpoints automatically on HTTP 429, HTTP 503, network timeouts and open circuits. `getCurrentRpcUrl()` returns the active endpoint. `getConnectionHealth()` returns a synchronous `ConnectionHealthStatus` with connected/status flags, average successful ping latency, packet loss, per-endpoint samples, and relayer heartbeat stats. `refreshConnectionHealth()` performs a live `getLatestLedger()` probe before returning the snapshot.
+
+```typescript
+const client = new ConduitClient({
+  network: 'testnet',
+  rpcUrls: ['https://rpc-primary.example', 'https://rpc-backup.example'],
+});
+
+const health = client.getConnectionHealth();
+console.log(health.status, health.latencyMs, health.packetLossRate, health.activeRpcUrl);
+```
+
+### Fee Precedence
+
+When both `fee` and `feeMultiplier` are present, `fee` wins. The precedence is:
+
+1. **`fee`** — explicit inclusion fee in stroops (e.g. `"5000"`)
+2. **`feeMultiplier`** — multiplied by `BASE_FEE` when `fee` is absent
+3. **`BASE_FEE`** — hardcoded fallback when neither is set
+
+Use `resolveFee(config)` to compute the effective fee for a given `ConduitConfig`.
+
+### Dynamic Fee Estimation
+
+`FeeEstimator` tracks a live inclusion fee from Horizon's `/fee_stats`, with two ways to read it:
+
+```typescript
+import { FeeEstimator } from '@conduit-protocol/sdk';
+
+const estimator = new FeeEstimator(100n); // 100n = fallback base fee in stroops
+
+// Fixed multiplier applied to the modal fee charged in recent ledgers.
+const urgentFee = await estimator.getDynamicFee({ priority: 'urgent' }); // 'low' | 'standard' | 'urgent' | custom multiplier
+
+// Recent-ledger fee percentiles — moves with real congestion, including
+// spikes a fixed multiplier would under- or over-shoot.
+const { p75, p95 } = await estimator.getLedgerFeeStats();
+```
+
+Both share the `feeMultiplier` safety-margin buffer passed to the `FeeEstimator` constructor, and both fall back to the last successfully fetched value on a network error.
 
 ### WalletConnect v2 Integration (Mobile & Browser Wallets)
 
@@ -106,6 +195,57 @@ You can also update the active wallet dynamically:
 ```typescript
 client.setWallet(walletAdapter);
 ```
+
+### Migrating from a keypair to a WalletAdapter
+
+The [Quickstart](#quickstart) configures `ConduitClient` with a raw `Keypair`, which is fine for
+scripts and testnet demos but not for a production browser app (see [Security](#security)).
+Moving to adapter-based signing takes one of two forms:
+
+**Constructor-time (start the client already on an adapter):**
+
+```typescript
+// Before
+const client = new ConduitClient({
+  network: 'testnet',
+  keypair: Keypair.fromSecret(process.env.STELLAR_SECRET!),
+  factoryAddress: process.env.FACTORY_ADDRESS!,
+});
+
+// After
+const walletAdapter = new WalletConnectAdapter({
+  projectId: 'YOUR_WALLETCONNECT_PROJECT_ID',
+  chainId: 'stellar:testnet',
+});
+await walletAdapter.connect();
+
+const client = new ConduitClient({
+  network: 'testnet',
+  wallet: walletAdapter,
+  factoryAddress: process.env.FACTORY_ADDRESS!,
+});
+```
+
+**Runtime swap (client already exists, e.g. connecting a wallet after initial page load):**
+
+```typescript
+// Before: client was constructed with `keypair` (or no signer at all)
+const client = new ConduitClient({ network: 'testnet', factoryAddress: process.env.FACTORY_ADDRESS! });
+
+// After: swap in the adapter once the user connects their wallet
+const walletAdapter = new WalletConnectAdapter({
+  projectId: 'YOUR_WALLETCONNECT_PROJECT_ID',
+  chainId: 'stellar:testnet',
+});
+await walletAdapter.connect();
+client.setWallet(walletAdapter);
+```
+
+`setWallet()` propagates to `client.streams` and to an already-constructed `client.factory` (whose
+read simulations are sourced from the active wallet). `client.governor` is read-only and keeps
+using `config.keypair` (if any) for simulation fee sourcing. It throws `UnsupportedChainError` if
+the adapter's `chainId` doesn't match the network the client was configured for. See
+[`setWallet`](docs/api.md#clientstreams) in the API reference for details.
 
 ---
 
@@ -145,11 +285,16 @@ The `StreamBuilder` class exposes the following chainable methods:
 | `sender(address)` | `string` | Sets the sender address who funds the stream. |
 | `recipient(address)` | `string` | Sets the recipient address receiving the stream. |
 | `amount(val)` | `number` | Sets the deposit amount (in the token's smallest unit). |
+| `ratePerSecond(val)` | `number \| bigint` | Sets the stream rate in stroops/sec. Required to build real `create_stream` args — the contract has no way to derive a rate on its own. |
+| `startTime(val)` | `number` | Optional Unix timestamp; defaults to now. |
+| `endTime(val)` | `number` | Optional Unix timestamp; defaults to `0` (open-ended). |
+| `clawbackEnabled(val)` | `boolean` | Optional; defaults to `false`. |
 | `build()` | — | Validates the fields and returns the stream configuration. Throws an error if any required field is missing. |
+| `toBatchOperation()` | — | Returns a `BatchOperation` carrying the exact positional, ABI-typed args `create_stream` expects — pass it to `ConduitBatcher.executeAsync()`. |
 
 ### Batching Streams
 
-You can bundle multiple stream operations together and compile them using `ConduitBatcher`:
+You can bundle multiple stream operations together and compile them using `ConduitBatcher`. `execute()` turns each item into the ABI-exact positional `create_stream` args when the default method is used (amount/rate encoded as `i128`, `startTime`/`endTime` as `u64`), falling back to a generic sorted-map argument for other methods. To invoke the real `create_stream` contract with full control (including validated, defaulted `start_time`/`end_time`/`clawback_enabled`), build each stream's `BatchOperation` with `toBatchOperation()` and submit through `executeAsync()`:
 
 ```typescript
 import { StreamBuilder, ConduitBatcher } from '@conduit-protocol/sdk';
@@ -159,21 +304,42 @@ const stream1 = new StreamBuilder()
   .sender('GABC...SENDER')
   .recipient('GXYZ...RECIPIENT_A')
   .amount(500)
-  .build();
+  .ratePerSecond(10n);
 
 const stream2 = new StreamBuilder()
   .token('native')
   .sender('GABC...SENDER')
   .recipient('GXYZ...RECIPIENT_B')
   .amount(1500)
-  .build();
+  .ratePerSecond(25n);
 
 // Execute batch operation
-const result = ConduitBatcher.execute([stream1, stream2]);
+const batcher = new ConduitBatcher();
+const result = await batcher.executeAsync(
+  [stream1.toBatchOperation(), stream2.toBatchOperation()],
+  { context: { network: 'testnet', contractId: 'C...', sourceAccount: 'GABC...SENDER', sequence: '123' } },
+);
 
 console.log('Batch Success:', result.success);
 console.log('Operations:', result.operations);
 console.log('Transaction XDR:', result.xdr);
+```
+
+Dry-run a batch before prompting for wallet signatures with `simulateBatch()` —
+it simulates every operation and tells you exactly which one(s) would revert
+(e.g. an invalid recipient address), without spending an inclusion fee:
+
+```typescript
+import { simulateBatch } from '@conduit-protocol/sdk';
+
+const summary = await simulateBatch({
+  operations: [stream1.toBatchOperation(), stream2.toBatchOperation()],
+  context: { network: 'testnet', contractId: 'C...', sourceAccount: 'GABC...SENDER', rpcUrl: 'https://soroban-testnet.stellar.org' },
+});
+
+if (!summary.success) {
+  console.log('Operations that would revert:', summary.invalidIndices);
+}
 ```
 
 ---
@@ -214,6 +380,16 @@ const result = await client.streams.create({
 
 ---
 
+#### `simulateCreateStream(params)`
+
+Dry-run stream creation and return estimated resource fees, storage/rent estimate, CPU/read/write usage, and the required balance. No wallet prompt, signing, or transaction submission occurs.
+
+#### `getStreamProgress(stream, currentTimestamp?)`
+
+Pure local helper returning percentage progress, elapsed/remaining seconds, lifecycle status, cumulative `streamed`, `withdrawable`, and display strings. `getStreamStatus()` is an alias.
+
+---
+
 #### `get(streamId)`
 
 Fetch stream state.
@@ -249,6 +425,19 @@ Get the current withdrawable balance. Read-only, no transaction.
 const amount = await client.streams.withdrawable(streamId: bigint | string);
 // Returns: bigint (in stroops)
 ```
+
+---
+
+#### `streamedTotal(streamId)`
+
+Get the cumulative amount streamed since the stream started, regardless of withdrawals. Read-only, no transaction.
+
+```typescript
+const total = await client.streams.streamedTotal(streamId: bigint | string);
+// Returns: bigint (cumulative stroops streamed since start)
+```
+
+Unlike `withdrawable()` (which reflects only the unwithdrawn portion), this value does not reset after a withdrawal — useful for progress displays that should keep counting up.
 
 ---
 
@@ -322,16 +511,44 @@ const txHash = await client.streams.clawback(streamId: bigint | string);
 
 ---
 
+#### `forceCancel(streamId)`
+
+Force-cancel a paused stream as the recipient after the 30-day pause threshold has elapsed.
+Settles atomically like `cancel()`; prevents a sender from indefinitely pausing a stream to
+hold unstreamed tokens hostage.
+
+```typescript
+const txHash = await client.streams.forceCancel(streamId: bigint | string);
+```
+
+---
+
+#### `transferRecipient(streamId, newRecipient)`
+
+Transfer the recipient role to a new address (current recipient only). The new recipient
+inherits all rights, including the withdrawable balance accrued so far.
+
+```typescript
+const txHash = await client.streams.transferRecipient(
+  streamId:     bigint | string,
+  newRecipient: string,
+);
+```
+
+---
+
 #### `list(params)`
 
-Query streams by sender or recipient.
+Query streams by sender and/or recipient. When **both** `sender` and `recipient` are given,
+the result is the de-duplicated **union** of the two filters (streams where the address is
+either sender or recipient).
 
 ```typescript
 const streams = await client.streams.list({
   sender?:    string,
   recipient?: string,
   offset?:    number,  // default: 0
-  limit?:     number,  // default: 20, max: 100
+  limit?:     number,  // default: 20, max: 100 (out-of-range values are clamped, not rejected)
 });
 // Returns: StreamInfo[]
 ```
@@ -349,8 +566,30 @@ const count = await client.factory.streamCount();
 // Stream address by ID
 const address = await client.factory.streamAddress(streamId);
 
+// Addresses for a whole page, in one call — renders a stream list without
+// one RPC round trip per row. Ids already resolved (or cached as
+// not-found) cost nothing; only the cache-miss subset is fetched.
+const { ids } = await client.factory.streamsBySender(sender, 0, 50);
+const addresses = await client.factory.streamAddresses(ids);
+// Map<string, string | null>, keyed by decimal stream-id string
+
+// Cursor-paginated variant of streamsBySender — pass the previous page's
+// `cursor` back in to continue; `cursor` is `null` on the last page.
+let cursor: string | undefined;
+do {
+  const page = await client.factory.getStreamsBySenderPaginated(sender, cursor, 50);
+  console.log(page.ids);
+  cursor = page.cursor ?? undefined;
+} while (cursor);
+
 // Protocol fee in basis points (e.g. 30 = 0.3%)
 const feeBps = await client.factory.protocolFeeBps();
+
+// feeBps + feeRecipient together, cached for `factoryConfigCacheTtlMs`
+// (default 5 minutes) so stream-creation-heavy callers don't pay a
+// simulation per call for data that rarely changes.
+const { feeBps: cachedFeeBps, feeRecipient } = await client.factory.getFactoryConfig();
+client.factory.clearFactoryConfigCache(); // force the next call to re-simulate
 ```
 
 ---
@@ -360,16 +599,47 @@ const feeBps = await client.factory.protocolFeeBps();
 Read protocol configuration:
 
 ```typescript
-const config = await client.governor.config();
+const config = await client.governor.getConfig();
 // Returns:
 // {
 //   feeBps:               number,
-//   feeRecipient:         string,
+//   feeRecipient?:        string,
 //   minDurationSeconds:   number,
+//   maxDurationSeconds:   number,
 //   maxRatePerSecond:     bigint,
-//   factoryAddress:       string,
+//   factoryAddress?:      string,
 // }
 ```
+
+The result is reused for `governorConfigCacheTtlMs` (default 30s) — protocol parameters only
+change when a governance proposal passes, so a polling dashboard no longer pays a simulation
+per tick. Set it to `0` to re-simulate on every call, or call
+`client.governor.clearConfigCache()` to force a refresh.
+
+Execute several approved proposals (e.g. a pause threshold and a fee change) in one call:
+
+```typescript
+const results = await client.governor.executeMultipleProposals([12, 13], { stopOnError: true });
+// [{ proposalId: 12, success: true, txHash: '…' }, { proposalId: 13, success: false, error }]
+```
+
+Soroban permits one contract invocation per transaction, so each proposal is its own transaction,
+submitted sequentially in the order given. Failures are reported per proposal; `stopOnError`
+marks the remainder `skipped`. Requires a `keypair`, `wallet`, or `signer`.
+
+### Encrypted keystore
+
+Persist a `KeypairWalletAdapter` key on disk without a plaintext `S...` secret:
+
+```typescript
+const adapter = new KeypairWalletAdapter(Keypair.fromSecret(secret));
+await fs.writeFile('key.json', JSON.stringify(await adapter.exportKeystore(passphrase)));
+
+const restored = await KeypairWalletAdapter.fromKeystore(await fs.readFile('key.json', 'utf8'), passphrase);
+```
+
+PBKDF2-SHA256 (600k iterations) + AES-256-GCM via Web Crypto; the public key is readable without
+the passphrase. This is the SDK's own format, not Ethereum Web3 Secret Storage.
 
 ---
 
@@ -459,6 +729,29 @@ try {
 | 2 | `InvalidParam` | Setter argument failed validation |
 | 3 | `AlreadyInitialized` | Governor has already been initialized |
 
+**Recovery hints**
+
+A raw Soroban panic looks like `HostError(Error(Contract, #14))` — a bare code with no
+indication of what to do about it. Every `ConduitError` (and `ContractError`, when the
+contract could be determined) carries a `recoveryHint` string with a suggested next step for
+its specific `contract` + `code`, in addition to the descriptive `message` above:
+
+```typescript
+import { getRecoveryHint, StreamErrorCode } from '@conduit-protocol/sdk';
+
+try {
+  await client.streams.forceCancel(streamId);
+} catch (err) {
+  if (err instanceof ConduitError) {
+    console.error(err.message);       // "force_cancel called before the 30-day pause threshold elapsed."
+    console.error(err.recoveryHint);  // "force_cancel requires the stream to have been paused for ..."
+  }
+}
+
+// Or look one up directly from a contract + code pair:
+getRecoveryHint('stream', StreamErrorCode.AlreadyInitialized);
+```
+
 ---
 
 ## Utilities
@@ -482,6 +775,32 @@ calculateRate('1000', 2592000) // → 38580n  (stroops/sec)
 
 // Current progress (0–1) of a stream
 streamProgress(stream)         // → 0.42
+```
+
+### `AbortSignal` & timeouts
+
+Methods that do network I/O (`GraphQLIndexer.query`, batch/builder submission,
+...) accept an optional `signal: AbortSignal`. To bound one by time, pass
+`AbortSignal.timeout(ms)` — but note it needs **Node >= 17.3**, Deno >= 1.20,
+Chrome >= 103, Firefox >= 100, or Safari >= 15.4.
+
+For older runtimes use the SDK's `timeoutSignal(ms)` helper (native when
+available, `AbortController` + `setTimeout` otherwise):
+
+```typescript
+import { timeoutSignal } from '@conduit-protocol/sdk';
+
+const data = await indexer.query({ query: GET_STREAMS, signal: timeoutSignal(5_000) });
+```
+
+Or hand-roll the polyfill:
+
+```typescript
+function timeoutSignal(ms: number): AbortSignal {
+  const c = new AbortController();
+  setTimeout(() => c.abort(), ms);
+  return c.signal;
+}
 ```
 
 ---
@@ -557,24 +876,58 @@ sub.unsubscribe();
 
 Event subscriptions poll the Soroban event ledger every 5 seconds by default. Pass `{ pollInterval: 2000 }` to change the interval.
 
-**Caveat:** only `amount` is actually parsed today. `refundAmount`, `pausedAt`, `resumedAt`, `totalWithdrawn`, `remaining`, and `newBalance` are hardcoded `0`/`0n` placeholders in `src/events.ts` — the contracts emit these as tuples, and the event parser doesn't decode multi-value `ScVal`s yet. Treat an event as a "something happened, go refetch" signal, not a source of truth for those fields; use `client.streams.get(streamId)` to get the real numbers. See [`docs/api.md`](./docs/api.md) for detail.
+`src/events.ts` fully decodes each event's payload — multi-field events are parsed from their tuple `ScVal`s (`onWithdraw` → `amount`/`totalWithdrawn`/`remaining`, `onCancel` → `refundAmount`/`withdrawnSoFar`, `onPause` → `pausedAt`/`withdrawable`, `onTopUp` → `amount`/`newBalance`) and single-field events from their bare scalar (`onResume` → `resumedAt`, `onClawback` → `amount`). All fields are decoded; previously claimed "placeholders" are now properly parsed. See [`docs/api.md`](./docs/api.md) for detail.
 
 ---
 
 ## Browser / React Usage
 
-The SDK works in the browser. For React apps, use the companion `@conduit-protocol/react` package (coming in v0.2) for hooks like `useStream`, `useWithdraw`, and `useStreamList`.
-
-Until then, instantiate the client once and share it via React Context:
+The SDK works in the browser. For React apps, use the companion [`@streamfi/react`](./packages/react) package
+for a `StreamFiProvider` plus hooks (`useStream`, `useCreateStream`, `useNetworkSwitcher`, `useStreamFiClient`):
 
 ```typescript
-// lib/conduit.ts
-import { ConduitClient } from '@conduit-protocol/sdk';
+import { StreamFiProvider, useStream, useCreateStream, useNetworkSwitcher } from '@streamfi/react';
 
-export const conduit = new ConduitClient({
-  network: process.env.NEXT_PUBLIC_NETWORK as 'testnet' | 'mainnet',
-  // keypair injected per-action from wallet context
-});
+function App() {
+  return (
+    <StreamFiProvider config={{ network: 'testnet' /* keypair injected per-action from wallet context */ }}>
+      <StreamPage streamId={42n} />
+    </StreamFiProvider>
+  );
+}
+
+function StreamPage({ streamId }: { streamId: bigint }) {
+  const { network, setNetwork, availableNetworks } = useNetworkSwitcher();
+  const { stream, loading, error } = useStream(streamId);
+  const { createStream, loading: creating } = useCreateStream();
+  // ...
+}
+```
+
+### SDK features without a hook yet
+
+`@streamfi/react` covers most of the SDK's stream mutations and queries, but a few surfaces are still only reachable through the raw `ConduitClient` (e.g. via `useStreamFiClient()`). This list is kept up to date as hooks are added — if something you need is listed here, drop to the SDK directly rather than looking for a hook that doesn't exist yet:
+
+- **Analytics modules** — `client.portfolio`, `client.snapshots`, `client.risk`, `client.batchAnalytics` (`client.module48`), and `client.batchEngine` (`client.module49`). These provide portfolio aggregation, snapshot diffing, liquidity-risk/runway assessment, and memoized batch yield calculations over `StreamInfo[]` you already have — call them directly, no RPC round-trip involved.
+- **Some factory queries** — `client.factory.streamAddress()`, `hasStream()`, `streamCountBySender()`, and `streamCountByRecipient()` have no hook. (`streamCount`, `streamsBySender`, `streamsByRecipient`, and `protocolFeeBps` do — see `useFactoryStreamCount`, `useStreamsBySender`, `useStreamsByRecipient`, `useProtocolFeeBps`.)
+- **Live event subscriptions** — `client.streams.subscribe()` / `subscribeAsync()`. No hook wraps the polling subscription yet; call it directly and tear it down (`unsubscribe()`) in a `useEffect` cleanup.
+- **Low-level batch transaction building** — `buildBatchTransactions` / `submitBatch` (exported from the SDK root). Only reachable indirectly today via `useConduitBatcher`'s `ConduitBatcher`, which uses them internally — no hook calls them directly.
+- **GraphQL indexer queries** — `GraphQLIndexer`. `useTransactionHistory` only manages the dashboard's local filter/pagination/reducer state; running the actual indexer query is still up to the caller.
+
+### Next.js Example
+
+A working Next.js (App Router) example is available at [`examples/nextjs-app/`](./examples/nextjs-app/). It demonstrates:
+
+- Fetching and displaying active streams for a given Stellar address
+- Creating a new stream via a modal form
+- Withdrawing from a stream
+
+```bash
+# From the repo root
+npm install && npm run build
+cd examples/nextjs-app
+cp .env.example .env.local  # then edit .env.local
+npm run dev
 ```
 
 ---
@@ -618,21 +971,22 @@ conduit-sdk/
 │   ├── errors.ts            # ConduitError + per-contract Stream/Factory/GovernorErrorCode
 │   ├── utils.ts             # toStroops, fromStroops, etc.
 │   ├── events.ts            # Event subscription logic
-│   ├── contracts/
-│   │   ├── stream-abi.ts    # DripStream XDR / spec
-│   │   ├── factory-abi.ts   # DripFactory XDR / spec
-│   │   └── governor-abi.ts  # DripGovernor XDR / spec
 │   └── types/
 │       └── index.ts         # All exported TypeScript types
 ├── examples/
 │   ├── create-stream.ts     # End-to-end create example
 │   ├── fluent-builder.ts    # Fluent Builder and batcher example
 │   ├── withdraw.ts          # Recipient withdraw example
-│   └── list-streams.ts      # List all streams for an address
+│   ├── list-streams.ts      # List all streams for an address
+│   ├── dashboard/           # React + Vite + GraphQL dashboard
+│   └── nextjs-app/          # Next.js (App Router) example
+├── packages/
+│   └── react/               # @streamfi/react — React hooks (see Browser / React Usage)
+├── create-streamfi-app/     # `npx create-streamfi-app` scaffolding CLI
 ├── docs/
 │   └── api.md               # Full API reference (generated)
 ├── tsconfig.json
-├── rollup.config.ts
+├── rollup.config.mjs
 ├── vitest.config.ts
 ├── package.json
 └── .github/
@@ -648,14 +1002,21 @@ See [`CONTRIBUTING.md`](./CONTRIBUTING.md). For the module map and call flow, se
 
 ---
 
-## Configuration
+## Environment Variables
 
-The RoomManager limits can be configured via environment variables.
+The SDK can be configured via environment variables or explicit constructor options in `ConduitClient`. A template is provided in [`.env.example`](./.env.example).
 
-* `MAX_ROOM_SIZE`: Maximum number of clients allowed in a single room (default: Infinity).
+* `STELLAR_SECRET`: Stellar secret key for signing transactions (keep secure; server-side only).
+* `NEXT_PUBLIC_NETWORK` / `CONDUIT_NETWORK`: Stellar network selection (`testnet`, `mainnet`, or `local`).
+* `SOROBAN_RPC_URL` / `RPC_URL`: Optional custom Soroban RPC endpoint override.
+* `CONDUIT_FACTORY_ADDRESS`: Optional override for deployed DripFactory contract address.
+* `CONDUIT_GOVERNOR_ADDRESS`: Optional override for deployed DripGovernor contract address.
+* `CONDUIT_TOKEN_ADDRESS`: Optional default token contract address or `'native'`.
+* `STREAM_ID` / `ADDRESS`: Parameters for example scripts and CLI integration.
 
 ---
 
 ## License
 
 MIT — see [`LICENSE`](./LICENSE).
+\n## ConduitConfig reference\n\n| Field | Type | Default | Effect |\n|---|---|---|---|\n| network | \`mainnet | testnet | local\` | (required) | Which Stellar network to connect to. |\n| keypair | \`Keypair\` | undefined | Signing keypair used for mutating operations. |\n| wallet | \`WalletAdapter\` | undefined | Browser/mobile wallet adapter (e.g. WalletConnect). |\n| signer | \`Signer\` | undefined | Custom signer plugin (KMS/HSM). Takes precedence over keypair. |\n| rpcUrl | \`string\` | Network default | Override the default Soroban RPC endpoint. |\n| factoryAddress | \`string\` | Network default | Override the deployed DripFactory contract ID. |\n| governorAddress | \`string\` | Network default | Override the deployed DripGovernor contract ID. |\n| confirmationPollIntervalMs | \`number\` | 1000 | Poll interval for transaction confirmation. |\n| confirmationMaxAttempts | \`number\` | 30 | Maximum confirmation polling attempts. |\n| fee | \`string\` | undefined | Explicit inclusion fee in stroops. Takes precedence over feeMultiplier. |\n| feeMultiplier | \`number\` | 1 | Multiplier applied to BASE_FEE when fee is not set. |\n\n

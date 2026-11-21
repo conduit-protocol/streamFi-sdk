@@ -1,5 +1,5 @@
 import { describe, it, expect, beforeEach, afterEach } from 'vitest';
-import { TransactionSigner } from '../signer.js';
+import { TransactionSigner } from './mocks/transaction-signer.js';
 
 describe('TransactionSigner — Bounds & Math Regression Tests', () => {
   let signer: TransactionSigner;

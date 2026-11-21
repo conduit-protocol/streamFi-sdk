@@ -14,6 +14,7 @@ vi.mock('../soroban.js', () => ({
   simulateReadOnly:    mockSimulate,
   scValToU64: (v: { u64: () => { toString: () => string } }) =>
     BigInt(v.u64().toString()),
+  scValToU32: (v: { u32: () => number }) => v.u32(),
   scValToI128: (v: { i128: () => { hi: () => { toString: () => string }; lo: () => { toString: () => string } } }) => {
     const i128 = v.i128();
     return (BigInt(i128.hi().toString()) << 64n) | BigInt(i128.lo().toString());
@@ -82,7 +83,9 @@ function i128(n: bigint) {
 // ── Tests ─────────────────────────────────────────────────────────────────────
 
 beforeEach(() => {
-  mockBuildTx.mockResolvedValue({ _stub: 'tx' });
+  // mockBuildTx needs a full reset, not just a re-resolve: an earlier test's
+  // calls would otherwise leak into a later `not.toHaveBeenCalled()`.
+  mockBuildTx.mockReset().mockResolvedValue({ _stub: 'tx' });
   mockSimulate.mockReset();
 });
 
@@ -129,7 +132,7 @@ describe('GovernorModule — getConfig()', () => {
     expect(config.feeRecipient).not.toBe(config.factoryAddress);
   });
 
-  it('defaults missing fields to falsy/zero values rather than throwing', async () => {
+  it('returns undefined for missing address fields rather than empty strings', async () => {
     const { GovernorModule } = await import('../governor.js');
     mockSimulate.mockResolvedValueOnce(scvMap({}));
 
@@ -137,7 +140,31 @@ describe('GovernorModule — getConfig()', () => {
     expect(config.feeBps).toBe(0);
     expect(config.minDurationSeconds).toBe(0);
     expect(config.maxRatePerSecond).toBe(0n);
-    expect(config.feeRecipient).toBe('');
-    expect(config.factoryAddress).toBe('');
+    expect(config.feeRecipient).toBeUndefined();
+    expect(config.factoryAddress).toBeUndefined();
+  });
+
+  it('rejects with AbortError before touching the network when the signal is already aborted (#795)', async () => {
+    const { GovernorModule } = await import('../governor.js');
+    const controller = new AbortController();
+    controller.abort();
+
+    // 'AbortError' only appears in the exception's `name`; the message is
+    // 'Aborted', so matchObject on `name` rather than toThrow(string).
+    await expect(new GovernorModule(cfg()).getConfig(controller.signal)).rejects.toMatchObject({ name: 'AbortError' });
+    expect(mockBuildTx).not.toHaveBeenCalled();
+    expect(mockSimulate).not.toHaveBeenCalled();
+  });
+
+  it('resolves normally when a non-aborted signal is passed (#795)', async () => {
+    const { GovernorModule } = await import('../governor.js');
+    mockSimulate.mockResolvedValueOnce(scvMap({
+      fee_bps: u32(30),
+      min_duration_seconds: u64(3_600n),
+      max_rate_per_second: i128(1_000_000_000_000_000n),
+    }));
+
+    const config = await new GovernorModule(cfg()).getConfig(new AbortController().signal);
+    expect(config.feeBps).toBe(30);
   });
 });

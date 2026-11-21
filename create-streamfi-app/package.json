@@ -1,0 +1,21 @@
+{
+  "name": "create-streamfi-app",
+  "version": "0.1.0",
+  "description": "Scaffold a Next.js app configured for StreamFi.",
+  "license": "MIT",
+  "bin": {
+    "create-streamfi-app": "bin/create-streamfi-app.js"
+  },
+  "files": [
+    "bin",
+    "lib",
+    "template",
+    "README.md"
+  ],
+  "scripts": {
+    "test": "node --test test/*.test.js"
+  },
+  "engines": {
+    "node": ">=18"
+  }
+}

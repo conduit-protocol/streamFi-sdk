@@ -4,7 +4,7 @@ import { WalletConnectAdapter } from '../adapters/walletconnect.js';
 describe('WalletConnectAdapter public key extraction safety', () => {
   const dummyPubKey = 'GAAZI4TCR3TY5OJHCTJC2A4QSYRZPB26WKP43SXUXZVTYTBAKW7N5B6X';
 
-  it('should safely extract public key from CAIP-10 format without non-null assertion', () => {
+  it('should safely extract public key from CAIP-10 format without non-null assertion', async () => {
     const session = {
       topic: 'test-topic',
       namespaces: {
@@ -15,7 +15,7 @@ describe('WalletConnectAdapter public key extraction safety', () => {
     };
     const adapter = new WalletConnectAdapter({ session });
     expect(adapter.isConnected()).toBe(true);
-    expect(adapter.getPublicKey()).resolves.toBe(dummyPubKey);
+    await expect(adapter.getPublicKey()).resolves.toBe(dummyPubKey);
   });
 
   it('should handle malformed CAIP-10 format gracefully', () => {
@@ -32,24 +32,24 @@ describe('WalletConnectAdapter public key extraction safety', () => {
     expect(adapter.isConnected()).toBe(false); // Empty string is falsy
   });
 
-  it('should extract bare public key when CAIP-10 format is absent', () => {
+  it('should extract bare public key when CAIP-10 format is absent', async () => {
     const session = {
       topic: 'test-topic',
       account: dummyPubKey,
     };
     const adapter = new WalletConnectAdapter({ session });
     expect(adapter.isConnected()).toBe(true);
-    expect(adapter.getPublicKey()).resolves.toBe(dummyPubKey);
+    await expect(adapter.getPublicKey()).resolves.toBe(dummyPubKey);
   });
 
-  it('should safely fall back to accounts array without non-null assertion', () => {
+  it('should safely fall back to accounts array without non-null assertion', async () => {
     const session = {
       topic: 'test-topic',
       accounts: [`stellar:testnet:${dummyPubKey}`],
     };
     const adapter = new WalletConnectAdapter({ session });
     expect(adapter.isConnected()).toBe(true);
-    expect(adapter.getPublicKey()).resolves.toBe(dummyPubKey);
+    await expect(adapter.getPublicKey()).resolves.toBe(dummyPubKey);
   });
 
   it('should return null for empty accounts array', () => {

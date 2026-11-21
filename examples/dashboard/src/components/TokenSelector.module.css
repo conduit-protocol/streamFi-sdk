@@ -1,0 +1,213 @@
+/* TokenSelector.module.css */
+
+/* Wrapper — contains the trigger button and the dropdown */
+.wrapper {
+  position: relative;
+  display: inline-flex;
+  flex-direction: column;
+}
+
+/* Trigger button */
+.trigger {
+  display: inline-flex;
+  align-items: center;
+  gap: 0.5rem;
+  padding: 0.5rem 0.75rem;
+  background-color: #ffffff;
+  border: 1px solid #d1d5db;
+  border-radius: 8px;
+  cursor: pointer;
+  font-size: 0.9375rem;
+  font-weight: 500;
+  color: #1a1a1a;
+  transition: border-color 0.15s ease, box-shadow 0.15s ease;
+  white-space: nowrap;
+  /* Explicit min-width prevents the button collapsing when the icon renders
+     before fonts have loaded — a common cause of "broken" flex layouts. */
+  min-width: 7rem;
+}
+
+.trigger:hover {
+  border-color: #6366f1;
+}
+
+.trigger:focus-visible {
+  outline: 2px solid #6366f1;
+  outline-offset: 2px;
+}
+
+.triggerOpen {
+  border-color: #6366f1;
+  box-shadow: 0 0 0 3px rgba(99, 102, 241, 0.15);
+}
+
+/* Token logo inside the trigger */
+.tokenLogo {
+  width: 1.25rem;
+  height: 1.25rem;
+  border-radius: 50%;
+  object-fit: cover;
+  /* flex-shrink: 0 prevents the image from being crushed by sibling text */
+  flex-shrink: 0;
+}
+
+.tokenLogoPlaceholder {
+  width: 1.25rem;
+  height: 1.25rem;
+  border-radius: 50%;
+  background-color: #e5e7eb;
+  flex-shrink: 0;
+}
+
+/* Chevron icon — rotates when open */
+.chevron {
+  margin-left: auto;
+  width: 1rem;
+  height: 1rem;
+  color: #6b7280;
+  flex-shrink: 0;
+  transition: transform 0.2s ease;
+}
+
+.chevronOpen {
+  transform: rotate(180deg);
+}
+
+/* Dropdown panel */
+.dropdown {
+  position: absolute;
+  /* Sit just below the trigger with a 4px gap */
+  top: calc(100% + 4px);
+  left: 0;
+  z-index: 50;
+  display: flex;
+  flex-direction: column;
+  min-width: 14rem;
+  background-color: #ffffff;
+  border: 1px solid #e5e7eb;
+  border-radius: 8px;
+  box-shadow: 0 8px 24px rgba(0, 0, 0, 0.12);
+  overflow: hidden;
+}
+
+/* Search input row */
+.searchRow {
+  display: flex;
+  align-items: center;
+  gap: 0.5rem;
+  padding: 0.5rem 0.75rem;
+  border-bottom: 1px solid #e5e7eb;
+}
+
+.searchIcon {
+  width: 1rem;
+  height: 1rem;
+  color: #9ca3af;
+  flex-shrink: 0;
+}
+
+.searchInput {
+  flex: 1;
+  border: none;
+  outline: none;
+  font-size: 0.875rem;
+  color: #1a1a1a;
+  background: transparent;
+}
+
+.searchInput::placeholder {
+  color: #9ca3af;
+}
+
+/* Scrollable token list */
+.list {
+  display: flex;
+  flex-direction: column;
+  max-height: 14rem;
+  overflow-y: auto;
+  /* Prevent the scrollbar from widening the dropdown */
+  scrollbar-gutter: stable;
+}
+
+/* Individual token row */
+.option {
+  display: flex;
+  align-items: center;
+  gap: 0.75rem;
+  padding: 0.625rem 0.75rem;
+  cursor: pointer;
+  transition: background-color 0.1s ease;
+  /* Reset button defaults */
+  background: none;
+  border: none;
+  width: 100%;
+  text-align: left;
+}
+
+.option:hover {
+  background-color: #f3f4f6;
+}
+
+.option:focus-visible {
+  outline: 2px solid #6366f1;
+  outline-offset: -2px;
+}
+
+.optionSelected {
+  background-color: #eef2ff;
+}
+
+.optionSelected:hover {
+  background-color: #e0e7ff;
+}
+
+/* Token info block inside each option */
+.tokenInfo {
+  display: flex;
+  flex-direction: column;
+  flex: 1;
+  min-width: 0;
+}
+
+.tokenSymbol {
+  font-size: 0.875rem;
+  font-weight: 600;
+  color: #1a1a1a;
+  /* Prevent long symbols from overflowing the flex row */
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.tokenName {
+  font-size: 0.75rem;
+  color: #6b7280;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+/* Checkmark for the selected token */
+.checkmark {
+  width: 1rem;
+  height: 1rem;
+  color: #6366f1;
+  flex-shrink: 0;
+}
+
+/* Empty state */
+.empty {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  padding: 1.5rem;
+  font-size: 0.875rem;
+  color: #9ca3af;
+}
+
+/* Disabled state */
+.triggerDisabled {
+  opacity: 0.5;
+  cursor: not-allowed;
+  pointer-events: none;
+}

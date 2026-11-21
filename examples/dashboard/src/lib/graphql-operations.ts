@@ -23,6 +23,23 @@ export const GET_RECENT_STREAMS = gql`
   }
 `;
 
+export const GET_TRANSACTION_HISTORY = gql`
+  query GetTransactionHistory($walletAddress: String!, $limit: Int) {
+    transactions(walletAddress: $walletAddress, limit: $limit, orderBy: { field: TIMESTAMP, direction: DESC }) {
+      id
+      hash
+      streamId
+      kind
+      direction
+      status
+      amount
+      asset
+      counterparty
+      timestamp
+    }
+  }
+`;
+
 export const CREATE_STREAM = gql`
   mutation CreateStream($input: CreateStreamInput!) {
     createStream(input: $input) {
@@ -71,6 +88,17 @@ export const CANCEL_STREAM = gql`
       id
       status
       cancelled
+    }
+  }
+`;
+
+export const GET_TOKENS = gql`
+  query GetTokens {
+    tokens {
+      id
+      symbol
+      name
+      logoUrl
     }
   }
 `;

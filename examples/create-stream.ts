@@ -2,17 +2,23 @@
  * Example: Create a 30-day USDC stream on testnet.
  *
  * Run with:
- *   npx ts-node examples/create-stream.ts
+ *   STELLAR_SECRET=S... FACTORY_ADDRESS=C... npx ts-node examples/create-stream.ts
  *
- * Requires STELLAR_SECRET env variable to be set.
+ * Requires STELLAR_SECRET and FACTORY_ADDRESS env variables to be set.
  */
 
 import { ConduitClient } from '../src/index.js';
 import { Keypair }        from '@stellar/stellar-sdk';
 
-const secret = process.env['STELLAR_SECRET'];
+const secret          = process.env['STELLAR_SECRET'];
+const factoryAddress  = process.env['FACTORY_ADDRESS'];
+
 if (!secret) {
   console.error('Set STELLAR_SECRET environment variable.');
+  process.exit(1);
+}
+if (!factoryAddress) {
+  console.error('Set FACTORY_ADDRESS environment variable (DripFactory contract ID for testnet).');
   process.exit(1);
 }
 
@@ -21,6 +27,7 @@ const keypair = Keypair.fromSecret(secret);
 const client = new ConduitClient({
   network: 'testnet',
   keypair,
+  factoryAddress,
 });
 
 async function main() {

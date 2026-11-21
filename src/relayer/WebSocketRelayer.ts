@@ -1,3 +1,5 @@
+import { recordConnectionResult } from "../connection-health.js";
+
 export interface WebSocketMessage {
   type: string;
   payload: unknown;
@@ -5,6 +7,7 @@ export interface WebSocketMessage {
 }
 
 export type MessageHandler = (msg: WebSocketMessage) => Promise<void> | void;
+export type StateChangeHandler = (transition: RelayerStateTransition, state: RelayerState) => void;
 
 export interface RelayerState {
   connected: boolean;
@@ -15,31 +18,99 @@ export interface RelayerState {
 
 export type RelayerStateTransition = 'connecting' | 'connected' | 'disconnected' | 'reconnecting' | 'destroyed';
 
+/** A message queued while the WebSocket is offline, with metadata for TTL checks (#858). */
+export interface QueuedMessage {
+  message: WebSocketMessage;
+  /** Unix milliseconds when the message was enqueued. */
+  enqueuedAt: number;
+}
+
+export interface WebSocketRelayerOptions {
+  maxPendingMessages?: number;
+  maxReconnectAttempts?: number;
+  reconnectDelayMs?: number;
+  maxReconnectDelayMs?: number;
+  onStateChange?: StateChangeHandler;
+  /**
+   * Interval in milliseconds between periodic ping keepalive messages to prevent
+   * silent socket dropouts by intermediate firewalls and NAT gateways (#920).
+   * Defaults to 30,000 ms (30 seconds). Set to 0 to disable.
+   */
+  heartbeatIntervalMs?: number;
+  /**
+   * Maximum milliseconds to wait for a pong response before declaring the socket dead
+   * and reconnecting (#920). Defaults to 5,000 ms (5 seconds).
+   */
+  heartbeatTimeoutMs?: number;
+  /**
+   * Maximum milliseconds a message may sit in the offline buffer before it is
+   * silently dropped on the next flush. `0` (default) disables TTL expiry.
+   */
+  offlineBufferTtlMs?: number;
+  /**
+   * Number of recently processed inbound message `id`s remembered so a
+   * message re-delivered after a reconnect is dispatched to handlers only
+   * once (#1056). Oldest ids are evicted first (LRU). Messages without an
+   * `id` are never deduplicated. Defaults to 1,000; set to 0 to disable.
+   */
+  dedupeWindowSize?: number;
+}
+
 export class WebSocketRelayer {
   private url: string;
   private ws: WebSocket | null = null;
   private handlers: Map<string, Set<MessageHandler>> = new Map();
+  private stateChangeHandlers: Set<StateChangeHandler> = new Set();
   private isDestroyed = false;
   private isLocked = false;
   private lockQueue: Array<() => void> = [];
   private connectPromise: Promise<void> | null = null;
   private reconnectAttempts = 0;
+  private reconnectEnabled = true;
+  private reconnectExhausted = false;
   private maxReconnectAttempts: number;
   private reconnectDelayMs: number;
-  private pendingMessages: WebSocketMessage[] = [];
+  private maxReconnectDelayMs: number;
+  private offlineQueue: QueuedMessage[] = [];
+  private maxPendingMessages: number;
+  private offlineBufferTtlMs: number;
+  private stateTransition: RelayerStateTransition = 'disconnected';
+  private heartbeatIntervalMs: number;
+  private heartbeatTimeoutMs: number;
+  private heartbeatInterval: ReturnType<typeof setInterval> | null = null;
+  private heartbeatTimeout: ReturnType<typeof setTimeout> | null = null;
+  private awaitingPong = false;
+  private heartbeatSentAt: number | null = null;
+  private dedupeWindowSize: number;
+  /** Insertion-ordered set of recently processed message ids (#1056). */
+  private seenMessageIds: Map<string, true> = new Map();
 
-  constructor(url: string, options?: { maxReconnectAttempts?: number; reconnectDelayMs?: number }) {
+  constructor(url: string, options?: WebSocketRelayerOptions) {
     this.url = url;
     this.maxReconnectAttempts = options?.maxReconnectAttempts ?? 5;
     this.reconnectDelayMs = options?.reconnectDelayMs ?? 1000;
+    this.maxReconnectDelayMs = options?.maxReconnectDelayMs ?? 30_000;
+    this.maxPendingMessages = options?.maxPendingMessages ?? 1000;
+    this.offlineBufferTtlMs = options?.offlineBufferTtlMs ?? 0;
+    this.heartbeatIntervalMs = options?.heartbeatIntervalMs ?? 30_000;
+    this.heartbeatTimeoutMs = options?.heartbeatTimeoutMs ?? 5_000;
+    this.dedupeWindowSize = Math.max(0, Math.floor(options?.dedupeWindowSize ?? 1000));
+    if (options?.onStateChange) {
+      this.stateChangeHandlers.add(options.onStateChange);
+    }
   }
 
   get state(): RelayerState {
     return {
       connected: this.ws !== null && this.ws.readyState === 1,
-      reconnecting: this.reconnectAttempts > 0,
+      reconnecting:
+        !this.isDestroyed &&
+        !this.reconnectExhausted &&
+        this.reconnectEnabled &&
+        this.reconnectAttempts > 0 &&
+        (!this.ws || this.ws.readyState !== 1),
       destroyed: this.isDestroyed,
-      pendingCount: this.pendingMessages.length,
+      pendingCount: this.offlineQueue.length,
     };
   }
 
@@ -62,25 +133,64 @@ export class WebSocketRelayer {
     }
   }
 
+  private emitStateChange(transition: RelayerStateTransition): void {
+    if (this.stateTransition === transition) return;
+
+    this.stateTransition = transition;
+    if (transition === "connected") {
+      recordConnectionResult(this.url, true, 0, "relayer");
+    } else if (transition === "disconnected" || transition === "destroyed") {
+      recordConnectionResult(this.url, false, 0, "relayer");
+    }
+    const state = this.state;
+    for (const handler of this.stateChangeHandlers) {
+      try {
+        handler(transition, state);
+      } catch (err) {
+        console.warn('[WebSocketRelayer] state change handler error:', err);
+      }
+    }
+  }
+
   async connect(): Promise<void> {
     if (this.isDestroyed) {
       throw new Error('WebSocketRelayer has been destroyed');
     }
+    this.reconnectEnabled = true;
+    this.reconnectExhausted = false;
+    this.reconnectAttempts = 0;
     if (this.connectPromise) {
       return this.connectPromise;
     }
 
+    // Assign connectPromise synchronously — before the first `await` — so that
+    // any connect() call arriving before this one settles sees it on the check
+    // above and shares this promise instead of racing into a second
+    // establishConnection() (see #492). Assigning it only after acquireLock()
+    // resolves left a window where two near-simultaneous callers both passed
+    // the check and both queued on the lock.
+    const promise = this.doConnect();
+    this.connectPromise = promise;
+    try {
+      await promise;
+    } finally {
+      if (this.connectPromise === promise) {
+        this.connectPromise = null;
+      }
+    }
+  }
+
+  private async doConnect(): Promise<void> {
     await this.acquireLock();
     try {
       if (this.ws && this.ws.readyState === 1) {
         return;
       }
 
-      this.connectPromise = this.establishConnection();
-      await this.connectPromise;
+      this.emitStateChange('connecting');
+      await this.establishConnection();
     } finally {
       this.releaseLock();
-      this.connectPromise = null;
     }
   }
 
@@ -97,6 +207,7 @@ export class WebSocketRelayer {
   private async establishConnection(): Promise<void> {
     const WebSocketCtor = this.wsCtor();
     if (!WebSocketCtor) {
+      this.emitStateChange('disconnected');
       return;
     }
 
@@ -106,32 +217,59 @@ export class WebSocketRelayer {
         try {
           ws = new WebSocketCtor(this.url);
         } catch {
+          // Fallback for mocks that are plain functions.
           ws = (WebSocketCtor as unknown as (url: string) => WebSocket)(this.url);
         }
         if (!ws) {
           resolve();
           return;
         }
+        let settled = false;
 
         ws.onopen = () => {
+          if (settled) return;
+          settled = true;
           this.reconnectAttempts = 0;
+          this.reconnectExhausted = false;
+          this.startHeartbeat();
           this.flushPendingMessages();
+          this.emitStateChange('connected');
           resolve();
         };
 
         ws.onmessage = (event: MessageEvent) => {
+          // Any inbound frame proves the link is alive, not just a pong.
+          if (this.awaitingPong) {
+            const latencyMs =
+              this.heartbeatSentAt === null ? 0 : Date.now() - this.heartbeatSentAt;
+            recordConnectionResult(this.url, true, latencyMs, "relayer");
+            this.awaitingPong = false;
+            this.heartbeatSentAt = null;
+            this.clearHeartbeatTimeout();
+          }
           this.handleMessageSafe(event.data);
         };
 
         ws.onclose = () => {
+          this.stopHeartbeat();
           this.ws = null;
-          if (!this.isDestroyed) {
+          if (!settled) {
+            settled = true;
+            reject(new Error(`WebSocket connection closed before opening: ${this.url}`));
+          }
+          if (!this.isDestroyed && this.reconnectEnabled && this.shouldAttemptReconnect()) {
             this.attemptReconnect();
+          } else {
+            if (this.isPermanentlyDown()) {
+              this.reconnectExhausted = true;
+            }
+            this.emitStateChange('disconnected');
           }
         };
 
         ws.onerror = () => {
-          if (this.ws === null) {
+          if (!settled) {
+            settled = true;
             reject(new Error(`WebSocket connection failed: ${this.url}`));
           }
         };
@@ -168,6 +306,19 @@ export class WebSocketRelayer {
 
     if (!parsed || typeof parsed !== 'object' || !parsed.type || typeof parsed.type !== 'string') return;
 
+    // Handle pong responses for heartbeat ping
+    if (parsed.type === 'pong' && this.awaitingPong) {
+      const latencyMs =
+        this.heartbeatSentAt === null ? 0 : Date.now() - this.heartbeatSentAt;
+      recordConnectionResult(this.url, true, latencyMs, "relayer");
+      this.awaitingPong = false;
+      this.heartbeatSentAt = null;
+      this.clearHeartbeatTimeout();
+      return;
+    }
+
+    if (this.isDuplicateMessage(parsed)) return;
+
     const typeHandlers = this.handlers.get(parsed.type);
     if (!typeHandlers) return;
 
@@ -176,34 +327,175 @@ export class WebSocketRelayer {
     }
   }
 
+  /**
+   * True when `msg.id` was already processed within the dedupe window (#1056).
+   * Otherwise records the id, evicting the oldest once the window is full.
+   */
+  private isDuplicateMessage(msg: WebSocketMessage): boolean {
+    if (this.dedupeWindowSize === 0) return false;
+    if (typeof msg.id !== 'string' || msg.id === '') return false;
+
+    if (this.seenMessageIds.has(msg.id)) {
+      // Refresh recency so a message that keeps being re-sent stays remembered.
+      this.seenMessageIds.delete(msg.id);
+      this.seenMessageIds.set(msg.id, true);
+      return true;
+    }
+
+    this.seenMessageIds.set(msg.id, true);
+    if (this.seenMessageIds.size > this.dedupeWindowSize) {
+      const oldest = this.seenMessageIds.keys().next().value;
+      if (oldest !== undefined) this.seenMessageIds.delete(oldest);
+    }
+    return false;
+  }
+
+  private startHeartbeat(): void {
+    this.stopHeartbeat();
+    if (!(this.heartbeatIntervalMs > 0)) return;
+    this.heartbeatInterval = setInterval(() => {
+      if (this.ws && this.ws.readyState === 1 && !this.awaitingPong) {
+        try {
+          this.ws.send(JSON.stringify({ type: 'ping' }));
+          this.awaitingPong = true;
+          this.heartbeatSentAt = Date.now();
+          this.heartbeatTimeout = setTimeout(() => {
+            if (this.awaitingPong && this.ws) {
+              this.handleHeartbeatTimeout();
+            }
+          }, this.heartbeatTimeoutMs);
+        } catch {
+          // Ignore send errors
+        }
+      }
+    }, this.heartbeatIntervalMs);
+  }
+
+  /**
+   * No pong arrived in time: the connection is half-open (NAT timeout, device
+   * sleep). `close()` on such a socket may never fire `onclose`, so detach the
+   * dead socket and drive the reconnect ourselves instead of waiting on it.
+   */
+  private handleHeartbeatTimeout(): void {
+    const dead = this.ws;
+    this.stopHeartbeat();
+    this.ws = null;
+    if (dead) {
+      dead.onopen = null;
+      dead.onmessage = null;
+      dead.onclose = null;
+      dead.onerror = null;
+      try {
+        dead.close();
+      } catch {
+        // Socket already closed/closing; nothing to clean up.
+      }
+    }
+    if (this.isDestroyed) return;
+    if (this.reconnectEnabled && this.shouldAttemptReconnect()) {
+      void this.attemptReconnect();
+    } else {
+      if (this.isPermanentlyDown()) this.reconnectExhausted = true;
+      this.emitStateChange('disconnected');
+    }
+  }
+
+  private stopHeartbeat(): void {
+    this.clearHeartbeatTimeout();
+    if (this.heartbeatInterval !== null) {
+      clearInterval(this.heartbeatInterval);
+      this.heartbeatInterval = null;
+    }
+    this.awaitingPong = false;
+    this.heartbeatSentAt = null;
+  }
+
+  private clearHeartbeatTimeout(): void {
+    if (this.heartbeatTimeout !== null) {
+      clearTimeout(this.heartbeatTimeout);
+      this.heartbeatTimeout = null;
+    }
+  }
 
   /** Idempotency guard: only reconnect if not already connected or reconnecting */
   private shouldAttemptReconnect(): boolean {
     return (
       !this.isDestroyed &&
+      this.reconnectEnabled &&
       this.reconnectAttempts < this.maxReconnectAttempts &&
       (!this.ws || this.ws.readyState !== 1)
     );
   }
 
   private flushPendingMessages(): void {
-    const pending = this.pendingMessages;
-    this.pendingMessages = [];
-    for (const msg of pending) {
-      this.send(msg).catch(() => {});
+    const now = Date.now();
+    const pending = this.offlineQueue;
+    this.offlineQueue = [];
+    for (const queued of pending) {
+      if (this.offlineBufferTtlMs > 0 && now - queued.enqueuedAt > this.offlineBufferTtlMs) {
+        continue;
+      }
+      this.send(queued.message).catch(() => {});
     }
   }
 
+  /** Returns a snapshot of the offline queue contents (for inspection/debugging). */
+  public getOfflineQueue(): QueuedMessage[] {
+    return this.offlineQueue.slice();
+  }
+
+  /**
+   * True once reconnection has been given up on — attempts exhausted, socket
+   * still not open, but the relayer wasn't explicitly disconnected/destroyed.
+   * `send()` uses this to reject outright instead of queueing messages that
+   * will never be flushed (see #491).
+   */
+  private isPermanentlyDown(): boolean {
+    return (
+      !this.isDestroyed &&
+      this.reconnectEnabled &&
+      this.reconnectAttempts >= this.maxReconnectAttempts &&
+      (!this.ws || this.ws.readyState !== 1)
+    );
+  }
+
+  /**
+   * Full-jitter exponential backoff (#1055): a uniformly random delay in
+   * `[0, min(maxDelay, baseDelay * 2 ** (attempt - 1)))`. Spreading clients
+   * across the whole window — rather than the previous 50–100% band — keeps
+   * a fleet reconnecting after a relayer restart from arriving in lockstep.
+   */
+  private reconnectDelayFor(attempt: number): number {
+    const cap = Math.min(this.maxReconnectDelayMs, this.reconnectDelayMs * 2 ** (attempt - 1));
+    return Math.floor(Math.random() * cap);
+  }
+
   private async attemptReconnect(): Promise<void> {
-    if (!this.shouldAttemptReconnect()) return;
+    if (!this.shouldAttemptReconnect()) {
+      if (this.isPermanentlyDown()) {
+        this.reconnectExhausted = true;
+      }
+      this.emitStateChange('disconnected');
+      return;
+    }
 
     await this.acquireLock();
     try {
-      if (!this.shouldAttemptReconnect()) return;
+      if (!this.shouldAttemptReconnect()) {
+        if (this.isPermanentlyDown()) {
+          this.reconnectExhausted = true;
+        }
+        this.emitStateChange('disconnected');
+        return;
+      }
 
       this.reconnectAttempts++;
-      await new Promise((r) => setTimeout(r, this.reconnectDelayMs * this.reconnectAttempts));
-      if (this.isDestroyed) return;
+      this.emitStateChange('reconnecting');
+      const delay = this.reconnectDelayFor(this.reconnectAttempts);
+      await new Promise((r) => setTimeout(r, delay));
+      // disconnect()/destroy() can land during the backoff delay; bail before
+      // opening another socket if reconnection was cancelled meanwhile (#619).
+      if (this.isDestroyed || !this.reconnectEnabled) return;
 
       await this.establishConnection();
     } catch {
@@ -230,6 +522,14 @@ export class WebSocketRelayer {
     };
   }
 
+  onStateChange(handler: StateChangeHandler): () => void {
+    this.stateChangeHandlers.add(handler);
+
+    return () => {
+      this.stateChangeHandlers.delete(handler);
+    };
+  }
+
   off(type: string, handler: MessageHandler): void {
     const handlers = this.handlers.get(type);
     if (handlers) {
@@ -240,21 +540,45 @@ export class WebSocketRelayer {
     }
   }
 
+  /**
+   * Push onto the bounded offline queue, dropping the oldest entry once
+   * `maxPendingMessages` is reached (see #491) — `send()` must route through
+   * this rather than pushing to `offlineQueue` directly.
+   */
+  private _queueMessage(message: WebSocketMessage): void {
+    if (this.offlineQueue.length >= this.maxPendingMessages) {
+      this.offlineQueue.shift();
+    }
+    this.offlineQueue.push({ message, enqueuedAt: Date.now() });
+  }
+
   async send(message: WebSocketMessage): Promise<void> {
     if (this.isDestroyed) {
       throw new Error('WebSocketRelayer has been destroyed');
     }
+    if (this.reconnectExhausted) {
+      throw new Error(
+        `WebSocketRelayer: connection to ${this.url} is down and reconnect attempts ` +
+        `(${this.maxReconnectAttempts}) are exhausted; message was not queued`,
+      );
+    }
 
     if (!this.ws || this.ws.readyState !== 1) {
-      this.pendingMessages.push(message);
+      this._queueMessage(message);
       return;
     }
 
     await this.acquireLock();
     try {
       if (this.isDestroyed) throw new Error('WebSocketRelayer has been destroyed');
+      if (this.reconnectExhausted) {
+        throw new Error(
+          `WebSocketRelayer: connection to ${this.url} is down and reconnect attempts ` +
+          `(${this.maxReconnectAttempts}) are exhausted; message was not queued`,
+        );
+      }
       if (!this.ws || this.ws.readyState !== 1) {
-        this.pendingMessages.push(message);
+        this._queueMessage(message);
         return;
       }
 
@@ -266,7 +590,11 @@ export class WebSocketRelayer {
   }
 
   disconnect(): void {
+    this.reconnectEnabled = false;
     this.connectPromise = null;
+    this.reconnectAttempts = 0;
+    this.reconnectExhausted = false;
+    this.stopHeartbeat();
 
     if (this.ws) {
       try {
@@ -276,13 +604,17 @@ export class WebSocketRelayer {
       }
       this.ws = null;
     }
+    this.emitStateChange('disconnected');
   }
 
   destroy(): void {
     this.isDestroyed = true;
+    this.reconnectEnabled = false;
+    this.reconnectExhausted = true;
     this.connectPromise = null;
-    this.pendingMessages = [];
+    this.offlineQueue = [];
     this.reconnectAttempts = this.maxReconnectAttempts;
+    this.stopHeartbeat();
 
     if (this.ws) {
       try {
@@ -296,7 +628,10 @@ export class WebSocketRelayer {
       this.ws = null;
     }
 
+    this.emitStateChange('destroyed');
     this.handlers.clear();
+    this.stateChangeHandlers.clear();
+    this.seenMessageIds.clear();
     this.lockQueue = [];
     this.isLocked = false;
   }

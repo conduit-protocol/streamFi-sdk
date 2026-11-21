@@ -1,0 +1,14 @@
+[
+  {
+    "name": "ESM entry",
+    "path": "dist/esm/index.js",
+    "limit": "200 KB",
+    "gzip": true
+  },
+  {
+    "name": "CJS entry",
+    "path": "dist/cjs/index.js",
+    "limit": "200 KB",
+    "gzip": true
+  }
+]

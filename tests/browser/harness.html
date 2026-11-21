@@ -1,0 +1,139 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>Conduit SDK Browser Compatibility Test</title>
+  <style>
+    body { font-family: system-ui, sans-serif; padding: 2rem; max-width: 800px; margin: 0 auto; }
+    h1 { border-bottom: 2px solid #ddd; padding-bottom: 0.5rem; }
+    #results { margin-top: 1rem; }
+    .pass { color: #2e7d32; background: #e8f5e9; padding: 0.25rem 0.5rem; border-radius: 4px; margin: 0.25rem 0; }
+    .fail { color: #d32f2f; background: #fdecea; padding: 0.25rem 0.5rem; border-radius: 4px; margin: 0.25rem 0; }
+    .summary { margin-top: 1rem; font-weight: bold; }
+    pre { background: #f5f5f5; padding: 1rem; border-radius: 4px; overflow-x: auto; }
+  </style>
+</head>
+<body>
+  <h1>Conduit SDK — Browser Compatibility Test</h1>
+  <p>Testing SDK utility functions and module loading across browsers.</p>
+  <pre id="log">Running tests...</pre>
+  <div id="results"></div>
+
+  <script type="importmap">
+  {
+    "imports": {
+      "@stellar/stellar-sdk": "./tests/browser/stellar-shim.js"
+    }
+  }
+  </script>
+
+  <script type="module">
+    const log = document.getElementById('log');
+    const results = document.getElementById('results');
+
+    let passed = 0;
+    let failed = 0;
+
+    function report(name, ok, detail) {
+      const el = document.createElement('div');
+      el.className = ok ? 'pass' : 'fail';
+      el.textContent = `${ok ? '✓' : '✗'} ${name}${detail !== undefined ? ` — ${detail}` : ''}`;
+      results.appendChild(el);
+      if (ok) passed++; else failed++;
+      return ok;
+    }
+
+    async function run() {
+      try {
+        // Test 1: Dynamically import the SDK ESM bundle
+        const sdk = await import('../../dist/esm/index.js');
+        report('SDK ESM bundle loads', true, `exports: ${Object.keys(sdk).length}`);
+
+        // Test 2: ConduitClient is exported and constructable
+        const { ConduitClient } = sdk;
+        report('ConduitClient exported', typeof ConduitClient === 'function', `typeof: ${typeof ConduitClient}`);
+
+        const client = new ConduitClient({
+          network: 'testnet',
+          factoryAddress: 'CAAQCAIBAEAQCAIBAEAQCAIBAEAQCAIBAEAQCAIBAEAQCAIBAEAQC526',
+          governorAddress: 'CB3AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA',
+        });
+        report('ConduitClient instantiates', true, `streams: ${typeof client.streams}`);
+
+        // Test 3: Client sub-modules exist
+        report('client.streams present', typeof client.streams === 'object', '');
+        report('client.factory present', typeof client.factory === 'object', '');
+        report('client.governor present', typeof client.governor === 'object', '');
+
+        // Test 4: StreamBuilder fluent API
+        const { StreamBuilder } = sdk;
+        report('StreamBuilder exported', typeof StreamBuilder === 'function', '');
+        new StreamBuilder()
+          .token('CAAQCAIBAEAQCAIBAEAQCAIBAEAQCAIBAEAQCAIBAEAQCAIBAEAQC526')
+          .sender('GAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAWHF')
+          .recipient('GBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBHHF')
+          .amount(1000);
+        report('StreamBuilder chain', true, 'token/sender/recipient/amount');
+
+        // Test 5: Utils subpath import
+        const utils = await import('../../dist/esm/utils.js');
+        report('Utils subpath import', true, `exports: ${Object.keys(utils).length}`);
+
+        // Test 6: toStroops / fromStroops round-trip
+        const { toStroops, fromStroops } = utils;
+        const s = toStroops('100.5');
+        report('toStroops', s === 1005000000n, `100.5 → ${s}`);
+        report('fromStroops round-trip', fromStroops(s) === '100.5', '');
+
+        // Test 7: calculateRate
+        const { calculateRate } = utils;
+        const rate = calculateRate('1000', 86400);
+        report('calculateRate', rate > 0n, `1000/1day → ${rate} stroops/s`);
+
+        // Test 8: streamProgress
+        const { streamProgress } = utils;
+        const now = Math.floor(Date.now() / 1000);
+        const mock = {
+          startTime: now - 3600, endTime: now + 3600,
+          ratePerSecond: 1000n, withdrawn: 0n,
+          cancelled: false, paused: false, pausedAt: 0,
+        };
+        const p = streamProgress(mock, now);
+        report('streamProgress 50%', Math.abs(p - 0.5) < 0.01, `${p}`);
+
+        // Test 9: BigInt support
+        report('BigInt literal', 9223372036854775807n === 9223372036854775807n, '');
+
+        // Test 10: Error classes
+        const { ConduitError, StreamErrorCode, FactoryErrorCode } = sdk;
+        report('ConduitError exported', typeof ConduitError === 'function', '');
+        report('StreamErrorCode exported', !!StreamErrorCode, '');
+        report('FactoryErrorCode exported', !!FactoryErrorCode, '');
+
+        // Test 11: FeeEstimator
+        const { FeeEstimator } = sdk;
+        report('FeeEstimator exported', typeof FeeEstimator === 'function', '');
+
+        // Test 12: isValidAddress
+        const { isValidAddress } = utils;
+        report('isValidAddress valid', isValidAddress('GAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAWHF'), '');
+        report('isValidAddress invalid', !isValidAddress('not-an-address'), '');
+
+      } catch (err) {
+        report('Test suite error', false, err.message);
+        log.textContent += `\nFATAL: ${err.stack}`;
+      }
+
+      const total = passed + failed;
+      const ok = passed === total;
+      const summary = document.createElement('div');
+      summary.className = 'summary';
+      summary.textContent = `${ok ? '✓ ALL' : '✗ SOME FAILED'} — ${passed}/${total} passed`;
+      results.appendChild(summary);
+    }
+
+    run();
+  </script>
+</body>
+</html>

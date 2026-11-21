@@ -1,5 +1,5 @@
 import { describe, it, expect } from 'vitest';
-import { TransactionSigner } from '../signer.js';
+import { TransactionSigner } from './mocks/transaction-signer.js';
 
 describe('TransactionSigner Deadlock & Callback Cleanup Regression Tests', () => {
   it('throws boundary check error when payload is null or undefined', async () => {

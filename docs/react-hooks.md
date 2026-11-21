@@ -1,0 +1,466 @@
+# React Hooks Guide for @streamfi/react
+
+The `@streamfi/react` package provides a set of React hooks that simplify stream management in React applications. These hooks handle loading states, error management, and transaction tracking automatically.
+
+## Overview
+
+All hooks require a `ConduitClient` instance, either passed explicitly or accessed via the `useConduitClient` hook that reads from the `<ConduitClientProvider>` context.
+
+## useTransferRecipient
+
+Transfers stream ownership to a new recipient.
+
+### Usage
+
+```ts
+import { useTransferRecipient } from '@streamfi/react';
+
+function TransferButton() {
+  const streamId = 123n;
+  const { transferRecipient, isPending, error, txHash } = useTransferRecipient(streamId);
+
+  const handleTransfer = async () => {
+    try {
+      const hash = await transferRecipient('GXXXXX...');
+      console.log('Transfer submitted:', hash);
+    } catch (err) {
+      console.error('Transfer failed:', err);
+    }
+  };
+
+  return (
+    <div>
+      <button onClick={handleTransfer} disabled={isPending}>
+        {isPending ? 'Transferring...' : 'Transfer Recipient'}
+      </button>
+      {error && <p className="error">{error.message}</p>}
+      {txHash && <p className="success">TX: {txHash}</p>}
+    </div>
+  );
+}
+```
+
+### Return Type
+
+```ts
+interface UseTransferRecipientResult {
+  transferRecipient: (newRecipient: string, overrideStreamId?: bigint | string) => Promise<string>;
+  isPending: boolean;
+  error: Error | null;
+  txHash: string | null;
+}
+```
+
+### Parameters
+
+- `streamId` (optional): The stream to transfer. If not provided, you can pass it to `transferRecipient()` as `overrideStreamId`.
+- `options` (optional): `{ client?: ConduitClient }` — supply a custom client instance if not using the context provider.
+
+---
+
+## useFeeEstimate
+
+Estimates the fee for a stream operation without submitting it.
+
+### Usage
+
+```ts
+import { useFeeEstimate } from '@streamfi/react';
+
+function CreateStreamForm() {
+  const operation = {
+    asset: 'USDC',
+    amount: '1000',
+    startTime: Math.floor(Date.now() / 1000) + 3600,
+    endTime: Math.floor(Date.now() / 1000) + 86400,
+  };
+
+  const { estimate, isLoading, error } = useFeeEstimate(operation, { enabled: true });
+
+  return (
+    <div>
+      {isLoading && <p>Calculating fee...</p>}
+      {error && <p className="error">{error.message}</p>}
+      {estimate !== null && <p>Estimated fee: {estimate} stroops</p>}
+    </div>
+  );
+}
+```
+
+### Return Type
+
+```ts
+interface UseFeeEstimateResult {
+  estimate: number | null;
+  isLoading: boolean;
+  error: Error | null;
+}
+```
+
+### Parameters
+
+- `operation` (optional): A stream operation object or a string method name. Pass `null` to disable estimation.
+- `options` (optional):
+  - `enabled`: Enable/disable fee estimation (default: `true`). Useful for controlling when estimation runs.
+  - `client`: Custom `ConduitClient` instance.
+
+---
+
+## useBatchWithdraw
+
+Withdraws from multiple streams in a single batch operation.
+
+### Usage
+
+```ts
+import { useBatchWithdraw } from '@streamfi/react';
+
+function WithdrawMultipleButton() {
+  const { batchWithdraw, isPending, error, results } = useBatchWithdraw();
+
+  const handleWithdraw = async () => {
+    try {
+      const outcomes = await batchWithdraw([
+        { streamId: 1n, amount: '100' },
+        { streamId: 2n, amount: '50' },
+      ]);
+      console.log('Batch result:', outcomes);
+    } catch (err) {
+      console.error('Batch failed:', err);
+    }
+  };
+
+  return (
+    <div>
+      <button onClick={handleWithdraw} disabled={isPending}>
+        {isPending ? 'Withdrawing...' : 'Batch Withdraw'}
+      </button>
+      {error && <p className="error">{error.message}</p>}
+      {results.length > 0 && (
+        <ul>
+          {results.map((r) => (
+            <li key={r.streamId}>
+              Stream {r.streamId}: {r.status}
+            </li>
+          ))}
+        </ul>
+      )}
+    </div>
+  );
+}
+```
+
+### Return Type
+
+```ts
+interface UseBatchWithdrawResult {
+  batchWithdraw: (withdrawals: BatchWithdrawItem[]) => Promise<BatchWithdrawResult[]>;
+  isPending: boolean;
+  error: Error | null;
+  results: BatchWithdrawResult[];
+}
+```
+
+### Parameters
+
+- `options` (optional): `{ client?: ConduitClient }` — supply a custom client instance.
+
+---
+
+## useStreamBalance
+
+Polls for the current withdrawable balance of a stream at a configurable interval.
+
+### Usage
+
+```ts
+import { useStreamBalance } from '@streamfi/react';
+
+function StreamBalanceDisplay() {
+  const streamId = 123n;
+  const { withdrawable, isLoading, error } = useStreamBalance(streamId, {
+    intervalMs: 5000,  // Poll every 5 seconds
+    enabled: true,     // Enable/disable polling
+  });
+
+  if (isLoading && withdrawable === null) return <p>Loading...</p>;
+  if (error) return <p className="error">{error.message}</p>;
+
+  const balanceXlm = withdrawable ? Number(withdrawable) / 1e7 : 0;
+  return <p>Withdrawable: {balanceXlm} XLM</p>;
+}
+```
+
+### Return Type
+
+```ts
+interface UseStreamBalanceResult {
+  withdrawable: bigint | null;
+  isLoading: boolean;
+  error: Error | null;
+}
+```
+
+### Parameters
+
+- `streamId` (optional): The stream to monitor. Pass `null` to stop polling.
+- `options` (optional):
+  - `intervalMs`: Poll interval in milliseconds (default: `5000`).
+  - `enabled`: Enable/disable polling (default: `true`).
+  - `client`: Custom `ConduitClient` instance.
+
+---
+
+## Providing a Client
+
+To avoid passing `client` to every hook, wrap your app with `ConduitClientProvider`:
+
+```tsx
+import { ConduitClientProvider } from '@streamfi/react';
+import { ConduitClient } from '@streamfi/sdk';
+
+const client = new ConduitClient({ network: 'testnet' });
+
+export default function App() {
+  return (
+    <ConduitClientProvider client={client}>
+      <YourApp />
+    </ConduitClientProvider>
+  );
+}
+```
+
+All hooks will now automatically use the provided client from context.
+
+---
+
+## useTokenAllowance
+
+Reads a SEP-41 token allowance and exposes an approval mutation. The owner
+address must match the connected wallet or signer when calling `approve`.
+
+`approveInfinite(expirationLedger)` approves `i128::MAX` so later streams need no re-approval. It
+still takes an expiration ledger, because SEP-41 requires a valid expiration for a non-zero amount.
+
+```tsx
+import { useTokenAllowance } from '@streamfi/react';
+
+function FundingApproval({ token, owner, streamContract }) {
+  const { allowance, loading, isPending, approve, txHash, error } =
+    useTokenAllowance(token, owner, streamContract);
+
+  const approveFunding = () => approve(1_000_000n, 2_000_000);
+
+  return (
+    <div>
+      <p>Allowance: {loading ? 'Loading...' : allowance?.toString() ?? 'Unavailable'}</p>
+      <button onClick={approveFunding} disabled={isPending}>
+        {isPending ? 'Approving...' : 'Approve funding'}
+      </button>
+      {txHash && <p>Approval transaction: {txHash}</p>}
+      {error && <p>{error.message}</p>}
+    </div>
+  );
+}
+```
+
+`approve(amount, expirationLedger)` accepts a bigint-compatible integer and a
+u32 ledger sequence, then returns the confirmed transaction hash. The hook
+also exposes `refetch()` and `reset()`.
+
+---
+
+## useStreamCountdown
+
+Live countdown to a cliff, cancellation, or completion deadline. The hook
+ticks once per second, so a vesting or payroll card can render the remaining
+time without wiring up its own timer.
+
+`targetTimestamp` and the optional `startTimestamp` are Unix timestamps in
+**seconds** (the same unit as `StreamInfo.startTime` / `StreamInfo.endTime`),
+not milliseconds.
+
+```tsx
+import { useStreamCountdown } from '@streamfi/react';
+
+function CliffCountdown({ stream }) {
+  const { days, hours, minutes, seconds, isPast, progressFraction } =
+    useStreamCountdown(stream.endTime, stream.startTime);
+
+  if (isPast) return <p>Stream complete — everything has unlocked.</p>;
+
+  return (
+    <div>
+      <p>
+        {days}d {hours}h {minutes}m {seconds}s remaining
+      </p>
+      {progressFraction !== null && (
+        <progress value={progressFraction} max={1} />
+      )}
+    </div>
+  );
+}
+```
+
+### Return Type
+
+```ts
+interface UseStreamCountdownResult {
+  days: number;
+  hours: number;
+  minutes: number;
+  seconds: number;
+  isPast: boolean;
+  progressFraction: number | null;
+}
+```
+
+### Parameters
+
+- `targetTimestamp`: The deadline to count down to, in Unix seconds. Pass
+  `null` or `undefined` to render a zeroed, not-yet-started state (handy
+  while a stream is still loading).
+- `startTimestamp` (optional): The start of the window, in Unix seconds.
+  Supplying it adds `progressFraction` — the elapsed share of the window,
+  clamped to `0`-`1`. Without it `progressFraction` is `null`, since a
+  deadline alone cannot define a range.
+
+---
+
+## Stream lifecycle helpers
+
+Four lifecycle hooks expose state that lets a UI preview or label an action
+before the user commits to it.
+
+```tsx
+import { useCancelStream, useCreateBatchStreams, usePauseStream, useResumeStream } from '@streamfi/react';
+
+function StreamControls({ streamId }) {
+  const { estimatedRefund, cancel } = useCancelStream(streamId);
+  const { isPausing, pause } = usePauseStream(streamId);
+  const { resume } = useResumeStream(streamId);
+  const { estimateTotalBatchCost } = useCreateBatchStreams();
+
+  return (
+    <div>
+      <p>Refund if cancelled: {estimatedRefund === null ? 'Unknown' : estimatedRefund.toString()}</p>
+      <button onClick={() => pause().catch(() => {})} disabled={isPausing}>
+        {isPausing ? 'Pausing Stream...' : 'Pause'}
+      </button>
+      <button onClick={() => resume().catch(() => {})}>Resume</button>
+      <button onClick={() => cancel().catch(() => {})}>Cancel</button>
+      <p>Batch total: {estimateTotalBatchCost(batchConfigs).toString()} stroops</p>
+    </div>
+  );
+}
+```
+
+- `useCancelStream(streamId).estimatedRefund` is the sender's unstreamed balance
+  in stroops, or `null` until the stream loads and for open-ended streams.
+- `usePauseStream(streamId).isPausing` is `true` only while the pause
+  transaction is in flight.
+- `useResumeStream(streamId).resume()` rejects without contacting the wallet
+  when the loaded stream is active or cancelled. Streams that have not loaded
+  yet are not pre-checked.
+- `useCreateBatchStreams().estimateTotalBatchCost(configs)` returns the sum of
+  every config's `depositAmount` in stroops. It is pure and makes no network call.
+
+---
+
+## Error Handling
+
+Each hook exposes an `error` field that captures:
+
+- Network errors (see {@link StreamFiNetworkError})
+- Contract errors (see {@link ConduitError} and subclasses)
+- Validation errors (see {@link ValidationError})
+- Timeout errors (see {@link IndexerTimeoutError}, {@link RateLimitError})
+
+Refer to the [error-handling guide](./error-handling.md) for strategies to catch and respond to specific error types.
+
+---
+
+## Advanced: Combining Hooks
+
+A common pattern is to disable operations while a fee estimate is still loading:
+
+```ts
+function StreamForm() {
+  const operation = buildOperation(formState);
+  const { estimate, isLoading: feeLoading } = useFeeEstimate(operation);
+  const { transferRecipient, isPending } = useTransferRecipient(streamId);
+
+  const isReady = !feeLoading && estimate !== null;
+  return (
+    <button onClick={() => transferRecipient(newRecipient)} disabled={!isReady || isPending}>
+      {!isReady ? 'Calculating...' : isPending ? 'Transferring...' : 'Transfer'}
+    </button>
+  );
+}
+```
+
+---
+
+## useStreamHistoryInfinite
+
+Infinite-scroll activity history (withdrawals, top-ups, pauses, …) for a stream, built on
+TanStack Query's `useInfiniteQuery`. Requires `@tanstack/react-query` v5 (an optional peer
+dependency) and a `<QueryClientProvider>` above the component.
+
+```tsx
+import { useStreamHistoryInfinite } from '@streamfi/react';
+
+function Activity({ streamId }) {
+  const { entries, hasNextPage, fetchNextPage, isFetchingNextPage, isLoading, error } =
+    useStreamHistoryInfinite(streamId, 25);
+
+  if (isLoading) return <p>Loading…</p>;
+  if (error) return <p>{error.message}</p>;
+
+  return (
+    <>
+      <ul>
+        {entries.map((e) => (
+          <li key={e.id}>{e.kind} · ledger {e.ledger}</li>
+        ))}
+      </ul>
+      {hasNextPage && (
+        <button disabled={isFetchingNextPage} onClick={() => fetchNextPage()}>
+          Load more
+        </button>
+      )}
+    </>
+  );
+}
+```
+
+`entries` is oldest first. Pages come from `client.streams.getHistory()`, which reads Soroban RPC
+events and so only covers the RPC retention window (about seven days); use the indexer for
+older history. `pageSize` is 1–200 (default 50); the query is disabled while `streamId` is
+`undefined`.
+
+Pass `filterEventTypes` to keep only some categories: `'Deposit'` (created and top-up events),
+`'Withdraw'` or `'Cancel'`. The filter runs on the loaded entries, so a page can hold fewer
+matches than `pageSize`; keep calling `fetchNextPage` while `hasNextPage` is true.
+
+```tsx
+const withdrawals = useStreamHistoryInfinite(streamId, 25, { filterEventTypes: ['Withdraw'] });
+```
+
+## `useStreamSearch`
+
+Client-side search over streams you have already loaded; no indexer refetch.
+
+```tsx
+const { results, total } = useStreamSearch(streams, query, {
+  status: ['active', 'paused'], // optional, case-insensitive
+  fuzzy: true,                  // default; substring hits rank above fuzzy-only hits
+  limit: 50,                    // `total` still reports the pre-limit count
+});
+```
+
+Whitespace-separated terms must all match. By default it searches `id`, `address`, `sender`, `recipient`, `token`, `memo`, `note`, `txHash` and string/number metadata values; pass `fields` (e.g. `['sender', 'metadata.dept']`) to narrow it.
+
+To find a stream from its creation transaction, set `txHash` on each stream (for example from the
+`created` entry in `useStreamHistoryInfinite`) and search for the hash. Transaction hashes match by
+substring only, so a partial hash works but fuzzy matching never applies to them.
