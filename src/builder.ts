@@ -59,6 +59,7 @@ export interface SimulationResult {
 const DEFAULT_CONCURRENCY = 10;
 const DEFAULT_MAX_QUEUE_SIZE = 100;
 const MAX_RETROACTIVE_START_AGE_SECONDS = 30 * 24 * 60 * 60;
+export const MAX_STREAM_DURATION_SECONDS = 5 * 365 * 24 * 60 * 60;
 
 class Semaphore {
   private _running = 0;
@@ -109,6 +110,12 @@ export class StreamBuilder {
   constructor(options?: { concurrency?: number; maxQueueSize?: number }) {
     this._semaphore = new Semaphore(options?.concurrency ?? DEFAULT_CONCURRENCY);
     this._maxQueueSize = options?.maxQueueSize ?? DEFAULT_MAX_QUEUE_SIZE;
+  }
+
+  private validateDuration(): void {
+    if (this._startTime !== undefined && this._endTime !== undefined && this._endTime - this._startTime > MAX_STREAM_DURATION_SECONDS) {
+      throw new ValidationError(["stream duration cannot exceed  seconds"]);
+    }
   }
 
   /**
@@ -227,6 +234,7 @@ export class StreamBuilder {
       throw new Error('Invalid StreamBuilder parameter: startTime cannot be more than 30 days in the past');
     }
     this._startTime = val;
+    this.validateDuration();
     return this;
   }
 
@@ -242,6 +250,7 @@ export class StreamBuilder {
       throw new Error('Invalid StreamBuilder parameter: endTime must be a non-negative integer Unix timestamp');
     }
     this._endTime = val;
+    this.validateDuration();
     return this;
   }
 
