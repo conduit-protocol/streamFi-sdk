@@ -9,7 +9,7 @@ import type {
   BatchStreamCreationPayload,
   BatchCreateStreamResult,
 } from '../types/index.js';
-import type { StreamEvent } from '../events.js';
+import type { StreamEvent, StreamHistoryEntry } from '../events.js';
 import type { WalletAdapter } from '../adapters/types.js';
 import { streamedTotalLocal } from '../utils.js';
 import { calculateVestedPercentage } from '../streams.js';
@@ -86,12 +86,7 @@ export function useFeeEstimate(
   const [isLoading, setIsLoading] = useState(false);
   const [error, setError] = useState<Error | null>(null);
 
-  const opKey = useMemo(() => {
-    if (operation == null) return null;
-    return typeof operation === 'string'
-      ? operation
-      : JSON.stringify(operation, (_, v) => (typeof v === 'bigint' ? v.toString() : v));
-  }, [operation]);
+  const opKey = useMemo(() => stableOperationKey(operation), [operation]);
 
   useEffect(() => {
     if (!enabled || opKey == null || operation == null) {
@@ -636,4 +631,287 @@ export function useBatchStreams(options?: HookOptions): UseBatchStreamsResult {
     withdrawResults,
     reset,
   };
+}
+
+// ── useStreamHistory ─────────────────────────────────────────────────────────
+
+/** Categories of stream activity exposed by {@link useStreamHistory}. */
+export type StreamHistoryType = 'deposit' | 'withdrawal' | 'cancellation';
+
+const DEFAULT_STREAM_HISTORY_TYPES: readonly StreamHistoryType[] = [
+  'deposit',
+  'withdrawal',
+  'cancellation',
+];
+
+/** Underlying RPC event kinds that make up each history category. */
+const HISTORY_KINDS: Record<StreamHistoryType, ReadonlyArray<StreamHistoryEntry['kind']>> = {
+  deposit: ['created', 'top_up'],
+  withdrawal: ['withdraw'],
+  cancellation: ['cancel'],
+};
+
+function matchesHistoryType(entry: StreamHistoryEntry, type: StreamHistoryType): boolean {
+  return HISTORY_KINDS[type].includes(entry.kind);
+}
+
+export interface UseStreamHistoryOptions extends HookOptions {
+  enabled?: boolean;
+  /**
+   * Background revalidation interval in milliseconds. Defaults to 30,000.
+   * Set to `0` to disable interval-based revalidation.
+   */
+  refreshIntervalMs?: number;
+  /** Revalidate when the tab regains focus/visibility. Defaults to `true`. */
+  revalidateOnFocus?: boolean;
+  /** Page size passed to `client.streams.getHistory` (1-200). Default 50. */
+  limit?: number;
+  /** Categories included in `entries`. Defaults to all three. */
+  types?: StreamHistoryType[];
+}
+
+export interface UseStreamHistoryResult {
+  /** The selected activity, oldest first. Stale data is kept while revalidating. */
+  entries: StreamHistoryEntry[];
+  deposits: StreamHistoryEntry[];
+  withdrawals: StreamHistoryEntry[];
+  cancellations: StreamHistoryEntry[];
+  /** True only for the initial load, while no data has been shown yet. */
+  isLoading: boolean;
+  /** True while any (including background) revalidation is in flight. */
+  isValidating: boolean;
+  error: Error | null;
+  /** Revalidate immediately, keeping previously fetched data on screen (SWR-style). */
+  refresh: () => Promise<void>;
+}
+
+type FocusTarget = {
+  addEventListener(type: string, listener: () => void): void;
+  removeEventListener(type: string, listener: () => void): void;
+};
+
+/**
+ * Fetches a stream's past deposits (creations + top-ups), withdrawals and
+ * cancellations. A successful fetch is served from state on subsequent
+ * revalidations — `refresh()`, the interval, and window focus all revalidate
+ * in the background instead of clearing the table.
+ */
+export function useStreamHistory(
+  streamId?: bigint | string | null,
+  options?: UseStreamHistoryOptions,
+): UseStreamHistoryResult {
+  const client = useConduitClient(options?.client);
+  const enabled = options?.enabled ?? true;
+  const refreshIntervalMs = options?.refreshIntervalMs ?? 30_000;
+  const revalidateOnFocus = options?.revalidateOnFocus ?? true;
+  const limit = options?.limit ?? 50;
+  const types = options?.types;
+  const typesKey = types && types.length > 0 ? [...types].sort().join(',') : 'all';
+  const active = streamId != null && enabled;
+
+  const [allEntries, setAllEntries] = useState<StreamHistoryEntry[]>([]);
+  const [isLoading, setIsLoading] = useState<boolean>(active);
+  const [isValidating, setIsValidating] = useState<boolean>(false);
+  const [error, setError] = useState<Error | null>(null);
+  const mounted = useRef(true);
+  const requestId = useRef(0);
+
+  useEffect(() => {
+    mounted.current = true;
+    return () => {
+      mounted.current = false;
+      requestId.current++;
+    };
+  }, []);
+
+  const refresh = useCallback(async (): Promise<void> => {
+    if (streamId == null) return;
+    const id = ++requestId.current;
+    setIsValidating(true);
+    try {
+      const page = await client.streams.getHistory(streamId, { limit });
+      if (mounted.current && id === requestId.current) {
+        setAllEntries(page.entries);
+        setError(null);
+      }
+    } catch (err) {
+      if (mounted.current && id === requestId.current) {
+        setError(err instanceof Error ? err : new Error(String(err)));
+      }
+    } finally {
+      if (mounted.current && id === requestId.current) {
+        setIsValidating(false);
+        setIsLoading(false);
+      }
+    }
+  }, [client, streamId, limit]);
+
+  useEffect(() => {
+    if (!active) {
+      requestId.current++;
+      setAllEntries([]);
+      setIsLoading(false);
+      setIsValidating(false);
+      setError(null);
+      return;
+    }
+    setAllEntries([]);
+    setIsLoading(true);
+    void refresh();
+    if (refreshIntervalMs <= 0) return;
+    const intervalId = setInterval(() => void refresh(), refreshIntervalMs);
+    return () => clearInterval(intervalId);
+  }, [active, refresh, refreshIntervalMs]);
+
+  useEffect(() => {
+    if (!active || !revalidateOnFocus) return;
+    const global = globalThis as typeof globalThis & {
+      window?: FocusTarget;
+      document?: FocusTarget & { visibilityState?: string };
+    };
+    const win = global.window;
+    const doc = global.document;
+    if (!win && !doc) return;
+
+    const onFocus = (): void => {
+      void refresh();
+    };
+    const onVisibility = (): void => {
+      if (doc?.visibilityState === 'visible') onFocus();
+    };
+    win?.addEventListener('focus', onFocus);
+    doc?.addEventListener('visibilitychange', onVisibility);
+    return () => {
+      win?.removeEventListener('focus', onFocus);
+      doc?.removeEventListener('visibilitychange', onVisibility);
+    };
+  }, [active, revalidateOnFocus, refresh]);
+
+  const deposits = useMemo(
+    () => allEntries.filter((entry) => matchesHistoryType(entry, 'deposit')),
+    [allEntries],
+  );
+  const withdrawals = useMemo(
+    () => allEntries.filter((entry) => matchesHistoryType(entry, 'withdrawal')),
+    [allEntries],
+  );
+  const cancellations = useMemo(
+    () => allEntries.filter((entry) => matchesHistoryType(entry, 'cancellation')),
+    [allEntries],
+  );
+  const entries = useMemo(() => {
+    const selected = new Set<StreamHistoryType>(
+      types && types.length > 0 ? types : DEFAULT_STREAM_HISTORY_TYPES,
+    );
+    return allEntries.filter((entry) =>
+      [...selected].some((type) => matchesHistoryType(entry, type)),
+    );
+  }, [allEntries, typesKey]);
+
+  return {
+    entries,
+    deposits,
+    withdrawals,
+    cancellations,
+    isLoading,
+    isValidating,
+    error,
+    refresh,
+  };
+}
+
+// ── useEstimatedFee ──────────────────────────────────────────────────────────
+
+/** Stable, bigint-safe cache key for a stream operation. */
+function stableOperationKey(operation?: StreamOperation | null): string | null {
+  if (operation == null) return null;
+  return typeof operation === 'string'
+    ? operation
+    : JSON.stringify(operation, (_, value) =>
+        typeof value === 'bigint' ? value.toString() : value,
+      );
+}
+
+export interface UseEstimatedFeeOptions extends HookOptions {
+  enabled?: boolean;
+  /** Delay in milliseconds after the last input change. Defaults to 300. */
+  debounceMs?: number;
+}
+
+export interface UseEstimatedFeeResult {
+  estimate: FeeEstimate | null;
+  isLoading: boolean;
+  error: Error | null;
+  /** Recompute now, bypassing the debounce timer. */
+  refresh: () => Promise<void>;
+  /** Alias of {@link UseEstimatedFeeResult.refresh}. */
+  refetch: () => Promise<void>;
+}
+
+/**
+ * Estimates the network fee for a form's current operation, debounced so that
+ * typing in a form triggers at most one estimate after the user stops changing
+ * inputs. Stale responses from superseded requests are discarded.
+ */
+export function useEstimatedFee(
+  operation?: StreamOperation | null,
+  options?: UseEstimatedFeeOptions,
+): UseEstimatedFeeResult {
+  const client = useConduitClient(options?.client);
+  const enabled = options?.enabled ?? true;
+  const debounceMs = Math.max(0, options?.debounceMs ?? 300);
+  const opKey = stableOperationKey(operation);
+  const operationRef = useRef(operation);
+  operationRef.current = operation;
+
+  const [estimate, setEstimate] = useState<FeeEstimate | null>(null);
+  const [isLoading, setIsLoading] = useState(false);
+  const [error, setError] = useState<Error | null>(null);
+  const mounted = useRef(true);
+  const requestId = useRef(0);
+
+  useEffect(() => {
+    mounted.current = true;
+    return () => {
+      mounted.current = false;
+      requestId.current++;
+    };
+  }, []);
+
+  const runEstimate = useCallback(async (): Promise<void> => {
+    const currentOperation = operationRef.current;
+    if (currentOperation == null) return;
+    const id = ++requestId.current;
+    setIsLoading(true);
+    try {
+      const fee = await client.streams.estimateFee(currentOperation);
+      if (mounted.current && id === requestId.current) {
+        setEstimate(fee);
+        setError(null);
+      }
+    } catch (err) {
+      if (mounted.current && id === requestId.current) {
+        setError(err instanceof Error ? err : new Error(String(err)));
+      }
+    } finally {
+      if (mounted.current && id === requestId.current) {
+        setIsLoading(false);
+      }
+    }
+  }, [client]);
+
+  useEffect(() => {
+    if (!enabled || opKey == null) {
+      requestId.current++;
+      setEstimate(null);
+      setIsLoading(false);
+      setError(null);
+      return;
+    }
+    setIsLoading(true);
+    const timer = setTimeout(() => void runEstimate(), debounceMs);
+    return () => clearTimeout(timer);
+  }, [enabled, opKey, debounceMs, runEstimate]);
+
+  return { estimate, isLoading, error, refresh: runEstimate, refetch: runEstimate };
 }
