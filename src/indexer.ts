@@ -745,8 +745,13 @@ export class GraphQLIndexer {
         return;
       }
       reconnectAttempts += 1;
-      const baseDelay = reconnectDelayMs * reconnectAttempts;
-      const cappedDelay = Math.min(baseDelay, 30_000);
+      // Exponential backoff: base * 2^(attempt - 1), capped at 30s. Linear
+      // growth kept hammering an endpoint that was still recovering.
+      const exponentialDelay = reconnectDelayMs * 2 ** (reconnectAttempts - 1);
+      const cappedDelay = Math.min(exponentialDelay, 30_000);
+      // Randomized jitter (up to 30% of the capped delay) de-synchronises
+      // clients reconnecting after the same network transition, preventing a
+      // reconnection storm against a recovering indexer.
       const jitter = Math.random() * 0.3 * cappedDelay;
       const delay = cappedDelay + jitter;
       reconnectTimer = setTimeout(() => {

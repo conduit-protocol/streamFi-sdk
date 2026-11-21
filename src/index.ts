@@ -133,6 +133,7 @@ export {
   isRecoverableError,
   StreamFiError,
   IndexerMaxPagesExceededError,
+  MissingTrustlineError,
   isConduitError,
   SUPPORTED_NETWORKS,
   CAIP2_TO_NETWORK,
@@ -236,7 +237,12 @@ export type {
   ContractRole,
 } from "./constants.js";
 
-export { TokenModule, formatTokenAmount as formatLocalizedTokenAmount } from "./token.js";
+export {
+  TokenModule,
+  DEFAULT_TOKEN_METADATA_CACHE_SIZE,
+  formatTokenAmount as formatLocalizedTokenAmount,
+} from "./token.js";
+export type { TokenModuleOptions } from "./token.js";
 
 export {
   getEndpointHealth,
@@ -277,6 +283,7 @@ export {
   clearTokenDecimalsCache,
   getTokenDecimalsCacheMetrics,
   resetTokenDecimalsCacheMetrics,
+  scValToString,
 } from "./soroban.js";
 export { getLatestLedgerInfo, clearLedgerInfoCache } from "./soroban.js";
 export type { LedgerInfo } from "./soroban.js";
