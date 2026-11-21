@@ -890,7 +890,7 @@ function actorAddressesOf(entry: StreamHistoryEntry): { sender?: string; recipie
     case 'created':  return { sender: entry.event.sender, recipient: entry.event.recipient };
     case 'withdraw': return { recipient: entry.event.recipient };
     case 'top_up':   return { sender: entry.event.sender };
-    case 'cliff_reached':
+    case 'cliff_reached': return { recipient: entry.event.recipient };
     case 'top_up_extended': return { sender: entry.event.sender };
     case 'pause':    return { sender: entry.event.sender };
     case 'resume':   return { sender: entry.event.sender };
