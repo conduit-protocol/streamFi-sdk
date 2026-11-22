@@ -264,6 +264,140 @@ function findPaginatedCollection(value: unknown): PaginatedCollection | undefine
 }
 
 
+// ── Historical event replay by ledger sequence ────────────────────────────────
+
+/** Default number of ledgers scanned by {@link GraphQLIndexer.replayEventsFrom} when `ledgerOffset` is given. */
+export const DEFAULT_REPLAY_LEDGER_OFFSET = 1_000;
+/** Default page size for {@link GraphQLIndexer.replayEventsFrom}. */
+export const DEFAULT_REPLAY_EVENTS_PAGE_SIZE = 100;
+/** Default page cap for {@link GraphQLIndexer.replayEventsFrom}. */
+export const DEFAULT_REPLAY_EVENTS_MAX_PAGES = 1_000;
+
+/**
+ * Options for {@link GraphQLIndexer.replayEventsFrom}.
+ *
+ * A client that lost connectivity remembers the last ledger it processed and
+ * asks only for the events after it. `fromLedger` (or `lastProcessedLedger`)
+ * is that ledger-sequence offset; `toLedger` optionally bounds the replay so a
+ * single call cannot walk the chain's entire history.
+ */
+export interface ReplayEventsFromOptions
+  extends Omit<GraphQLQueryOptions, 'query' | 'variables'> {
+  /** First ledger sequence to include (inclusive). */
+  fromLedger?: number;
+  /**
+   * Last ledger the client successfully processed. Used when `fromLedger` is
+   * omitted: replay starts at `lastProcessedLedger + 1` (set `inclusive` to
+   * replay the ledger itself too).
+   */
+  lastProcessedLedger?: number;
+  /** Include the `lastProcessedLedger` itself instead of starting one past it. Default false. */
+  inclusive?: boolean;
+  /** Highest ledger sequence to include (inclusive). When omitted, no upper bound is sent. */
+  toLedger?: number;
+  /**
+   * Ledger-sequence window size. When `toLedger` is omitted it becomes
+   * `fromLedger + ledgerOffset`; when `fromLedger` is omitted it becomes
+   * `max(1, toLedger - ledgerOffset)`.
+   */
+  ledgerOffset?: number;
+  /** Events per page. Default {@link DEFAULT_REPLAY_EVENTS_PAGE_SIZE}. */
+  pageSize?: number;
+  /** Maximum pages fetched before throwing. Default {@link DEFAULT_REPLAY_EVENTS_MAX_PAGES}. */
+  maxPages?: number;
+  /** GraphQL document override (defaults to a `ReplayEventsFrom` query). */
+  query?: string;
+  /** Extra variables merged into every request (e.g. contract filters). */
+  variables?: Record<string, unknown>;
+  /** Deduplicate events by id across overlapping pages. Default true. */
+  dedupe?: boolean;
+  /** Called once for every dispatched event, in ledger order. */
+  onEvent?: (event: unknown) => void;
+}
+
+/** Result metadata attached to the array returned by {@link GraphQLIndexer.replayEventsFrom}. */
+export interface ReplayEventsFromResult<T> {
+  /** The events in replay order. */
+  events: T[];
+  /** First ledger requested (inclusive). */
+  fromLedger: number;
+  /** Highest ledger requested, when bounded. */
+  toLedger: number | undefined;
+  /** Ledger sequence of the last dispatched event, or `undefined` when none were replayed. */
+  lastLedger: number | undefined;
+  /** Number of events dispatched. */
+  dispatched: number;
+  /** Number of pages fetched from the indexer. */
+  pagesFetched: number;
+}
+
+/** Default GraphQL document used to replay events over a ledger range. */
+export const REPLAY_EVENTS_FROM_QUERY = `
+  query ReplayEventsFrom($fromLedger: Int!, $toLedger: Int, $limit: Int, $cursor: String) {
+    streamEvents(fromLedger: $fromLedger, toLedger: $toLedger, first: $limit, after: $cursor) {
+      items {
+        id
+        ledger
+        timestamp
+        txHash
+        topic
+        value
+      }
+      pageInfo {
+        hasNextPage
+        endCursor
+      }
+    }
+  }
+`;
+
+function ledgerOf(value: unknown): number | undefined {
+  if (!value || typeof value !== 'object') return undefined;
+  const ledger = (value as { ledger?: unknown }).ledger;
+  return typeof ledger === 'number' ? ledger : undefined;
+}
+
+function eventIdOf(value: unknown, index: number): string {
+  if (value && typeof value === 'object') {
+    const record = value as { id?: unknown; pagingToken?: unknown; txHash?: unknown };
+    if (typeof record.id === 'string' || typeof record.id === 'number') return String(record.id);
+    if (typeof record.pagingToken === 'string') return record.pagingToken;
+    if (typeof record.txHash === 'string') {
+      return `${record.txHash}:${String(ledgerOf(value) ?? '')}:${index}`;
+    }
+  }
+  return `index:${index}`;
+}
+
+/** Find the first event array in a (possibly nested) GraphQL response. */
+function findReplayEventArray(value: unknown, depth = 0): unknown[] | undefined {
+  if (depth > 4 || !value || typeof value !== 'object') return undefined;
+  if (Array.isArray(value)) return value;
+  const record = value as Record<string, unknown>;
+  for (const key of ['events', 'streamEvents', 'items', 'nodes', 'results']) {
+    const candidate = record[key];
+    if (Array.isArray(candidate)) return candidate;
+  }
+  for (const candidate of Object.values(record)) {
+    const nested = findReplayEventArray(candidate, depth + 1);
+    if (nested) return nested;
+  }
+  return undefined;
+}
+
+/** Locate Relay-style `pageInfo` anywhere within a GraphQL response. */
+function findPageInfo(value: unknown, depth = 0): IndexerPageInfo | undefined {
+  if (depth > 4 || !value || typeof value !== 'object') return undefined;
+  const record = value as Record<string, unknown>;
+  const candidate = record.pageInfo;
+  if (candidate && typeof candidate === 'object') return decodePageInfo(candidate);
+  for (const nested of Object.values(record)) {
+    const found = findPageInfo(nested, depth + 1);
+    if (found) return found;
+  }
+  return undefined;
+}
+
 /** A detected skip in an otherwise-monotonic ledger sequence. */
 export interface LedgerGap {
   /** The ledger sequence that should have come next (`currentLedger + 1`). */
@@ -1081,6 +1215,156 @@ export class GraphQLIndexer {
     return pages;
   }
 
+  /**
+   * Replay events missed while the client was offline, starting at a ledger
+   * sequence offset rather than at "now".
+   *
+   * A reconnecting client passes the last ledger it processed; every event
+   * from that point forward is fetched (in order, deduplicated across pages)
+   * so the UI can rebuild the state it missed. The method delegates to
+   * {@link query}, so timeouts, signals, headers and persisted queries are
+   * handled exactly like any other indexer request.
+   *
+   * The returned value is an array of events with {@link ReplayEventsFromResult}
+   * metadata (`events`, `lastLedger`, `dispatched`, …) attached as
+   * non-enumerable properties, so it can be used as either an array or a
+   * result object.
+   *
+   * @example
+   * ```ts
+   * const events = await indexer.replayEventsFrom(lastProcessedLedger, {
+   *   ledgerOffset: 500,
+   *   onEvent: (event) => applyEvent(event),
+   * });
+   * ```
+   */
+  async replayEventsFrom<TEvent = unknown>(
+    fromLedgerOrOptions: number | ReplayEventsFromOptions,
+    maybeOptions: ReplayEventsFromOptions = {},
+  ): Promise<TEvent[] & ReplayEventsFromResult<TEvent>> {
+    const options: ReplayEventsFromOptions =
+      typeof fromLedgerOrOptions === 'number'
+        ? { ...maybeOptions, fromLedger: fromLedgerOrOptions }
+        : fromLedgerOrOptions;
+
+    const fromLedger = options.fromLedger ??
+      (options.lastProcessedLedger !== undefined
+        ? options.lastProcessedLedger + (options.inclusive ? 0 : 1)
+        : undefined);
+    if (!Number.isInteger(fromLedger) || (fromLedger as number) < 1) {
+      throw new Error(
+        `replayEventsFrom: fromLedger must be a positive integer, got ${String(fromLedger)}`,
+      );
+    }
+
+    if (options.ledgerOffset !== undefined &&
+        (!Number.isInteger(options.ledgerOffset) || options.ledgerOffset < 0)) {
+      throw new Error(
+        `replayEventsFrom: ledgerOffset must be a non-negative integer, got ${String(options.ledgerOffset)}`,
+      );
+    }
+
+    let toLedger = options.toLedger;
+    if (toLedger !== undefined &&
+        (!Number.isInteger(toLedger) || toLedger < (fromLedger as number))) {
+      throw new Error(
+        `replayEventsFrom: toLedger must be an integer >= fromLedger, got ${String(toLedger)}`,
+      );
+    }
+    if (toLedger === undefined && options.ledgerOffset !== undefined) {
+      toLedger = (fromLedger as number) + options.ledgerOffset;
+    }
+
+    const pageSize = options.pageSize ?? DEFAULT_REPLAY_EVENTS_PAGE_SIZE;
+    if (!Number.isInteger(pageSize) || pageSize < 1) {
+      throw new Error(`replayEventsFrom: pageSize must be a positive integer, got ${String(pageSize)}`);
+    }
+    const maxPages = options.maxPages ?? DEFAULT_REPLAY_EVENTS_MAX_PAGES;
+    if (!Number.isInteger(maxPages) || maxPages < 1) {
+      throw new Error(`replayEventsFrom: maxPages must be a positive integer, got ${String(maxPages)}`);
+    }
+
+    const query = options.query ?? REPLAY_EVENTS_FROM_QUERY;
+    const dedupe = options.dedupe !== false;
+    const seen = new Set<string>();
+    const events: TEvent[] = [];
+    let lastLedger: number | undefined;
+    let cursor: string | undefined;
+    let pagesFetched = 0;
+
+    for (;;) {
+      if (pagesFetched >= maxPages) {
+        throw new Error(
+          `replayEventsFrom: exceeded maxPages (${maxPages}) before the replay was complete`,
+        );
+      }
+
+      const variables: Record<string, unknown> = {
+        fromLedger,
+        ...(toLedger !== undefined ? { toLedger } : {}),
+        limit: pageSize,
+        ...options.variables,
+        ...(cursor !== undefined ? { cursor } : {}),
+      };
+
+      const data = await this.query<unknown>({
+        query,
+        variables,
+        ...(options.headers !== undefined ? { headers: options.headers } : {}),
+        ...(options.timeoutMs !== undefined ? { timeoutMs: options.timeoutMs } : {}),
+        ...(options.signal !== undefined ? { signal: options.signal } : {}),
+        ...(options.persist !== undefined ? { persist: options.persist } : {}),
+      });
+
+      pagesFetched += 1;
+      const page = findReplayEventArray(data) ?? [];
+      let pastRange = false;
+
+      for (let index = 0; index < page.length; index++) {
+        const event = page[index] as TEvent;
+        const ledger = ledgerOf(event);
+        if (ledger !== undefined && toLedger !== undefined && ledger > toLedger) {
+          pastRange = true;
+          break;
+        }
+        const id = eventIdOf(event, index);
+        if (dedupe && seen.has(id)) continue;
+        seen.add(id);
+        events.push(event);
+        if (ledger !== undefined) lastLedger = ledger;
+        try {
+          options.onEvent?.(event);
+        } catch (handlerError) {
+          console.warn('[conduit-sdk] replayEventsFrom onEvent handler error:', handlerError);
+        }
+      }
+      if (pastRange) break;
+
+      const pageInfo = findPageInfo(data);
+      const nextCursor = pageInfo?.endCursor ??
+        (data && typeof data === 'object' ? (data as { cursor?: unknown }).cursor : undefined);
+      const hasNextPage = pageInfo?.hasNextPage ?? page.length >= pageSize;
+      if (!hasNextPage || typeof nextCursor !== 'string' || nextCursor.length === 0 || nextCursor === cursor) {
+        break;
+      }
+      cursor = nextCursor;
+    }
+
+    const result = events as TEvent[] & ReplayEventsFromResult<TEvent>;
+    const metadata: ReplayEventsFromResult<TEvent> = {
+      events,
+      fromLedger: fromLedger as number,
+      toLedger,
+      lastLedger,
+      dispatched: events.length,
+      pagesFetched,
+    };
+    for (const [key, value] of Object.entries(metadata)) {
+      Object.defineProperty(result, key, { value, enumerable: false, configurable: true });
+    }
+    return result;
+  }
+
   getSubscriptionCount(): number {
     return this.activeSubscriptions.size;
   }
@@ -1332,4 +1616,19 @@ export class GraphQLIndexer {
       }
     }
   }
+}
+
+/**
+ * Standalone form of {@link GraphQLIndexer.replayEventsFrom}. Accepts either
+ * an existing indexer or an endpoint/config to construct one on the fly.
+ */
+export function replayEventsFrom<TEvent = unknown>(
+  indexerOrEndpoint: GraphQLIndexer | string | IndexerConfig,
+  fromLedgerOrOptions: number | ReplayEventsFromOptions,
+  maybeOptions: ReplayEventsFromOptions = {},
+): Promise<TEvent[] & ReplayEventsFromResult<TEvent>> {
+  const indexer = indexerOrEndpoint instanceof GraphQLIndexer
+    ? indexerOrEndpoint
+    : new GraphQLIndexer(indexerOrEndpoint);
+  return indexer.replayEventsFrom<TEvent>(fromLedgerOrOptions, maybeOptions);
 }
