@@ -65,6 +65,27 @@ Sets the spender's allowance and returns the confirmed transaction hash.
 amount and expiration ledger appropriate for the stream operation that will
 consume the allowance.
 
+### `decimals(tokenAddress, signal?) → Promise<number>` / `symbol(tokenAddress, signal?) → Promise<string>`
+
+Read immutable SEP-41 metadata. Results are kept in two bounded in-memory LRU
+caches (256 entries each by default) keyed by RPC URL + token address, so
+repeated lookups across a portfolio do not each cost an RPC simulation.
+Concurrent lookups for the same token coalesce onto one in-flight request, and
+failed simulations are not cached. Use `clearMetadataCache()` to invalidate,
+or `getMetadataCacheMetrics()` to inspect hit/miss counts. The cache size is
+configurable via `new TokenModule(config, { metadataCacheSize })`.
+
+### `checkTrustline(token, accountAddress, options?) → Promise<TrustlineCheckResult>`
+
+Pre-flight validation for accounts that will receive a non-native Stellar
+asset. `token` may be `'native'`, `'USDC'`, a `"CODE:ISSUER"` pair, or a Stellar
+Asset Contract ID. The check compares the token's contract ID against those
+derived from the account's classic asset balance lines and resolves with
+`{ hasTrustline, message, ... }`. Pass `{ throwOnMissing: true }` (or call
+`requireTrustline(token, accountAddress)`) to throw a `MissingTrustlineError`
+with an actionable message instead — use this before submitting a transaction
+so users see "add this trustline first" rather than an opaque contract revert.
+
 ---
 
 ## Network explorer constants
@@ -128,6 +149,20 @@ Pure helpers returning `StreamProgress`: ratio and percentage complete, elapsed/
 ### `get(streamId) → Promise<StreamInfo>`
 
 Fetches the complete stream state from the chain.
+
+### `getStreamsBatch(streamIds, options?) → Promise<GetStreamInfosResult>`
+
+Chunked, deduplicated reads for portfolio screens that need many streams at
+once. Duplicate IDs are collapsed, the remainder is split into sequential
+chunks of `chunkSize` (default 20), and each chunk uses bounded concurrency
+(`maxConcurrency`, default 8). `chunkDelayMs` optionally pauses between
+chunks to stay under RPC rate limits. Per-stream failures are returned in
+`failures` instead of rejecting the whole batch. Also available on
+`client.streams` directly.
+
+```typescript
+const { results, failures } = await client.getStreamsBatch(ids, { chunkSize: 10 });
+```
 
 ---
 
@@ -885,7 +920,9 @@ available (e.g. some non-browser, non-Node runtimes) it falls back to reading a
 | `reconnectDelayMs` | `number` (0–60000, default 1000) | |
 
 On the WebSocket path, an unexpected socket close calls `onError` (if provided) and retries
-with linear backoff (`reconnectDelayMs * attempt`), matching `WebSocketRelayer`. The
+with capped exponential backoff (`reconnectDelayMs * 2^(attempt - 1)`, capped at 30s) plus
+randomized jitter of up to 30% of the capped delay. The jitter de-synchronises clients that
+reconnect after the same network transition, avoiding reconnection storms. The
 subscription stays active until `unsubscribe()`, `cleanup()`, or the retry budget is
 exhausted. Exhaustion calls `onError` again with a message containing `exhausted` and then
 tears the subscription down. The SSE fallback does not reconnect.

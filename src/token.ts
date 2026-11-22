@@ -11,12 +11,15 @@ import { KeypairWalletAdapter } from "./adapters/keypair.js";
 import { USDC_ISSUER, ZERO_ADDR } from "./constants.js";
 import {
   buildContractCallTx,
+  clearTokenDecimalsCache,
   DEFAULT_RPC,
+  getServer,
   getTokenDecimals,
   invokeContract,
   NETWORK_PASSPHRASE,
   resolveFee,
   scValToI128,
+  scValToString,
   simulateReadOnly,
 } from "./soroban.js";
 
@@ -36,10 +39,30 @@ export class TokenModule {
    */
   private readonly knownDecimals = new Map<string, number>();
 
-  constructor(private readonly config: ConduitConfig) {
+  /**
+   * Immutable SEP-41 metadata (`decimals()` / `symbol()`) is queried far more
+   * often than it changes. Bounded LRU caches keep repeat lookups off the
+   * network without letting a large portfolio grow the cache without limit.
+   */
+  private readonly decimalsCache: LruMemoCache<string, number>;
+  private readonly symbolCache: LruMemoCache<string, string>;
+
+  /**
+   * In-flight de-duplication: concurrent lookups for the same token share a
+   * single simulation. Entries are removed on settlement (success or failure)
+   * so a failed simulation is retried on the next call.
+   */
+  private readonly decimalsInFlight = new Map<string, Promise<number>>();
+  private readonly symbolInFlight = new Map<string, Promise<string>>();
+
+  constructor(private readonly config: ConduitConfig, options: TokenModuleOptions = {}) {
     this.rpcUrl = config.rpcUrl ?? DEFAULT_RPC[config.network];
     this.passphrase = NETWORK_PASSPHRASE[config.network];
     this.fee = resolveFee(config);
+
+    const cacheSize = Math.max(1, Math.floor(options.metadataCacheSize ?? DEFAULT_TOKEN_METADATA_CACHE_SIZE));
+    this.decimalsCache = new LruMemoCache<string, number>(cacheSize);
+    this.symbolCache = new LruMemoCache<string, string>(cacheSize);
 
     if (config.wallet) {
       this.activeWallet = config.wallet;
@@ -65,8 +88,9 @@ export class TokenModule {
    *
    * Native XLM, the network's USDC, and anything passed to
    * {@link registerDecimals} resolve with no RPC call. Any other token is
-   * queried once via its `decimals()` and then served from the process-wide
-   * cache in `soroban.ts`, so repeated balance formatting never re-queries it.
+   * queried once via its `decimals()` and then served from this module's
+   * bounded LRU metadata cache, so repeated balance formatting never
+   * re-queries it. Concurrent lookups coalesce onto one in-flight simulation.
    *
    * @param callerAddress - Source account for the read-only simulation.
    *   Defaults to the connected wallet / signer, or a zero address.
@@ -77,8 +101,13 @@ export class TokenModule {
   ): Promise<number> {
     const known = this.knownDecimals.get(tokenAddress);
     if (known !== undefined) return known;
-    const caller = callerAddress ?? (await this.defaultCaller());
-    return getTokenDecimals(this.rpcUrl, this.passphrase, caller, tokenAddress);
+    return this.loadMetadata(
+      this.decimalsCache,
+      this.decimalsInFlight,
+      tokenAddress,
+      (caller) => getTokenDecimals(this.rpcUrl, this.passphrase, caller, tokenAddress),
+      callerAddress,
+    );
   }
 
   /** Record `decimals` for `tokenAddress` so {@link decimals} never queries the RPC for it. */

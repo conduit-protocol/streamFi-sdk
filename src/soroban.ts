@@ -1177,6 +1177,21 @@ export function scValToU32(val: xdr.ScVal): number {
 }
 
 /**
+ * Convert an ScVal string/symbol to a JS string.
+ *
+ * SEP-41 metadata getters use different shapes across implementations:
+ * `symbol()` commonly returns an `scvSymbol`, while `name()` returns an
+ * `scvString`. Accept both so token metadata lookups don't fail on an
+ * XDR union-shape mismatch.
+ */
+export function scValToString(val: xdr.ScVal): string {
+  const kind = val.switch().name;
+  if (kind === 'scvString') return val.str().toString('utf8');
+  if (kind === 'scvSymbol') return val.sym().toString('utf8');
+  throw new Error(`Expected a string or symbol ScVal, got "${kind}" instead.`);
+}
+
+/**
  * Encode a u64 value as ScVal.
  *
  * Rejects a non-integer `number` (`2.5`) or a negative value with a clear
