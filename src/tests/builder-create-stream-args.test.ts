@@ -102,8 +102,8 @@ describe('StreamBuilder.toContractArgs()', () => {
     expect(scValToNative(args[2]!)).toBe(TOKEN);
   });
 
-  it('rejects a startTime in the past', () => {
-    expect(() => baseBuilder().startTime(1)).toThrow('startTime cannot be in the past');
+  it('rejects a startTime more than 30 days in the past', () => {
+    expect(() => baseBuilder().startTime(1)).toThrow('startTime cannot be more than 30 days in the past');
   });
 
   it('rejects a non-integer endTime', () => {

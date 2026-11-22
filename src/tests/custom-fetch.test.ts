@@ -46,7 +46,7 @@ describe('ConduitConfig.customFetch (#862)', () => {
 
   it('keeps non-2xx status visible so 429s still map to RateLimitError', async () => {
     const customFetch = vi.fn(async () =>
-      new Response('slow down', { status: 429, headers: { 'retry-after': '2' } }),
+      new Response('slow down', { status: 429, headers: { 'retry-after': '0' } }),
     );
     const client = new ConduitClient({ network: 'testnet', rpcUrl: URL_A, factoryAddress: FACTORY, customFetch });
 

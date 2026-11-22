@@ -45,6 +45,14 @@ describe('matchesStreamEventFilter', () => {
     expect(matchesStreamEventFilter(withdrawToRecipient, f)).toBe(false);
   });
 
+  it('matches cliff_reached events by their recipient, not a sender', () => {
+    const cliffForRecipient = base('cliff_reached', {
+      recipient: 'GRECIPIENT', timestamp: 1, unlockAmount: 1n,
+    } as never);
+    expect(matchesStreamEventFilter(cliffForRecipient, { recipient: 'GRECIPIENT' })).toBe(true);
+    expect(matchesStreamEventFilter(cliffForRecipient, { sender: 'GSENDER' })).toBe(false);
+  });
+
   it('requires ALL set fields to match (AND semantics)', () => {
     const f: StreamEventFilter = { sender: 'GSENDER', recipient: 'GRECIPIENT' };
     expect(matchesStreamEventFilter(createdBySender, f)).toBe(true);

@@ -99,8 +99,7 @@ export function normalizeLedgerError(statusCode: number): { type: LedgerErrorTyp
  * Checks whether an error originated from a Ledger hardware wallet
  * and, if so, returns the normalized `LedgerErrorType` and message.
  *
- * Returns 
-ull` when the error is not a Ledger error.
+ * Returns `null` when the error is not a Ledger error.
  */
 export function classifyLedgerError(error: unknown): { type: LedgerErrorType; message: string } | null {
   if (!(error instanceof Error)) return null;
@@ -300,8 +299,7 @@ export interface WebAuthnSignerOptions {
   contractAddress: string;
   /** The passkey credential enrolled for `contractAddress` by that wallet contract's own registration flow. */
   credential: WebAuthnCredentialDescriptor;
-  /** Injected 
-avigator.credentials`-like container. Defaults to `globalThis.navigator.credentials`. */
+  /** Injected `navigator.credentials`-like container. Defaults to `globalThis.navigator.credentials`. */
   credentials?: WebAuthnCredentialsContainer;
   /** Relying party ID passed to `credentials.get()`. Omit to let the platform default to the current origin. */
   rpId?: string;
@@ -446,8 +444,7 @@ export class WebAuthnSigner implements Signer {
     }).navigator;
     if (!nav?.credentials) {
       throw new Error(
-        'WebAuthnSigner: no 
-avigator.credentials` is available in this environment. ' +
+        'WebAuthnSigner: no `navigator.credentials` is available in this environment. ' +
         'Pass a `credentials` implementation explicitly (required in Node/tests, and on non-browser runtimes).',
       );
     }
