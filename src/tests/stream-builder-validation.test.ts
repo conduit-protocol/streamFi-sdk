@@ -59,6 +59,22 @@ describe('StreamBuilder duration validation (#1166, #1169)', () => {
     expect(() => windowBuilder(START, end).build()).not.toThrow();
   });
 
+  it('measures duration from now when no startTime is set', () => {
+    const now = Math.floor(Date.now() / 1000);
+    const base = () =>
+      new StreamBuilder().token(TOKEN).sender(SENDER).recipient(RECIPIENT).amount(1000).ratePerSecond(10);
+
+    expect(() => base().endTime(now + 60).build()).toThrow(ValidationError);
+    expect(() => base().endTime(now).build()).toThrow(ValidationError);
+    expect(() => base().endTime(now + MIN_STREAM_DURATION_SECONDS + 120).build()).not.toThrow();
+  });
+
+  it('accepts an open-ended stream that sets no endTime', () => {
+    expect(() =>
+      new StreamBuilder().token(TOKEN).sender(SENDER).recipient(RECIPIENT).amount(1000).ratePerSecond(10).startTime(START).build(),
+    ).not.toThrow();
+  });
+
   it('reports a descriptive duration issue from validate()', () => {
     const issues = windowBuilder(START, START + 60).validate();
     expect(issues.some((issue) => issue.includes(String(MIN_STREAM_DURATION_SECONDS)))).toBe(true);

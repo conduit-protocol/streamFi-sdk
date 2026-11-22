@@ -85,6 +85,16 @@ describe('token decimals cache TTL (#1167)', () => {
     expect(getTokenDecimalsCacheMetrics().misses).toBe(2);
   });
 
+  it('does not keep a failed lookup, so the next call retries the RPC', async () => {
+    mockSimulate.mockRejectedValueOnce(new Error('rpc unavailable'));
+
+    await expect(getTokenDecimals(RPC_URL, PASSPHRASE, CALLER, TOKEN_A)).rejects.toThrow('rpc unavailable');
+    expect(getTokenDecimalsCacheMetrics().size).toBe(0);
+
+    await expect(getTokenDecimals(RPC_URL, PASSPHRASE, CALLER, TOKEN_A)).resolves.toBe(7);
+    expect(mockSimulate).toHaveBeenCalledTimes(2);
+  });
+
   it('evicts an expired entry without waiting for another lookup', async () => {
     await getTokenDecimals(RPC_URL, PASSPHRASE, CALLER, TOKEN_A);
     expect(getTokenDecimalsCacheMetrics().size).toBe(1);
