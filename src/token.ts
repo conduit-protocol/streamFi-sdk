@@ -3,12 +3,12 @@ import {
   Asset,
   Transaction,
   nativeToScVal,
-} from '@stellar/stellar-sdk';
-import type { ConduitConfig } from './types/index.js';
-import type { WalletAdapter } from './adapters/types.js';
-import type { Signer } from './signer.js';
-import { KeypairWalletAdapter } from './adapters/keypair.js';
-import { USDC_ISSUER, ZERO_ADDR } from './constants.js';
+} from "@stellar/stellar-sdk";
+import type { ConduitConfig } from "./types/index.js";
+import type { WalletAdapter } from "./adapters/types.js";
+import type { Signer } from "./signer.js";
+import { KeypairWalletAdapter } from "./adapters/keypair.js";
+import { USDC_ISSUER, ZERO_ADDR } from "./constants.js";
 import {
   buildContractCallTx,
   DEFAULT_RPC,
@@ -18,7 +18,7 @@ import {
   resolveFee,
   scValToI128,
   simulateReadOnly,
-} from './soroban.js';
+} from "./soroban.js";
 
 /** Stellar Asset Contracts (native XLM, classic assets like USDC) always use 7 decimals. */
 const STELLAR_ASSET_DECIMALS = 7;
@@ -47,10 +47,16 @@ export class TokenModule {
       this.activeWallet = new KeypairWalletAdapter(config.keypair);
     }
 
-    this.knownDecimals.set(Asset.native().contractId(this.passphrase), STELLAR_ASSET_DECIMALS);
-    if (config.network === 'mainnet' || config.network === 'testnet') {
-      const usdc = new Asset('USDC', USDC_ISSUER[config.network]);
-      this.knownDecimals.set(usdc.contractId(this.passphrase), STELLAR_ASSET_DECIMALS);
+    this.knownDecimals.set(
+      Asset.native().contractId(this.passphrase),
+      STELLAR_ASSET_DECIMALS,
+    );
+    if (config.network === "mainnet" || config.network === "testnet") {
+      const usdc = new Asset("USDC", USDC_ISSUER[config.network]);
+      this.knownDecimals.set(
+        usdc.contractId(this.passphrase),
+        STELLAR_ASSET_DECIMALS,
+      );
     }
   }
 
@@ -65,7 +71,10 @@ export class TokenModule {
    * @param callerAddress - Source account for the read-only simulation.
    *   Defaults to the connected wallet / signer, or a zero address.
    */
-  async decimals(tokenAddress: string, callerAddress?: string): Promise<number> {
+  async decimals(
+    tokenAddress: string,
+    callerAddress?: string,
+  ): Promise<number> {
     const known = this.knownDecimals.get(tokenAddress);
     if (known !== undefined) return known;
     const caller = callerAddress ?? (await this.defaultCaller());
@@ -88,7 +97,11 @@ export class TokenModule {
     tokenAddress: string,
     locale?: string,
   ): Promise<string> {
-    return formatTokenAmount(rawAmount, await this.decimals(tokenAddress), locale);
+    return formatTokenAmount(
+      rawAmount,
+      await this.decimals(tokenAddress),
+      locale,
+    );
   }
 
   private async defaultCaller(): Promise<string> {
@@ -109,18 +122,21 @@ export class TokenModule {
     spenderAddress: string,
     signal?: AbortSignal,
   ): Promise<bigint> {
-    if (signal?.aborted) throw new DOMException('Aborted', 'AbortError');
+    if (signal?.aborted) throw new DOMException("Aborted", "AbortError");
 
     const tx = await buildContractCallTx(
       this.rpcUrl,
       this.passphrase,
       ownerAddress,
       tokenAddress,
-      'allowance',
-      [new Address(ownerAddress).toScVal(), new Address(spenderAddress).toScVal()],
+      "allowance",
+      [
+        new Address(ownerAddress).toScVal(),
+        new Address(spenderAddress).toScVal(),
+      ],
       this.fee,
     );
-    if (signal?.aborted) throw new DOMException('Aborted', 'AbortError');
+    if (signal?.aborted) throw new DOMException("Aborted", "AbortError");
     const value = await simulateReadOnly(this.rpcUrl, this.passphrase, tx);
     return scValToI128(value);
   }
@@ -138,9 +154,14 @@ export class TokenModule {
     amount: bigint,
     expirationLedger: number,
   ): Promise<string> {
-    if (amount < 0n) throw new RangeError('amount must be greater than or equal to 0');
-    if (!Number.isInteger(expirationLedger) || expirationLedger < 0 || expirationLedger > 0xFFFFFFFF) {
-      throw new RangeError('expirationLedger must be a u32 integer');
+    if (amount < 0n)
+      throw new RangeError("amount must be greater than or equal to 0");
+    if (
+      !Number.isInteger(expirationLedger) ||
+      expirationLedger < 0 ||
+      expirationLedger > 0xffffffff
+    ) {
+      throw new RangeError("expirationLedger must be a u32 integer");
     }
 
     const signer = await this.signerFor(ownerAddress);
@@ -149,16 +170,70 @@ export class TokenModule {
       this.passphrase,
       ownerAddress,
       tokenAddress,
-      'approve',
+      "approve",
       [
         new Address(ownerAddress).toScVal(),
         new Address(spenderAddress).toScVal(),
-        nativeToScVal(amount, { type: 'i128' }),
-        nativeToScVal(expirationLedger, { type: 'u32' }),
+        nativeToScVal(amount, { type: "i128" }),
+        nativeToScVal(expirationLedger, { type: "u32" }),
       ],
       this.fee,
     );
     return invokeContract(this.rpcUrl, this.passphrase, signer, tx);
+  }
+
+  /**
+   * Check token allowance and automatically prompt for approval if insufficient.
+   * Returns true if approval was granted or allowance was already sufficient,
+   * false if user rejected the approval.
+   */
+  async checkAndPromptAllowance(
+    tokenAddress: string,
+    owner: string,
+    spender: string,
+    amount: bigint,
+  ): Promise<boolean> {
+    const currentAllowance = await this.allowance(tokenAddress, owner, spender);
+
+    if (currentAllowance >= amount) {
+      return true;
+    }
+
+    // Prompt for approval
+    const approved = await this.promptApproval(
+      tokenAddress,
+      owner,
+      spender,
+      amount,
+    );
+    if (!approved) {
+      return false;
+    }
+
+    // Execute the approval transaction
+    const expirationLedger = 0xffffffff; // Max u32 value for unlimited expiration
+    await this.approve(tokenAddress, owner, spender, amount, expirationLedger);
+    return true;
+  }
+
+  private async promptApproval(
+    tokenAddress: string,
+    owner: string,
+    spender: string,
+    amount: bigint,
+  ): Promise<boolean> {
+    const decimals = await this.decimals(tokenAddress, owner);
+    const formattedAmount = formatTokenAmount(amount, decimals);
+
+    // Check if running in browser environment
+    if (typeof window !== "undefined" && window.confirm) {
+      return window.confirm(
+        `Allow StreamFi contract to transfer ${formattedAmount} tokens on your behalf? Transaction will be required.`,
+      );
+    }
+
+    // For non-browser environments, default to true (approval will be attempted)
+    return true;
   }
 
   private async signerFor(ownerAddress: string): Promise<Signer> {
@@ -178,9 +253,11 @@ export class TokenModule {
             accountToSign: signingAddress,
           });
           if (signed == null) {
-            throw new Error('Wallet adapter signTransaction returned null or undefined');
+            throw new Error(
+              "Wallet adapter signTransaction returned null or undefined",
+            );
           }
-          return typeof signed === 'string'
+          return typeof signed === "string"
             ? new Transaction(signed, this.passphrase)
             : signed;
         },
@@ -197,13 +274,15 @@ export class TokenModule {
       return this.config.signer;
     }
 
-    throw new Error('keypair, wallet adapter, or signer is required to approve a token allowance');
+    throw new Error(
+      "keypair, wallet adapter, or signer is required to approve a token allowance",
+    );
   }
 }
 
 function assertDecimals(decimals: number): void {
   if (!Number.isSafeInteger(decimals) || decimals < 0) {
-    throw new RangeError('decimals must be a non-negative integer');
+    throw new RangeError("decimals must be a non-negative integer");
   }
 }
 
@@ -229,21 +308,30 @@ export function formatTokenAmount(
   locale?: string,
 ): string {
   assertDecimals(decimals);
-  const raw = typeof rawAmount === 'bigint' ? rawAmount : BigInt(rawAmount.trim());
+  const raw =
+    typeof rawAmount === "bigint" ? rawAmount : BigInt(rawAmount.trim());
   const negative = raw < 0n;
   const abs = negative ? -raw : raw;
   const factor = 10n ** BigInt(decimals);
 
-  const nf = new Intl.NumberFormat(locale, { useGrouping: true, maximumFractionDigits: 0 });
+  const nf = new Intl.NumberFormat(locale, {
+    useGrouping: true,
+    maximumFractionDigits: 0,
+  });
   const whole = nf.format(abs / factor);
-  const sign = negative ? '-' : '';
+  const sign = negative ? "-" : "";
   if (decimals === 0) return `${sign}${whole}`;
 
   const minDigits = Math.min(2, decimals);
-  let frac = (abs % factor).toString().padStart(decimals, '0').replace(/0+$/, '');
-  if (frac.length < minDigits) frac = frac.padEnd(minDigits, '0');
+  let frac = (abs % factor)
+    .toString()
+    .padStart(decimals, "0")
+    .replace(/0+$/, "");
+  if (frac.length < minDigits) frac = frac.padEnd(minDigits, "0");
 
   const decimalMark =
-    new Intl.NumberFormat(locale).formatToParts(1.5).find((p) => p.type === 'decimal')?.value ?? '.';
+    new Intl.NumberFormat(locale)
+      .formatToParts(1.5)
+      .find((p) => p.type === "decimal")?.value ?? ".";
   return `${sign}${whole}${decimalMark}${frac}`;
 }
