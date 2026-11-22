@@ -72,6 +72,19 @@ describe("soroban.ts multi-RPC failover", () => {
     expect(resolveRpcEndpoint(URLS[0] ?? "")).toBe(URLS[1]);
   });
 
+  it("rotates to the next endpoint on HTTP 502 (bad gateway)", async () => {
+    registerRpcEndpointGroup(URLS, { failureThreshold: 3 });
+    mockGetLatestLedgerA.mockRejectedValue({ response: { status: 502, headers: {} } });
+    mockGetLatestLedgerB.mockResolvedValue({ sequence: 43 });
+
+    const result = await (createRpcServer(URLS[0] ?? "").getLatestLedger() as Promise<unknown>);
+
+    expect(result).toEqual({ sequence: 43 });
+    expect(mockGetLatestLedgerA).toHaveBeenCalledTimes(1);
+    expect(mockGetLatestLedgerB).toHaveBeenCalledTimes(1);
+    expect(resolveRpcEndpoint(URLS[0] ?? "")).toBe(URLS[1]);
+  });
+
   it("rotates to the next endpoint on HTTP 429 without retrying the same one", async () => {
     registerRpcEndpointGroup(URLS, { failureThreshold: 3 });
     mockGetLatestLedgerA.mockRejectedValue({
