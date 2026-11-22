@@ -39,14 +39,28 @@ function assertSerializableKey(key: unknown): asserts key is string | number {
   }
 }
 
+/** Aggregate eviction / expiration statistics for a cache instance. */
+export interface CacheStats {
+  hits: number;
+  misses: number;
+  evictions: number;
+  expirations: number;
+  size: number;
+  capacity: number;
+}
+
 export interface LruMemoCacheOptions {
   /** Entries kept before the least-recently-used one is evicted. */
-  maxEntries: number;
+  maxEntries?: number;
+  /** Alias for `maxEntries` for callers that prefer capacity-based naming. */
+  capacity?: number;
   /**
    * Default time-to-live in milliseconds for `set()` calls that pass no
    * `ttlMs`. Omit for entries that never expire by default.
    */
   ttlMs?: number;
+  /** Injectable clock, primarily for deterministic tests. */
+  now?: () => number;
 }
 
 export class LruMemoCache<K, V> {
@@ -59,15 +73,26 @@ export class LruMemoCache<K, V> {
   private missExecutionTimeMs = 0;
   private readonly maxSize: number;
   private readonly defaultTtlMs: number | undefined;
+  private readonly now: () => number;
+
+  private hits = 0;
+  private misses = 0;
+  private evictions = 0;
+  private expirations = 0;
 
   /**
-   * Accepts either a bare max entry count (the original form) or
-   * {@link LruMemoCacheOptions}.
+   * Accepts a bare max entry count, {@link LruMemoCacheOptions}, or an options
+   * object using the `capacity` alias.
    */
-  constructor(options: number | LruMemoCacheOptions) {
+  constructor(options: number | LruMemoCacheOptions = 100) {
     const resolved = typeof options === 'number' ? { maxEntries: options } : options;
-    this.maxSize = resolved.maxEntries;
+    const maxEntries = resolved.maxEntries ?? resolved.capacity;
+    if (maxEntries === undefined || !Number.isInteger(maxEntries) || maxEntries <= 0) {
+      throw new RangeError('LruMemoCache capacity must be a positive integer');
+    }
+    this.maxSize = maxEntries;
     this.defaultTtlMs = resolved.ttlMs;
+    this.now = resolved.now ?? Date.now;
     if (this.defaultTtlMs !== undefined && (!Number.isFinite(this.defaultTtlMs) || this.defaultTtlMs <= 0)) {
       throw new RangeError('LruMemoCache ttlMs must be a positive finite number');
     }
@@ -79,7 +104,7 @@ export class LruMemoCache<K, V> {
 
   private isExpired(key: K): boolean {
     const expiry = this.expiresAt.get(key);
-    return expiry !== undefined && Date.now() >= expiry;
+    return expiry !== undefined && this.now() >= expiry;
   }
 
   private remove(key: K): void {
@@ -94,14 +119,98 @@ export class LruMemoCache<K, V> {
   get(key: K): V | undefined {
     if (this.isExpired(key)) {
       this.remove(key);
+      this.expirations++;
+      this.misses++;
       return undefined;
     }
     const value = this.store.get(key);
     if (value !== undefined) {
       this.store.delete(key);
       this.store.set(key, value);
+      this.hits++;
+    } else {
+      this.misses++;
     }
     return value;
+  }
+
+  /** Check validity without refreshing the LRU position. */
+  has(key: K): boolean {
+    if (this.isExpired(key)) {
+      this.remove(key);
+      this.expirations++;
+      return false;
+    }
+    return this.store.has(key);
+  }
+
+  delete(key: K): boolean {
+    const removed = this.store.delete(key);
+    this.expiresAt.delete(key);
+    return removed;
+  }
+
+  /** Remove every expired entry; returns the number removed. */
+  purgeExpired(): number {
+    let removed = 0;
+    for (const key of [...this.store.keys()]) {
+      if (this.isExpired(key)) {
+        this.remove(key);
+        this.expirations++;
+        removed++;
+      }
+    }
+    return removed;
+  }
+
+  /** Keys from least- to most-recently used, excluding expired entries. */
+  keys(): K[] {
+    this.purgeExpired();
+    return [...this.store.keys()];
+  }
+
+  get stats(): CacheStats {
+    this.purgeExpired();
+    return {
+      hits: this.hits,
+      misses: this.misses,
+      evictions: this.evictions,
+      expirations: this.expirations,
+      size: this.store.size,
+      capacity: this.maxSize,
+    };
+  }
+
+  /** Wrap a synchronous function with memoization keyed by its argument. */
+  memoize(fn: (key: K) => V): (key: K) => V {
+    return (key: K): V => {
+      if (this.has(key)) return this.get(key) as V;
+      const value = fn(key);
+      this.set(key, value);
+      return value;
+    };
+  }
+
+  /**
+   * Wrap an async function, caching in-flight promises so concurrent callers
+   * with the same key share one request. Rejected promises are evicted.
+   */
+  memoizeAsync(fn: (key: K) => Promise<V>): (key: K) => Promise<V> {
+    const cache = this as unknown as LruMemoCache<K, V | Promise<V>>;
+    return async (key: K): Promise<V> => {
+      if (cache.has(key)) {
+        const cached = cache.get(key);
+        if (cached !== undefined) return Promise.resolve(cached) as Promise<V>;
+      }
+      const pending = fn(key);
+      cache.set(key, pending);
+      try {
+        return await pending;
+      } catch (error) {
+        if (cache.get(key) === pending) cache.delete(key);
+        throw error;
+      }
+    };
   }
 
   /**
@@ -116,7 +225,7 @@ export class LruMemoCache<K, V> {
     if (ttlMs !== undefined && (!Number.isFinite(ttlMs) || ttlMs <= 0)) {
       throw new RangeError('LruMemoCache ttlMs must be a positive finite number');
     }
-    this.insert(key, value, ttlMs === undefined ? null : Date.now() + ttlMs);
+    this.insert(key, value, ttlMs === undefined ? null : this.now() + ttlMs);
   }
 
   /**
@@ -129,7 +238,10 @@ export class LruMemoCache<K, V> {
       this.remove(key);
     } else if (this.store.size >= this.maxSize) {
       const oldest = this.store.keys().next().value;
-      if (oldest !== undefined) this.remove(oldest);
+      if (oldest !== undefined) {
+        this.remove(oldest);
+        this.evictions++;
+      }
     }
     this.store.set(key, value);
     if (expiresAt !== null) this.expiresAt.set(key, expiresAt);
@@ -152,6 +264,10 @@ export class LruMemoCache<K, V> {
     this.cacheMisses = 0;
     this.hitExecutionTimeMs = 0;
     this.missExecutionTimeMs = 0;
+    this.hits = 0;
+    this.misses = 0;
+    this.evictions = 0;
+    this.expirations = 0;
   }
 
   /**

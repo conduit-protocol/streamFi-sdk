@@ -540,6 +540,7 @@ export interface StreamCliffReachedEvent {
   timestamp: number;
   /** Amount made withdrawable by the cliff. */
   unlockAmount: bigint;
+  sequence?: bigint;
 }
 
 /** Published when a top-up extends a stream's end time. */

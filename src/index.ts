@@ -457,3 +457,35 @@ export type {
   ExecuteProposalsOptions,
   ProposalDetails,
 } from "./governor.js";
+
+// Progress reporting, latency percentiles and bounded memoization (additive helpers)
+export {
+  BatchTx,
+  processBatch,
+  chunkItems,
+  DEFAULT_CHUNK_SIZE,
+} from "./batch-tx.js";
+export type {
+  BatchProgress,
+  BatchItemError,
+  BatchTxResult,
+  BatchTxOptions,
+} from "./batch-tx.js";
+export { ConnectionHealthMonitor, percentile } from "./connection-health.js";
+export type {
+  LatencyPercentiles,
+  ConnectionHealthOptions,
+} from "./connection-health.js";
+export type {
+  LedgerFeeStats,
+  LedgerUtilizationStats,
+  CongestionOptions,
+} from "./fee-estimator.js";
+export { LruMemoCache, serializeCache, hydrateCache } from "./lru-memo-cache.js";
+export type {
+  LruMemoCacheOptions,
+  CacheStats,
+  MemoCacheMetrics,
+  SerializedCache,
+  SerializedCacheEntry,
+} from "./lru-memo-cache.js";
