@@ -125,6 +125,21 @@ Pure helpers returning `StreamProgress`: ratio and percentage complete, elapsed/
 
 ---
 
+### `calculateVestedAmount(stream, currentTimestampMs?) → bigint`
+
+Pure, local helper (no RPC call) for live vesting counters. Returns the total vested (streamed) amount in stroops as of a Unix time in **milliseconds** (defaults to `Date.now()`). Accrual is `ratePerSecond × elapsedMs / 1000`, so the value moves smoothly between seconds; the fractional stroop is floored.
+
+- Matches `calculateWithdrawableAmount(stream, sec) + stream.withdrawn` exactly at whole-second timestamps.
+- Between seconds it is an off-chain estimate, since the contract records accrual in whole seconds.
+- Honors `paused`/`pausedAt`, clamps at `endTime`, returns `0n` for cancelled streams and for times before `startTime`. Open-ended streams (`endTime: 0`) accrue without a cap.
+- Does not subtract `withdrawn`. Use `calculateWithdrawableAmount` for the withdrawable balance.
+
+```ts
+import { calculateVestedAmount } from '@conduit-protocol/sdk';
+
+const vested = calculateVestedAmount(stream, Date.now()); // bigint, stroops
+```
+
 ### `get(streamId) → Promise<StreamInfo>`
 
 Fetches the complete stream state from the chain.
@@ -264,9 +279,9 @@ inherits all rights, including the withdrawable balance accrued up to the moment
 
 ---
 
-### `clawback(streamId) → Promise<bigint>`
+### `clawback(streamId, signal?) → Promise<bigint>`
 
-Reclaims unstreamed tokens. Only works if `clawbackEnabled` was `true` at creation.
+Reclaims unstreamed tokens. Only works if `clawbackEnabled` was `true` at creation. Pass an `AbortSignal` to stop waiting for confirmation: aborting rejects with an `AbortError` at once, while the transaction may still confirm on-chain (#1172).
 
 **Returns:** Amount reclaimed (stroops)  
 **Requires:** `keypair` set (sender)  
@@ -637,6 +652,8 @@ a positive integer, or if any option is out of its valid range.
 
 ### `waitForConfirmation(rpcUrl, txHash, options?) → Promise<ConfirmedTransaction>`
 
+`options.signal` cancels the wait. An aborted signal rejects with `AbortError` at once, without waiting out the current poll interval or sending another `getTransaction` request (#1172).
+
 Waits for an already-submitted transaction to confirm. Use it when you submit
 a transaction yourself (a raw `sendTransaction` call, or a wallet's own
 submission flow) and still want the SDK's poll-until-confirmed behavior. It is
@@ -778,7 +795,7 @@ clearServerCache();
 
 ### Multi-endpoint failover
 
-When `rpcUrls` contains more than one endpoint, the SDK registers a process-wide failover group keyed by the first URL. A call is attempted against the active endpoint with no same-endpoint retries: HTTP 429, HTTP 503, transport timeouts/network errors, and open circuits immediately rotate to the next untried endpoint. `rpcUrlFailureThresholdConsecutive` also rotates after that many generic consecutive failures. `getCurrentRpcUrl()` reports the active endpoint, and `getConnectionHealth()` reports latency and packet loss for every configured endpoint.
+When `rpcUrls` contains more than one endpoint, the SDK registers a process-wide failover group keyed by the first URL. A call is attempted against the active endpoint with no same-endpoint retries: HTTP 429, HTTP 502, HTTP 503, transport timeouts/network errors, and open circuits immediately rotate to the next untried endpoint. `rpcUrlFailureThresholdConsecutive` also rotates after that many generic consecutive failures. `getCurrentRpcUrl()` reports the active endpoint, and `getConnectionHealth()` reports latency and packet loss for every configured endpoint.
 
 ### Connection health
 
@@ -971,7 +988,7 @@ A helper class to build stream configurations with method chaining.
 * `startTime(val: number): this` - Sets the stream's start time (Unix timestamp, seconds). Optional; `toContractArgs()`/`toBatchOperation()` default to "now" when omitted. Throws if `val` is in the past.
 * `endTime(val: number): this` - Sets the stream's end time (Unix timestamp, seconds). Optional; `toContractArgs()`/`toBatchOperation()` default to `0` (open-ended) when omitted.
 * `clawbackEnabled(val: boolean): this` - Sets whether the sender may claw back unstreamed tokens. Optional; defaults to `false`.
-* `build(): StreamConfig` - Validates and returns the built stream configuration. Throws if any required field is missing. Includes `ratePerSecond`/`startTime`/`endTime`/`clawbackEnabled` in the result when set.
+* `build(): StreamConfig` - Validates and returns the built stream configuration. Throws if any required field is missing. Includes `ratePerSecond`/`startTime`/`endTime`/`clawbackEnabled` in the result when set. Includes `memo` as a base64 `Memo` XDR string when `withMemo()` was called, for off-chain reconciliation (decode with `xdr.Memo.fromXDR(memo, 'base64')`) (#1170).
 * `toContractArgs(): unknown[]` - Produces the exact 8 positional arguments the real `DripFactory.create_stream` contract call expects — `(sender, recipient, token, deposit_amount: i128, rate_per_sec: i128, start_time: u64, end_time: u64, clawback_enabled: bool)`. Throws everything `build()` throws, plus a dedicated error if `ratePerSecond` was never set (the contract has no way to derive a rate on its own).
 * `toBatchOperation(method?: string): BatchOperation` - Wraps `toContractArgs()` in a `BatchOperation` (`{ method: 'create_stream', params: {}, args }`) ready to pass to `ConduitBatcher.executeAsync()`. This is the supported way to take a `StreamBuilder` all the way to a real, submittable `create_stream` transaction — see the note under `ConduitBatcher` below.
 * `submit(submitFn, options?): Promise<unknown>` - Builds the payload and submits it through `submitFn` with automatic retries (exponential backoff), concurrency control via an internal semaphore, a pending queue with backpressure, and `AbortSignal` support. Throws if the builder was destroyed or the queue is full.
