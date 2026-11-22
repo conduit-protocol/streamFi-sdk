@@ -11,7 +11,7 @@ import type {
 } from '../types/index.js';
 import type { StreamEvent, StreamHistoryEntry } from '../events.js';
 import type { WalletAdapter } from '../adapters/types.js';
-import { streamedTotalLocal } from '../utils.js';
+import { streamedTotalLocal, withdrawableLocal } from '../utils.js';
 import { calculateVestedPercentage } from '../streams.js';
 import { useConduitClient } from './context.js';
 
@@ -914,4 +914,112 @@ export function useEstimatedFee(
   }, [enabled, opKey, debounceMs, runEstimate]);
 
   return { estimate, isLoading, error, refresh: runEstimate, refetch: runEstimate };
+}
+
+// ── useClaimableBalance (#1160) ───────────────────────────────────────────────
+
+export interface UseClaimableBalanceOptions {
+  /**
+   * How often (ms) the hook syncs the base withdrawable amount from the
+   * stream's on-chain state. Defaults to 10_000. Set to 0 to disable
+   * interval-based syncing.
+   */
+  syncIntervalMs?: number;
+}
+
+export interface UseClaimableBalanceResult {
+  /**
+   * The smoothly interpolated claimable balance in stroops, updated every
+   * animation frame. `null` while the stream is undefined or not yet synced.
+   */
+  balance: bigint | null;
+}
+
+/**
+ * Returns a continuously ticking claimable balance for `stream`, updated
+ * every animation frame via `requestAnimationFrame` so the counter increments
+ * smoothly in real time without an RPC call per frame.
+ *
+ * The base withdrawable amount is computed locally from `stream` using
+ * `withdrawableLocal`, then extrapolated forward by `stream.ratePerSecond`
+ * for each sub-second tick. When the stream is paused or cancelled the
+ * balance is frozen at its last computed value.
+ *
+ * @example
+ * ```tsx
+ * function BalanceDisplay({ stream }: { stream: StreamInfo }) {
+ *   const { balance } = useClaimableBalance(stream);
+ *   return <span>{balance?.toString() ?? '…'}</span>;
+ * }
+ * ```
+ */
+export function useClaimableBalance(
+  stream: StreamInfo | undefined,
+  options?: UseClaimableBalanceOptions,
+): UseClaimableBalanceResult {
+  const syncIntervalMs = options?.syncIntervalMs ?? 10_000;
+  const [balance, setBalance] = useState<bigint | null>(null);
+
+  // Stable ref so the rAF callback always reads the latest stream without
+  // being recreated (which would cancel and restart the animation loop).
+  const streamRef = useRef<StreamInfo | undefined>(stream);
+  streamRef.current = stream;
+
+  const rafRef = useRef<number | null>(null);
+
+  useEffect(() => {
+    if (!stream) {
+      setBalance(null);
+      return;
+    }
+
+    // Seed the base amount once synchronously so the first render shows a
+    // value instead of null.
+    const computeBalance = (s: StreamInfo): bigint => {
+      if (s.cancelled || s.paused) {
+        return withdrawableLocal(s);
+      }
+      const nowSec = Date.now() / 1000;
+      return withdrawableLocal(s, nowSec);
+    };
+
+    setBalance(computeBalance(stream));
+
+    // rAF loop — extrapolates balance every frame using sub-second precision.
+    const tick = (): void => {
+      const s = streamRef.current;
+      if (!s) return;
+      setBalance(computeBalance(s));
+      rafRef.current = requestAnimationFrame(tick);
+    };
+
+    rafRef.current = requestAnimationFrame(tick);
+
+    return () => {
+      if (rafRef.current !== null) {
+        cancelAnimationFrame(rafRef.current);
+        rafRef.current = null;
+      }
+    };
+  // Re-run only when the stream identity changes (new id or goes undefined).
+  // The rAF loop always reads the latest value via streamRef.
+  // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [stream?.id]);
+
+  // Optionally re-seed from local state on an interval so the base value
+  // stays accurate if the caller doesn't pass a live-updated StreamInfo.
+  useEffect(() => {
+    if (!stream || syncIntervalMs <= 0) return;
+
+    const id = setInterval(() => {
+      const s = streamRef.current;
+      if (!s) return;
+      setBalance(withdrawableLocal(s));
+    }, syncIntervalMs);
+
+    return () => clearInterval(id);
+  // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [stream?.id, syncIntervalMs]);
+
+  return { balance };
 }

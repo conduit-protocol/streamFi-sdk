@@ -845,3 +845,79 @@ export class WebAuthnSigner implements Signer {
     return assertion;
   }
 }
+
+// ── Freighter session recovery (#1161) ───────────────────────────────────────
+
+/**
+ * Duck-typed subset of the Freighter browser-extension API that
+ * `checkFreighterConnection` reads. Declared locally so the SDK does not
+ * carry a hard runtime dependency on `@stellar/freighter-api`.
+ */
+export interface FreighterApi {
+  /** Returns true when the user has already authorized the dApp. */
+  isConnected(): Promise<boolean>;
+  /** Returns the active account public key when authorized, or an empty string otherwise. */
+  getPublicKey(): Promise<string>;
+}
+
+/**
+ * Minimal shape of `globalThis` we probe for an injected Freighter API
+ * object. Present when the Freighter browser extension is installed and the
+ * page has been authorized at least once.
+ */
+interface GlobalWithFreighter {
+  freighter?: FreighterApi;
+  freighterApi?: FreighterApi;
+}
+
+/**
+ * Attempts to restore an existing Freighter wallet session without opening a
+ * pop-up or prompting the user. Returns the connected public key when a live
+ * session is detected, or `null` when:
+ *
+ * - the Freighter extension is not installed,
+ * - the user has not yet authorized the current origin,
+ * - `isConnected()` returns `false`, or
+ * - the returned public key is empty.
+ *
+ * Call this during application startup (e.g. in a `useEffect` or server-side
+ * hydration step) to silently re-attach a Freighter session after a page
+ * reload or tab switch — without forcing the user to click "Connect" again.
+ *
+ * An optional `api` parameter lets callers inject their own Freighter API
+ * object (e.g. from `@stellar/freighter-api`) instead of relying on the
+ * global `window.freighter` or `window.freighterApi` injected by the
+ * extension.
+ *
+ * @example
+ * ```ts
+ * // With the global extension object:
+ * const pubkey = await checkFreighterConnection();
+ *
+ * // With an explicit import:
+ * import * as freighterApi from '@stellar/freighter-api';
+ * const pubkey = await checkFreighterConnection(freighterApi);
+ * ```
+ */
+export async function checkFreighterConnection(
+  api?: FreighterApi,
+): Promise<string | null> {
+  try {
+    const resolved: FreighterApi | undefined =
+      api ??
+      (globalThis as unknown as GlobalWithFreighter).freighter ??
+      (globalThis as unknown as GlobalWithFreighter).freighterApi;
+
+    if (!resolved) return null;
+
+    const connected = await resolved.isConnected();
+    if (!connected) return null;
+
+    const pubkey = await resolved.getPublicKey();
+    return pubkey && pubkey.length > 0 ? pubkey : null;
+  } catch {
+    // Any error (extension unavailable, permission denied, context destroyed)
+    // is treated as "no session" so callers never need to handle it.
+    return null;
+  }
+}

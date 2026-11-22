@@ -118,6 +118,7 @@ export {
   withSimulationPreflight,
   WebAuthnSigner,
   derToRawSignature,
+  checkFreighterConnection,
 } from "./signer.js";
 export type {
   Signer,
@@ -130,6 +131,7 @@ export type {
   WebAuthnCredentialsContainer,
   WebAuthnCredentialScValKeys,
   WebAuthnSignerOptions,
+  FreighterApi,
 } from "./signer.js";
 export {
   SorobanRpcError,
