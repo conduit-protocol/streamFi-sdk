@@ -13,7 +13,7 @@ export interface WithRetryOptions {
   /** Jitter strategy applied to each delay. Default: 'full' */
   jitter?: 'none' | 'full' | 'equal' | 'decorrelated';
   /** Predicate that decides whether a thrown error is worth retrying. */
-  shouldRetry?: (error: unknown) => boolean;
+  shouldRetry?: (error: unknown, attempt: number) => boolean;
   /** Optional AbortSignal for cancelling pending retries. */
   signal?: AbortSignal;
   /** Optional callback invoked before each retry. */
@@ -87,7 +87,7 @@ export async function withRetry<T>(
       // typed RateLimitError / RpcServiceUnavailableError instances.
       const classified = RateLimitError.fromRpcError(err) ?? err;
 
-      if (attempt === maxRetries || !shouldRetry(classified)) {
+      if (attempt === maxRetries || !shouldRetry(classified, attempt + 1)) {
         throw classified;
       }
 

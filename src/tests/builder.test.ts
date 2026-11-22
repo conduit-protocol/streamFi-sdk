@@ -1,5 +1,6 @@
 import { describe, it, expect } from 'vitest';
 import { StreamBuilder } from '../builder.js';
+import { ValidationError } from '../errors.js';
 
 describe('StreamBuilder', () => {
   it('correctly builds a stream configuration when all fields are provided', () => {
@@ -57,6 +58,24 @@ describe('StreamBuilder', () => {
     expect(() => {
       new StreamBuilder().build();
     }).toThrow('4 validation issue(s)');
+  });
+
+  it('allows start times up to 30 days in the past and rejects older dates', () => {
+    const now = Math.floor(Date.now() / 1000);
+    expect(() => new StreamBuilder().startTime(now - 30 * 24 * 60 * 60 + 60)).not.toThrow();
+    expect(() => new StreamBuilder().startTime(now - 30 * 24 * 60 * 60 - 60))
+      .toThrow(/30 days in the past/);
+  });
+
+  it('rejects non-positive amounts with a ValidationError during build', () => {
+    const builder = new StreamBuilder()
+      .token('CAAQCAIBAEAQCAIBAEAQCAIBAEAQCAIBAEAQCAIBAEAQCAIBAEAQC526')
+      .sender('GAAQCAIBAEAQCAIBAEAQCAIBAEAQCAIBAEAQCAIBAEAQCAIBAEAQDZ7H')
+      .recipient('GABAEAQCAIBAEAQCAIBAEAQCAIBAEAQCAIBAEAQCAIBAEAQCAIBAEJXA')
+      .amount(1000);
+    Reflect.set(builder, '_amount', 0n);
+
+    expect(() => builder.build()).toThrow(ValidationError);
   });
 
   it('exposes all issues on ValidationError without throwing from validate()', () => {

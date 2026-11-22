@@ -5,6 +5,7 @@ All notable changes are documented here. Format based on [Keep a Changelog](http
 ## [Unreleased]
 
 ### Added
+- `StreamBuilder` now accepts retroactive start times only within the prior 30 days and validates positive deposits during `build()`; stream listeners now include typed cliff-reached/top-up-extended events and resume missed ledger events after a temporary polling failure (#1065, #1066, #1067, #1068).
 - `ConduitClient.getConnectionHealth()` / `refreshConnectionHealth()` expose RPC and relayer health with average successful latency, rolling-window packet loss, connected/status flags, per-endpoint samples, and heartbeat timing (#1059).
 - `ConduitConfig.rpcUrls` now performs per-call multi-endpoint failover: HTTP 429, HTTP 503, transport timeouts/network errors and open circuits rotate to the next endpoint without retrying a throttled or dead node; `getCurrentRpcUrl()` reports the active endpoint (#1060).
 - `getStreamProgress(stream, currentTimestamp?)` and its `getStreamStatus()` alias return formatted local stream progress, remaining time, lifecycle status, cumulative streamed amount and withdrawable balance without an RPC call (#1061).
@@ -13,6 +14,9 @@ All notable changes are documented here. Format based on [Keep a Changelog](http
 - `KeypairWalletAdapter.zeroize()` — the canonical name for the existing secret-wiping method (`destroy()` is now kept only as a backwards-compatible alias). Also fixed a latent bug where the wipe silently no-op'd on a secret-key buffer that crossed a realm boundary (e.g. a different VM context): the check now uses `ArrayBuffer.isView` instead of `instanceof Uint8Array`, which holds across realms (#973).
 
 ### Fixed
+- `StreamBuilder` rejects streams whose `endTime` does not strictly exceed the start by the 3600-second protocol minimum (`MIN_STREAM_DURATION_SECONDS`), including zero-length and reversed windows. `build()` throws a `ValidationError` with a descriptive message, so the invalid configuration is caught before it is submitted on-chain (#1169).
+- The token decimals cache now evicts each settled `decimals()` result after one hour, so stale token metadata is not retained indefinitely and the cache stays bounded in long-running processes (#1167).
+- `src/signer.ts` no longer fails to parse. A carriage return had replaced the `n` of `navigator` in two lines introduced by #1203, which broke the build and most of the test suite.
 - `ConduitConfig.customFetch` and its request timeout are now registered for every endpoint in `rpcUrls`, so failover does not silently fall back to the global fetch on backup nodes (#1060).
 - `getCircuitState()`'s lazy `open` -> `half-open` auto-transition (triggered by any caller reading circuit state after the cooldown elapses) now notifies `onCircuitStateChange`/`onCircuitChange` subscribers, not just `subscribeCircuitTransitions`. Previously a listener registered through either of those two could miss the `half-open` transition entirely whenever it was discovered via a plain `getCircuitState()`/`.state` read rather than a `recordFailure`/`recordSuccess` call (#976).
 - `@streamfi/react` stream lifecycle hooks: `useCreateBatchStreams().estimateTotalBatchCost(configs)` sums batch deposits into stroops before submission; `useCancelStream().estimatedRefund` exposes the sender's unstreamed balance (`null` when unknown); `usePauseStream().isPausing` is true only while the pause transaction is pending; and `useResumeStream().resume()` rejects without submitting when the loaded stream is active or cancelled.

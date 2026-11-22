@@ -16,6 +16,7 @@ import {
   validateContext,
 } from './batch-tx.js';
 import { OperationAbortedError, ValidationError } from './errors.js';
+import { MIN_STREAM_DURATION_SECONDS } from './constants.js';
 import type { BatchTransactionContext, BuiltBatchTransaction, ScValType } from './batch-tx.js';
 import type { CreateStreamParams, Network } from './types/index.js';
 
@@ -58,6 +59,8 @@ export interface SimulationResult {
 
 const DEFAULT_CONCURRENCY = 10;
 const DEFAULT_MAX_QUEUE_SIZE = 100;
+const MAX_RETROACTIVE_START_AGE_SECONDS = 30 * 24 * 60 * 60;
+export const MAX_STREAM_DURATION_SECONDS = 5 * 365 * 24 * 60 * 60;
 
 class Semaphore {
   private _running = 0;
@@ -108,6 +111,12 @@ export class StreamBuilder {
   constructor(options?: { concurrency?: number; maxQueueSize?: number }) {
     this._semaphore = new Semaphore(options?.concurrency ?? DEFAULT_CONCURRENCY);
     this._maxQueueSize = options?.maxQueueSize ?? DEFAULT_MAX_QUEUE_SIZE;
+  }
+
+  private validateDuration(): void {
+    if (this._startTime !== undefined && this._endTime !== undefined && this._endTime - this._startTime > MAX_STREAM_DURATION_SECONDS) {
+      throw new ValidationError(["stream duration cannot exceed  seconds"]);
+    }
   }
 
   /**
@@ -214,7 +223,7 @@ export class StreamBuilder {
    * Sets the stream's start time (Unix timestamp, seconds).
    * Optional; the real `create_stream` contract call defaults to "now" when
    * omitted (see {@link toContractArgs}).
-   * @param val - Unix timestamp in seconds. Must not be in the past.
+   * @param val - Unix timestamp in seconds. May be at most 30 days in the past.
    * @returns The builder instance for chaining.
    */
   startTime(val: number): this {
@@ -222,10 +231,11 @@ export class StreamBuilder {
       throw new Error('Invalid StreamBuilder parameter: startTime must be a non-negative integer Unix timestamp');
     }
     const now = Math.floor(Date.now() / 1000);
-    if (val < now) {
-      throw new Error('Invalid StreamBuilder parameter: startTime cannot be in the past');
+    if (val < now - MAX_RETROACTIVE_START_AGE_SECONDS) {
+      throw new Error('Invalid StreamBuilder parameter: startTime cannot be more than 30 days in the past');
     }
     this._startTime = val;
+    this.validateDuration();
     return this;
   }
 
@@ -241,6 +251,7 @@ export class StreamBuilder {
       throw new Error('Invalid StreamBuilder parameter: endTime must be a non-negative integer Unix timestamp');
     }
     this._endTime = val;
+    this.validateDuration();
     return this;
   }
 
@@ -313,7 +324,7 @@ export class StreamBuilder {
    * Any bigint fields are converted to strings to guarantee safe
    * serialisation across all browsers (Safari/WebKit included).
    * @returns An object containing `token`, `sender`, `recipient`, `amount`, and optionally `ratePerSecond`.
-   * @throws {Error} If any required field (`token`, `sender`, `recipient`, `amount`) is missing or malformed.
+   * @throws {ValidationError} If required fields are missing or values are invalid.
    */
   /**
    * Collects every validation problem with the current builder state
@@ -334,6 +345,33 @@ export class StreamBuilder {
     }
     if (this._amount === undefined || this._amount === null) {
       issues.push('amount is required');
+    } else if (
+      typeof this._amount === 'bigint'
+        ? this._amount <= 0n
+        : !Number.isFinite(this._amount) || this._amount <= 0
+    ) {
+      issues.push('amount must be a positive value');
+    }
+
+    if (this._startTime !== undefined) {
+      const now = Math.floor(Date.now() / 1000);
+      if (this._startTime < now - MAX_RETROACTIVE_START_AGE_SECONDS) {
+        issues.push('startTime cannot be more than 30 days in the past');
+      }
+    }
+
+    // #1169: a stream whose endTime does not strictly exceed its start by the
+    // protocol minimum is rejected on-chain, so reject it here instead. When
+    // no startTime is set, the contract starts the stream at "now".
+    if (this._endTime !== undefined) {
+      const effectiveStart = this._startTime ?? Math.floor(Date.now() / 1000);
+      const duration = this._endTime - effectiveStart;
+      if (duration <= MIN_STREAM_DURATION_SECONDS) {
+        issues.push(
+          `stream duration must be greater than ${MIN_STREAM_DURATION_SECONDS} seconds ` +
+            `(endTime must exceed startTime by more than the protocol minimum); got ${duration} seconds`,
+        );
+      }
     }
 
     return issues;
@@ -687,12 +725,7 @@ export class StreamBuilder {
     }
 
     if (config.startTime !== undefined && config.startTime !== null) {
-      const now = Math.floor(Date.now() / 1000);
-      if (config.startTime >= now) {
-        builder.startTime(config.startTime);
-      } else {
-        (builder as unknown as { _startTime: number })._startTime = config.startTime;
-      }
+      builder.startTime(config.startTime);
     }
 
     if (config.endTime !== undefined && config.endTime !== null) {

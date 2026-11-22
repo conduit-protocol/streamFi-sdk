@@ -822,11 +822,12 @@ When `rpcUrls` contains more than one endpoint, the SDK registers a process-wide
 ### `getTokenDecimals(rpcUrl, passphrase, callerAddr, tokenId) → Promise<number>`
 
 Queries a SEP-41 token contract's `decimals()`. A token's decimals cannot change after
-deployment, so results are cached per `rpcUrl:tokenId` for the lifetime of the process —
+deployment, so results are cached per `rpcUrl:tokenId` for one hour (#1167) —
 repeated calls for the same token (e.g. across multiple `client.streams.create()` calls) resolve
-from cache instead of issuing another RPC simulation. Concurrent calls for the same token also
-dedupe onto a single in-flight simulation. A failed simulation is not cached, so the next call
-retries against the network.
+from cache instead of issuing another RPC simulation. After an hour a settled entry is evicted and
+the next call re-simulates `decimals()`, so stale metadata is never retained indefinitely. Concurrent
+calls for the same token also dedupe onto a single in-flight simulation. A failed simulation is not
+cached, so the next call retries against the network.
 
 ```typescript
 import { getTokenDecimals, clearTokenDecimalsCache } from '@conduit-protocol/sdk';
@@ -997,6 +998,13 @@ The SDK provides `StreamBuilder` and `ConduitBatcher` to construct and execute s
 ### `StreamBuilder`
 
 A helper class to build stream configurations with method chaining.
+
+**Duration validation (#1169).** When `endTime` is set, `build()` (and everything that calls it,
+including `toContractArgs()`, `buildTransaction()` and `simulate()`) throws a `ValidationError` unless
+`endTime` strictly exceeds the stream's start by more than the 3600-second protocol minimum
+(`MIN_STREAM_DURATION_SECONDS`). The start is `startTime` when set, otherwise the current time. Zero-length,
+reversed and too-short windows are rejected client-side, before a transaction is built. `validate()`
+returns the same issue as a descriptive string. Open-ended streams (no `endTime`) are not affected.
 
 #### Methods
 
@@ -1250,3 +1258,34 @@ new Module44(config?: Module44Config)
 * `estimateTopUpNeeded(stream: StreamInfo, targetRunwaySecs: number, nowSec?: number): bigint` — Stroops needed via `top_up()` for the stream's runway to reach `targetRunwaySecs`. Returns `0n` if the stream is inactive/paused/cancelled, the target is non-positive, or the target is already met (including any open-ended stream, whose runway is treated as unbounded).
 * `clearCache(): void` — Clears the internal lookup cache and metrics.
 * `getPerformanceMetrics(): Module44Metrics` — Returns `totalAssessed`, `cacheHits`, `cacheMisses`, `averageExecutionTimeMs`, and `measuredSpeedupPercent` (a real measurement derived from this instance's own accumulated hit/miss timings, `null` until both have occurred at least once).
+
+---
+
+## `WebSocketRelayer`
+
+### Optional binary message packing
+
+By default the relayer sends JSON frames (`JSON.stringify(message)`). For high-frequency updates
+(e.g. broadcasting stream balances to many clients), pass a binary encoding option to pack each
+`{ type, payload, id? }` envelope into a compact framed `ArrayBuffer`:
+
+```typescript
+const relayer = new WebSocketRelayer('wss://relay.example', {
+  messageEncoding: 'binary',   // or binary: true / binaryPacking: true
+});
+
+await relayer.send({ type: 'stream_balance', id: 'b1', payload: { withdrawable: '1234' } });
+```
+
+The frame uses a fixed 4-byte header (magic + flags + payload tag), length-prefixed UTF-8 `type`
+and `id`, and a typed payload: JSON, UTF-8 string, 64-bit integer (bigint), or null. Omitting the
+repeated envelope keys reduces payload size for small, frequent messages. Bigint values nested in
+objects are serialized as decimal strings by the JSON payload tag.
+
+In binary mode `binaryType` is set to `'arraybuffer'` so inbound frames decode synchronously;
+JSON text inbound is still accepted, and `Blob` frames are handled defensively. The heartbeat
+ping remains byte-for-byte `{"type":"ping"}` in the default JSON mode. Offline-queued messages
+are encoded only when actually flushed.
+
+`packMessage(message)` and `unpackMessage(data)` are exported from the root entry point (and the
+`./relayer` subpath) for testing and custom transports. Malformed frames decode to `null`.
