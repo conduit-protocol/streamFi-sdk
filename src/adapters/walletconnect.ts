@@ -39,6 +39,8 @@ export interface WalletConnectSessionChange {
 
 export interface WalletConnectSession {
   topic?: string;
+  /** Pairing topic used by `core.pairing.ping` when the session ping is unavailable. */
+  pairingTopic?: string;
   account?: string;
   namespaces?: Record<string, { accounts?: string[] }>;
   accounts?: string[];

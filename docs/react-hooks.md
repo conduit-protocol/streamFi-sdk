@@ -464,3 +464,123 @@ Whitespace-separated terms must all match. By default it searches `id`, `address
 To find a stream from its creation transaction, set `txHash` on each stream (for example from the
 `created` entry in `useStreamHistoryInfinite`) and search for the hash. Transaction hashes match by
 substring only, so a partial hash works but fuzzy matching never applies to them.
+
+---
+
+## `useStreamHistory`
+
+Fetches a stream's past **deposits** (creations + top-ups), **withdrawals** and **cancellations**
+for history tables and audit trails. Unlike `useStreamHistoryInfinite`, this hook needs no
+`QueryClientProvider`: it implements stale-while-revalidate directly on top of
+`client.streams.getHistory()`.
+
+```tsx
+import { useStreamHistory } from '@conduit-protocol/sdk';
+
+function StreamAudit({ streamId }: { streamId: bigint }) {
+  const { entries, deposits, withdrawals, cancellations, isLoading, isValidating, error, refresh } =
+    useStreamHistory(streamId, { refreshIntervalMs: 30_000 });
+
+  if (isLoading) return <p>Loading history…</p>;
+  if (error) return <p>{error.message}</p>;
+
+  return (
+    <>
+      <button onClick={() => void refresh()} disabled={isValidating}>Refresh</button>
+      <p>{deposits.length} deposits · {withdrawals.length} withdrawals · {cancellations.length} cancellations</p>
+      <ul>
+        {entries.map((e) => <li key={e.id}>{e.kind} · ledger {e.ledger}</li>)}
+      </ul>
+    </>
+  );
+}
+```
+
+### Return Type
+
+```ts
+interface UseStreamHistoryResult {
+  entries: StreamHistoryEntry[];        // selected categories, oldest first
+  deposits: StreamHistoryEntry[];
+  withdrawals: StreamHistoryEntry[];
+  cancellations: StreamHistoryEntry[];
+  isLoading: boolean;                   // initial load only
+  isValidating: boolean;                // any background revalidation
+  error: Error | null;
+  refresh: () => Promise<void>;         // keeps stale data on screen
+}
+```
+
+### Parameters
+
+- `streamId`: `bigint | string | null | undefined`. Pass `null` to stop fetching.
+- `options`:
+  - `refreshIntervalMs` — background revalidation interval (default `30_000`; `0` disables it).
+  - `revalidateOnFocus` — also revalidate when the tab regains focus (default `true`).
+  - `limit` — page size passed to `getHistory` (1–200, default `50`).
+  - `types` — restrict `entries` to `'deposit' | 'withdrawal' | 'cancellation'` (default all).
+  - `enabled` / `client` — as with other hooks.
+
+Background revalidations do **not** clear `entries`: the previous page stays visible (with
+`isValidating: true`) until fresh data arrives. Only changing the `streamId` (or disabling the
+hook) clears it.
+
+---
+
+## `useEstimatedFee`
+
+Debounced network-fee estimate for create/cancel forms. It recomputes at most once after the user
+stops changing inputs, and discards stale responses from superseded requests.
+
+```tsx
+import { useEstimatedFee } from '@conduit-protocol/sdk';
+
+function CreateStreamForm({ params }) {
+  const { estimate, isLoading, error } = useEstimatedFee(
+    { type: 'create', params },
+    { debounceMs: 300 },
+  );
+
+  return <p>{isLoading ? 'Estimating…' : estimate ? `${estimate.totalFee} stroops` : error?.message}</p>;
+}
+```
+
+### Return Type
+
+```ts
+interface UseEstimatedFeeResult {
+  estimate: FeeEstimate | null;
+  isLoading: boolean;
+  error: Error | null;
+  refresh: () => Promise<void>;  // recompute now, bypassing the debounce
+  refetch: () => Promise<void>;  // alias of refresh
+}
+```
+
+### Parameters
+
+- `operation`: a `StreamOperation` (string or object). `null`/`undefined` disables estimation.
+- `options`: `debounceMs` (default `300`), `enabled` (default `true`), `client`.
+
+---
+
+## Provider connection status
+
+`StreamFiProvider` now tracks wallet connection state and remembers the last adapter id in
+`localStorage`, so a page reload restores the previous provider without a manual reconnect.
+
+```tsx
+<StreamFiProvider
+  client={client}
+  adapters={{ freighter: freighterAdapter, albedo: albedoAdapter }}
+  adapterStorageKey="streamfi:last-adapter"  // optional override
+  autoReconnect                               // default true
+>
+  <App />
+</StreamFiProvider>
+```
+
+`useStreamFiContext()` exposes `connectionStatus` (`'connected' | 'connecting' | 'disconnected' |
+'error'`), `walletId`, `error`, and the `connect(walletId)` / `disconnect()` actions. Only the
+adapter **id** is persisted — never keys or signatures. The `wallet` prop still attaches an
+adapter directly and reports `connected` status.

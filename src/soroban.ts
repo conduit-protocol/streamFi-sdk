@@ -1057,14 +1057,22 @@ let _tokenDecimalsHits = 0;
 let _tokenDecimalsMisses = 0;
 
 /**
+ * How long a settled token `decimals()` result is reused before it is
+ * re-queried and evicted (#1167). Entries expire on their own, so the cache
+ * cannot retain a token's metadata indefinitely or grow without bound for
+ * long-running processes that touch many tokens.
+ */
+const TOKEN_DECIMALS_CACHE_TTL_MS = 60 * 60 * 1000;
+
+/**
  * Query a token contract's `decimals()` — part of the standard Stellar
  * Asset / SEP-41 token interface every `CreateStreamParams.token` must
  * implement. Callers must not assume 7 decimals (the native XLM/Stellar
  * Asset Contract default) for arbitrary token addresses.
  *
- * Results are cached per `rpcUrl:tokenId` for the lifetime of the process,
- * since a token's decimals cannot change after deployment. Use
- * `clearTokenDecimalsCache()` to reset (e.g. in tests or when a fresh
+ * Results are cached per `rpcUrl:tokenId` for one hour (#1167), after which
+ * the entry is evicted and the next call re-simulates `decimals()`. Use
+ * `clearTokenDecimalsCache()` to reset early (e.g. in tests or when a fresh
  * simulation is required).
  */
 export async function getTokenDecimals(
@@ -1083,19 +1091,24 @@ export async function getTokenDecimals(
 
   // Request coalescing extracted into coalesceAsync (#798): concurrent
   // callers share one in-flight simulation, and failures are evicted so a
-  // later call can retry.
-  return coalesceAsync(_tokenDecimalsCache, cacheKey, async () => {
-    const tx = await buildContractCallTx(
-      rpcUrl,
-      passphrase,
-      callerAddr,
-      tokenId,
-      "decimals",
-      [],
-    );
-    const val = await simulateReadOnly(rpcUrl, passphrase, tx);
-    return scValToU32(val);
-  });
+  // later call can retry. The TTL window (#1167) evicts settled entries.
+  return coalesceAsync(
+    _tokenDecimalsCache,
+    cacheKey,
+    async () => {
+      const tx = await buildContractCallTx(
+        rpcUrl,
+        passphrase,
+        callerAddr,
+        tokenId,
+        "decimals",
+        [],
+      );
+      const val = await simulateReadOnly(rpcUrl, passphrase, tx);
+      return scValToU32(val);
+    },
+    TOKEN_DECIMALS_CACHE_TTL_MS,
+  );
 }
 
 /**
@@ -1161,6 +1174,21 @@ export function scValToU32(val: xdr.ScVal): number {
     );
   }
   return val.u32();
+}
+
+/**
+ * Convert an ScVal string/symbol to a JS string.
+ *
+ * SEP-41 metadata getters use different shapes across implementations:
+ * `symbol()` commonly returns an `scvSymbol`, while `name()` returns an
+ * `scvString`. Accept both so token metadata lookups don't fail on an
+ * XDR union-shape mismatch.
+ */
+export function scValToString(val: xdr.ScVal): string {
+  const kind = val.switch().name;
+  if (kind === 'scvString') return val.str().toString('utf8');
+  if (kind === 'scvSymbol') return val.sym().toString('utf8');
+  throw new Error(`Expected a string or symbol ScVal, got "${kind}" instead.`);
 }
 
 /**

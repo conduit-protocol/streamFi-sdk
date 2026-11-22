@@ -65,6 +65,27 @@ Sets the spender's allowance and returns the confirmed transaction hash.
 amount and expiration ledger appropriate for the stream operation that will
 consume the allowance.
 
+### `decimals(tokenAddress, signal?) → Promise<number>` / `symbol(tokenAddress, signal?) → Promise<string>`
+
+Read immutable SEP-41 metadata. Results are kept in two bounded in-memory LRU
+caches (256 entries each by default) keyed by RPC URL + token address, so
+repeated lookups across a portfolio do not each cost an RPC simulation.
+Concurrent lookups for the same token coalesce onto one in-flight request, and
+failed simulations are not cached. Use `clearMetadataCache()` to invalidate,
+or `getMetadataCacheMetrics()` to inspect hit/miss counts. The cache size is
+configurable via `new TokenModule(config, { metadataCacheSize })`.
+
+### `checkTrustline(token, accountAddress, options?) → Promise<TrustlineCheckResult>`
+
+Pre-flight validation for accounts that will receive a non-native Stellar
+asset. `token` may be `'native'`, `'USDC'`, a `"CODE:ISSUER"` pair, or a Stellar
+Asset Contract ID. The check compares the token's contract ID against those
+derived from the account's classic asset balance lines and resolves with
+`{ hasTrustline, message, ... }`. Pass `{ throwOnMissing: true }` (or call
+`requireTrustline(token, accountAddress)`) to throw a `MissingTrustlineError`
+with an actionable message instead — use this before submitting a transaction
+so users see "add this trustline first" rather than an opaque contract revert.
+
 ---
 
 ## Network explorer constants
@@ -128,6 +149,20 @@ Pure helpers returning `StreamProgress`: ratio and percentage complete, elapsed/
 ### `get(streamId) → Promise<StreamInfo>`
 
 Fetches the complete stream state from the chain.
+
+### `getStreamsBatch(streamIds, options?) → Promise<GetStreamInfosResult>`
+
+Chunked, deduplicated reads for portfolio screens that need many streams at
+once. Duplicate IDs are collapsed, the remainder is split into sequential
+chunks of `chunkSize` (default 20), and each chunk uses bounded concurrency
+(`maxConcurrency`, default 8). `chunkDelayMs` optionally pauses between
+chunks to stay under RPC rate limits. Per-stream failures are returned in
+`failures` instead of rejecting the whole batch. Also available on
+`client.streams` directly.
+
+```typescript
+const { results, failures } = await client.getStreamsBatch(ids, { chunkSize: 10 });
+```
 
 ---
 
@@ -787,11 +822,12 @@ When `rpcUrls` contains more than one endpoint, the SDK registers a process-wide
 ### `getTokenDecimals(rpcUrl, passphrase, callerAddr, tokenId) → Promise<number>`
 
 Queries a SEP-41 token contract's `decimals()`. A token's decimals cannot change after
-deployment, so results are cached per `rpcUrl:tokenId` for the lifetime of the process —
+deployment, so results are cached per `rpcUrl:tokenId` for one hour (#1167) —
 repeated calls for the same token (e.g. across multiple `client.streams.create()` calls) resolve
-from cache instead of issuing another RPC simulation. Concurrent calls for the same token also
-dedupe onto a single in-flight simulation. A failed simulation is not cached, so the next call
-retries against the network.
+from cache instead of issuing another RPC simulation. After an hour a settled entry is evicted and
+the next call re-simulates `decimals()`, so stale metadata is never retained indefinitely. Concurrent
+calls for the same token also dedupe onto a single in-flight simulation. A failed simulation is not
+cached, so the next call retries against the network.
 
 ```typescript
 import { getTokenDecimals, clearTokenDecimalsCache } from '@conduit-protocol/sdk';
@@ -884,7 +920,9 @@ available (e.g. some non-browser, non-Node runtimes) it falls back to reading a
 | `reconnectDelayMs` | `number` (0–60000, default 1000) | |
 
 On the WebSocket path, an unexpected socket close calls `onError` (if provided) and retries
-with linear backoff (`reconnectDelayMs * attempt`), matching `WebSocketRelayer`. The
+with capped exponential backoff (`reconnectDelayMs * 2^(attempt - 1)`, capped at 30s) plus
+randomized jitter of up to 30% of the capped delay. The jitter de-synchronises clients that
+reconnect after the same network transition, avoiding reconnection storms. The
 subscription stays active until `unsubscribe()`, `cleanup()`, or the retry budget is
 exhausted. Exhaustion calls `onError` again with a message containing `exhausted` and then
 tears the subscription down. The SSE fallback does not reconnect.
@@ -960,6 +998,13 @@ The SDK provides `StreamBuilder` and `ConduitBatcher` to construct and execute s
 ### `StreamBuilder`
 
 A helper class to build stream configurations with method chaining.
+
+**Duration validation (#1169).** When `endTime` is set, `build()` (and everything that calls it,
+including `toContractArgs()`, `buildTransaction()` and `simulate()`) throws a `ValidationError` unless
+`endTime` strictly exceeds the stream's start by more than the 3600-second protocol minimum
+(`MIN_STREAM_DURATION_SECONDS`). The start is `startTime` when set, otherwise the current time. Zero-length,
+reversed and too-short windows are rejected client-side, before a transaction is built. `validate()`
+returns the same issue as a descriptive string. Open-ended streams (no `endTime`) are not affected.
 
 #### Methods
 
@@ -1213,3 +1258,34 @@ new Module44(config?: Module44Config)
 * `estimateTopUpNeeded(stream: StreamInfo, targetRunwaySecs: number, nowSec?: number): bigint` — Stroops needed via `top_up()` for the stream's runway to reach `targetRunwaySecs`. Returns `0n` if the stream is inactive/paused/cancelled, the target is non-positive, or the target is already met (including any open-ended stream, whose runway is treated as unbounded).
 * `clearCache(): void` — Clears the internal lookup cache and metrics.
 * `getPerformanceMetrics(): Module44Metrics` — Returns `totalAssessed`, `cacheHits`, `cacheMisses`, `averageExecutionTimeMs`, and `measuredSpeedupPercent` (a real measurement derived from this instance's own accumulated hit/miss timings, `null` until both have occurred at least once).
+
+---
+
+## `WebSocketRelayer`
+
+### Optional binary message packing
+
+By default the relayer sends JSON frames (`JSON.stringify(message)`). For high-frequency updates
+(e.g. broadcasting stream balances to many clients), pass a binary encoding option to pack each
+`{ type, payload, id? }` envelope into a compact framed `ArrayBuffer`:
+
+```typescript
+const relayer = new WebSocketRelayer('wss://relay.example', {
+  messageEncoding: 'binary',   // or binary: true / binaryPacking: true
+});
+
+await relayer.send({ type: 'stream_balance', id: 'b1', payload: { withdrawable: '1234' } });
+```
+
+The frame uses a fixed 4-byte header (magic + flags + payload tag), length-prefixed UTF-8 `type`
+and `id`, and a typed payload: JSON, UTF-8 string, 64-bit integer (bigint), or null. Omitting the
+repeated envelope keys reduces payload size for small, frequent messages. Bigint values nested in
+objects are serialized as decimal strings by the JSON payload tag.
+
+In binary mode `binaryType` is set to `'arraybuffer'` so inbound frames decode synchronously;
+JSON text inbound is still accepted, and `Blob` frames are handled defensively. The heartbeat
+ping remains byte-for-byte `{"type":"ping"}` in the default JSON mode. Offline-queued messages
+are encoded only when actually flushed.
+
+`packMessage(message)` and `unpackMessage(data)` are exported from the root entry point (and the
+`./relayer` subpath) for testing and custom transports. Malformed frames decode to `null`.

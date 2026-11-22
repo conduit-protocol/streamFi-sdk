@@ -1542,6 +1542,47 @@ export class ValidationError extends StreamFiError {
 }
 
 /**
+ * Thrown by `TokenModule.checkTrustline()` when an account is about to
+ * receive or deposit a non-native Stellar asset but has no established
+ * trustline for it.
+ *
+ * This is a pre-flight, client-side guard: it turns an opaque contract revert
+ * into an actionable message that names the account, the asset and the
+ * missing trustline so the UI can prompt the user to add it first.
+ */
+export class MissingTrustlineError extends Error {
+  /** The account that is missing the trustline. */
+  readonly account: string;
+  /** The token identifier that was checked. */
+  readonly token: string;
+  /** Resolved classic asset code, when known. */
+  readonly assetCode?: string | undefined;
+  /** Resolved classic asset issuer, when known. */
+  readonly assetIssuer?: string | undefined;
+
+  constructor(options: {
+    account: string;
+    token: string;
+    assetCode?: string | undefined;
+    assetIssuer?: string | undefined;
+  }) {
+    const asset = options.assetCode
+      ? `${options.assetCode}${options.assetIssuer ? ` (${options.assetIssuer})` : ''}`
+      : options.token;
+    super(
+      `Account ${options.account} has no trustline for ${asset}. ` +
+      'Create the trustline before sending or depositing this asset.',
+    );
+    this.name = 'MissingTrustlineError';
+    this.account = options.account;
+    this.token = options.token;
+    this.assetCode = options.assetCode;
+    this.assetIssuer = options.assetIssuer;
+    Object.setPrototypeOf(this, new.target.prototype);
+  }
+}
+
+/**
  * Thrown by {@link GraphQLIndexer.fetchAll} when the paginated query
  * accumulates more pages than the configured maximum
  * (`DEFAULT_INDEXER_MAX_PAGES`, 1 000 by default), preventing runaway

@@ -16,6 +16,7 @@ import {
   validateContext,
 } from './batch-tx.js';
 import { OperationAbortedError, ValidationError } from './errors.js';
+import { MIN_STREAM_DURATION_SECONDS } from './constants.js';
 import type { BatchTransactionContext, BuiltBatchTransaction, ScValType } from './batch-tx.js';
 import type { CreateStreamParams, Network } from './types/index.js';
 
@@ -59,6 +60,7 @@ export interface SimulationResult {
 const DEFAULT_CONCURRENCY = 10;
 const DEFAULT_MAX_QUEUE_SIZE = 100;
 const MAX_RETROACTIVE_START_AGE_SECONDS = 30 * 24 * 60 * 60;
+export const MAX_STREAM_DURATION_SECONDS = 5 * 365 * 24 * 60 * 60;
 
 class Semaphore {
   private _running = 0;
@@ -109,6 +111,12 @@ export class StreamBuilder {
   constructor(options?: { concurrency?: number; maxQueueSize?: number }) {
     this._semaphore = new Semaphore(options?.concurrency ?? DEFAULT_CONCURRENCY);
     this._maxQueueSize = options?.maxQueueSize ?? DEFAULT_MAX_QUEUE_SIZE;
+  }
+
+  private validateDuration(): void {
+    if (this._startTime !== undefined && this._endTime !== undefined && this._endTime - this._startTime > MAX_STREAM_DURATION_SECONDS) {
+      throw new ValidationError(["stream duration cannot exceed  seconds"]);
+    }
   }
 
   /**
@@ -227,6 +235,7 @@ export class StreamBuilder {
       throw new Error('Invalid StreamBuilder parameter: startTime cannot be more than 30 days in the past');
     }
     this._startTime = val;
+    this.validateDuration();
     return this;
   }
 
@@ -242,6 +251,7 @@ export class StreamBuilder {
       throw new Error('Invalid StreamBuilder parameter: endTime must be a non-negative integer Unix timestamp');
     }
     this._endTime = val;
+    this.validateDuration();
     return this;
   }
 
@@ -347,6 +357,20 @@ export class StreamBuilder {
       const now = Math.floor(Date.now() / 1000);
       if (this._startTime < now - MAX_RETROACTIVE_START_AGE_SECONDS) {
         issues.push('startTime cannot be more than 30 days in the past');
+      }
+    }
+
+    // #1169: a stream whose endTime does not strictly exceed its start by the
+    // protocol minimum is rejected on-chain, so reject it here instead. When
+    // no startTime is set, the contract starts the stream at "now".
+    if (this._endTime !== undefined) {
+      const effectiveStart = this._startTime ?? Math.floor(Date.now() / 1000);
+      const duration = this._endTime - effectiveStart;
+      if (duration <= MIN_STREAM_DURATION_SECONDS) {
+        issues.push(
+          `stream duration must be greater than ${MIN_STREAM_DURATION_SECONDS} seconds ` +
+            `(endTime must exceed startTime by more than the protocol minimum); got ${duration} seconds`,
+        );
       }
     }
 

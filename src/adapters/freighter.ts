@@ -39,6 +39,16 @@ export interface FreighterApi {
   ) => Promise<string | { signedTxXdr?: string; error?: string }>;
   getNetwork?: () => Promise<string>;
   getNetworkDetails?: () => Promise<FreighterNetworkDetails>;
+  /**
+   * Pushed wallet events on injected clients that expose them (#1187). Older
+   * builds do not, in which case `watchWalletChanges()` polling is used.
+   */
+  on?: (event: string, listener: (payload?: unknown) => void) => unknown;
+  off?: (event: string, listener: (payload?: unknown) => void) => unknown;
+  addEventListener?: (event: string, listener: (payload?: unknown) => void) => unknown;
+  removeEventListener?: (event: string, listener: (payload?: unknown) => void) => unknown;
+  onAccountChange?: (listener: (payload?: unknown) => void) => unknown;
+  onNetworkChange?: (listener: (payload?: unknown) => void) => unknown;
   [key: string]: unknown;
 }
 
@@ -69,7 +79,17 @@ export interface FreighterWalletAdapterOptions {
    * is running (#1078). The adapter's cached public key is already updated.
    */
   onWalletChange?: (change: FreighterWalletChange) => void;
+  /** Convenience hook for account changes only (#1187). */
+  onAccountChange?: FreighterAccountChangeListener;
+  /** Convenience hook for network changes only (#1187). */
+  onNetworkChange?: FreighterNetworkChangeListener;
 }
+
+export type FreighterAccountChangeListener = (publicKey: string | null) => void;
+export type FreighterNetworkChangeListener = (
+  networkPassphrase: string | null,
+  details?: FreighterNetworkDetails,
+) => void;
 
 /** Default polling interval for {@link FreighterWalletAdapter.watchWalletChanges}. */
 export const DEFAULT_FREIGHTER_WATCH_INTERVAL_MS = 3_000;
@@ -88,6 +108,31 @@ export interface FreighterWalletChange {
   networkPassphrase?: string;
 }
 
+/** Normalize a pushed account payload to a key, `null` (locked), or `undefined` (no signal). */
+function normalizeAccountPayload(payload: unknown): string | null | undefined {
+  if (typeof payload === 'string') return payload || null;
+  if (!payload || typeof payload !== 'object') return undefined;
+  const record = payload as Record<string, unknown>;
+  if (record['error'] || record['message']) return null;
+  for (const key of ['address', 'publicKey', 'account']) {
+    const value = record[key];
+    if (typeof value === 'string') return value || null;
+  }
+  return undefined;
+}
+
+/** Extract a network passphrase from a pushed event payload. */
+function normalizeNetworkPayload(payload: unknown): string | undefined {
+  if (typeof payload === 'string') return payload || undefined;
+  if (!payload || typeof payload !== 'object') return undefined;
+  const record = payload as Record<string, unknown>;
+  for (const key of ['networkPassphrase', 'passphrase', 'network']) {
+    const value = record[key];
+    if (typeof value === 'string' && value) return value;
+  }
+  return undefined;
+}
+
 /**
  * First-party Freighter wallet adapter.
  * Wraps the browser extension or injected `@stellar/freighter-api` instance.
@@ -98,10 +143,14 @@ export class FreighterWalletAdapter implements WalletAdapter {
   public networkPassphrase: string | undefined;
   private readonly signTimeoutMs: number;
   private readonly walletChangeListeners = new Set<(change: FreighterWalletChange) => void>();
+  private readonly accountListeners = new Set<FreighterAccountChangeListener>();
+  private readonly networkListeners = new Set<FreighterNetworkChangeListener>();
   private watchTimer: ReturnType<typeof setInterval> | null = null;
   private watchInFlight = false;
   private lastWalletNetwork: string | undefined;
   private lockObserved = false;
+  private listenedClient: FreighterApi | null = null;
+  private detachEventListeners: (() => void) | null = null;
 
   constructor(options: FreighterWalletAdapterOptions = {}) {
     this.freighterClient = (options.freighter as FreighterApi) ?? null;
@@ -109,6 +158,9 @@ export class FreighterWalletAdapter implements WalletAdapter {
     this.networkPassphrase = options.networkPassphrase;
     this.signTimeoutMs = options.signTimeoutMs ?? DEFAULT_FREIGHTER_SIGN_TIMEOUT_MS;
     if (options.onWalletChange) this.walletChangeListeners.add(options.onWalletChange);
+    if (options.onAccountChange) this.accountListeners.add(options.onAccountChange);
+    if (options.onNetworkChange) this.networkListeners.add(options.onNetworkChange);
+    if (this.freighterClient) this.attachWalletEventListeners();
   }
 
   /**
@@ -122,12 +174,52 @@ export class FreighterWalletAdapter implements WalletAdapter {
     };
   }
 
+  /** Subscribe to account changes only (#1187). Returns an unsubscribe function. */
+  onAccountChange(listener: FreighterAccountChangeListener): () => void {
+    this.accountListeners.add(listener);
+    return () => {
+      this.accountListeners.delete(listener);
+    };
+  }
+
+  /** Subscribe to network changes only (#1187). Returns an unsubscribe function. */
+  onNetworkChange(listener: FreighterNetworkChangeListener): () => void {
+    this.networkListeners.add(listener);
+    return () => {
+      this.networkListeners.delete(listener);
+    };
+  }
+
   private notifyWalletChange(change: FreighterWalletChange): void {
+    // Keep the adapter's signing passphrase in step with the extension so a
+    // later signTransaction() cannot sign for the wrong network (#1187).
+    if (change.type === 'networkChanged' && change.networkPassphrase) {
+      this.networkPassphrase = change.networkPassphrase;
+    }
+
     for (const listener of this.walletChangeListeners) {
       try {
         listener(change);
       } catch (handlerError) {
         console.warn('[conduit-sdk] Freighter onWalletChange handler error:', handlerError);
+      }
+    }
+
+    if (change.type === 'accountChanged' || change.type === 'locked') {
+      for (const listener of this.accountListeners) {
+        try {
+          listener(change.publicKey);
+        } catch (handlerError) {
+          console.warn('[conduit-sdk] Freighter onAccountChange handler error:', handlerError);
+        }
+      }
+    } else {
+      for (const listener of this.networkListeners) {
+        try {
+          listener(change.networkPassphrase ?? null);
+        } catch (handlerError) {
+          console.warn('[conduit-sdk] Freighter onNetworkChange handler error:', handlerError);
+        }
       }
     }
   }
@@ -145,6 +237,7 @@ export class FreighterWalletAdapter implements WalletAdapter {
    * Idempotent. Returns a function that stops watching.
    */
   watchWalletChanges(intervalMs: number = DEFAULT_FREIGHTER_WATCH_INTERVAL_MS): () => void {
+    this.attachWalletEventListeners();
     if (!this.watchTimer) {
       this.watchTimer = setInterval(() => {
         void this.syncWalletState();
@@ -159,6 +252,100 @@ export class FreighterWalletAdapter implements WalletAdapter {
       clearInterval(this.watchTimer);
       this.watchTimer = null;
     }
+    this.detachWalletEventListeners();
+  }
+
+  /**
+   * Subscribe to pushed `accountChanged` / `networkChanged` events when the
+   * injected client supports them (#1187). Idempotent per client.
+   */
+  private attachWalletEventListeners(): void {
+    let client = this.freighterClient;
+    if (!client) {
+      try {
+        client = this.getClient();
+      } catch {
+        return;
+      }
+    }
+    if (!client) return;
+    if (this.listenedClient === client && this.detachEventListeners) return;
+
+    const hasOn = typeof client.on === 'function';
+    const hasAddEventListener = typeof client.addEventListener === 'function';
+    const hasAccountHook = typeof client.onAccountChange === 'function';
+    const hasNetworkHook = typeof client.onNetworkChange === 'function';
+    if (!hasOn && !hasAddEventListener && !hasAccountHook && !hasNetworkHook) return;
+
+    this.detachWalletEventListeners();
+
+    const onAccount = (payload: unknown): void => {
+      const address = normalizeAccountPayload(payload);
+      if (address === null) {
+        if (this.pubKey !== null) {
+          this.pubKey = null;
+          this.lockObserved = true;
+          this.notifyWalletChange({ type: 'locked', publicKey: null });
+        }
+        return;
+      }
+      if (address && address !== this.pubKey) {
+        this.pubKey = address;
+        this.lockObserved = false;
+        this.notifyWalletChange({ type: 'accountChanged', publicKey: address });
+      }
+    };
+
+    const onNetwork = (payload: unknown): void => {
+      const passphrase = normalizeNetworkPayload(payload);
+      if (!passphrase) return;
+      const changed = Boolean(this.lastWalletNetwork && passphrase !== this.lastWalletNetwork);
+      this.lastWalletNetwork = passphrase;
+      this.networkPassphrase = passphrase;
+      if (changed) {
+        this.notifyWalletChange({
+          type: 'networkChanged',
+          publicKey: this.pubKey,
+          networkPassphrase: passphrase,
+        });
+      }
+    };
+
+    const unsubscribers: Array<() => void> = [];
+    if (hasOn) {
+      const on = client.on!;
+      on.call(client, 'accountChanged', onAccount);
+      on.call(client, 'networkChanged', onNetwork);
+      unsubscribers.push(() => {
+        if (typeof client.off === 'function') {
+          client.off.call(client, 'accountChanged', onAccount);
+          client.off.call(client, 'networkChanged', onNetwork);
+        }
+      });
+    } else if (hasAddEventListener) {
+      const add = client.addEventListener!;
+      add.call(client, 'accountChanged', onAccount);
+      add.call(client, 'networkChanged', onNetwork);
+      unsubscribers.push(() => {
+        if (typeof client.removeEventListener === 'function') {
+          client.removeEventListener.call(client, 'accountChanged', onAccount);
+          client.removeEventListener.call(client, 'networkChanged', onNetwork);
+        }
+      });
+    }
+    if (hasAccountHook) client.onAccountChange!(onAccount);
+    if (hasNetworkHook) client.onNetworkChange!(onNetwork);
+
+    this.listenedClient = client;
+    this.detachEventListeners = () => {
+      for (const off of unsubscribers) off();
+    };
+  }
+
+  private detachWalletEventListeners(): void {
+    this.detachEventListeners?.();
+    this.detachEventListeners = null;
+    this.listenedClient = null;
   }
 
   /**
@@ -340,6 +527,7 @@ export class FreighterWalletAdapter implements WalletAdapter {
     }
 
     this.pubKey = key;
+    this.attachWalletEventListeners();
     return key;
   }
 

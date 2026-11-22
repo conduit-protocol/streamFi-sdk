@@ -1,5 +1,10 @@
 import { describe, it, expect, vi, afterEach } from 'vitest';
-import { WalletConnectAdapter } from '../adapters/walletconnect.js';
+import {
+  WalletConnectAdapter,
+  DEFAULT_WALLETCONNECT_PING_INTERVAL_MS,
+  DEFAULT_WALLETCONNECT_PING_TIMEOUT_MS,
+  DEFAULT_WALLETCONNECT_MAX_MISSED_PINGS,
+} from '../adapters/walletconnect.js';
 
 const KEY_A = 'GAAZI4TCR3TY5OJHCTJC2A4QSYRZPB26WKP43SXUXZVTYTBAKW7N5B6X';
 
@@ -130,6 +135,34 @@ describe('WalletConnectAdapter session ping watchdog (#1080)', () => {
       pingIntervalMs: 1000,
     });
     await adapter.disconnect();
+    await vi.advanceTimersByTimeAsync(5000);
+    expect(client.ping).not.toHaveBeenCalled();
+  });
+
+  it('exports the documented watchdog defaults (#1189)', () => {
+    expect(DEFAULT_WALLETCONNECT_PING_INTERVAL_MS).toBe(30_000);
+    expect(DEFAULT_WALLETCONNECT_PING_TIMEOUT_MS).toBe(10_000);
+    expect(DEFAULT_WALLETCONNECT_MAX_MISSED_PINGS).toBe(2);
+  });
+
+  it('stops pinging when the wallet ends the session via session_delete (#1189)', async () => {
+    vi.useFakeTimers();
+    const handlers = new Map<string, (payload?: unknown) => void>();
+    const client = {
+      ping: vi.fn().mockResolvedValue(undefined),
+      on: vi.fn((event: string, listener: (payload?: unknown) => void) => {
+        handlers.set(event, listener);
+      }),
+      off: vi.fn(),
+    };
+    new WalletConnectAdapter({
+      chainId: 'stellar:testnet',
+      client,
+      session: makeSession(),
+      pingIntervalMs: 1000,
+    });
+
+    handlers.get('session_delete')?.({ topic: 'session-topic' });
     await vi.advanceTimersByTimeAsync(5000);
     expect(client.ping).not.toHaveBeenCalled();
   });
