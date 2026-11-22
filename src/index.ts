@@ -3,6 +3,7 @@ export {
   StreamsModule,
   validateStreamParameters,
   calculateVestedPercentage,
+  calculateVestedAmount,
   getStreamProgress,
   getStreamStatus,
   isStreamCancellableByAccount,

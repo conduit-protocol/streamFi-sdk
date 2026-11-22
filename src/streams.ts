@@ -411,6 +411,54 @@ export function calculateVestedPercentage(
   return ratio > 1 ? 1 : ratio;
 }
 
+/**
+ * Calculate the amount vested (streamed) by a stream as of a given instant,
+ * in stroops, with millisecond resolution. Intended for live UI counters that
+ * animate between ledger ticks (#1173).
+ *
+ * Accrual is `ratePerSecond × elapsedMs / 1000`, so the result moves smoothly
+ * within a second. The fractional part is truncated (floored), never rounded
+ * up, so the counter never shows more than has accrued.
+ *
+ * On-chain accrual is recorded in whole seconds. At whole-second timestamps
+ * this matches {@link calculateWithdrawableAmount} plus `stream.withdrawn`
+ * exactly. Between seconds it is an off-chain estimate: the contract has not
+ * yet recorded the sub-second portion.
+ *
+ * Follows the same pause, end-time and cancellation rules as
+ * {@link calculateWithdrawableAmount}. Unlike that function, it does not
+ * subtract `withdrawn`, so it reports total vested rather than the amount
+ * currently withdrawable.
+ *
+ * @param stream - The stream snapshot (StreamInfo)
+ * @param currentTimestampMs - Unix time in milliseconds; defaults to now
+ * @returns The vested amount in stroops (bigint), floored to whole stroops
+ */
+export function calculateVestedAmount(
+  stream: StreamInfo,
+  currentTimestampMs: number = Date.now(),
+): bigint {
+  if (stream.cancelled) return 0n;
+
+  const startMs = stream.startTime * 1000;
+  const endMs = stream.endTime * 1000;
+  const nowMs = Math.floor(currentTimestampMs);
+
+  // Clamp to end time first, matching calculateWithdrawableAmount.
+  const endClampedMs = stream.endTime > 0 && nowMs > endMs ? endMs : nowMs;
+
+  // Freeze accrual at pausedAt while paused and not yet past the end.
+  const effectiveNowMs =
+    stream.paused && stream.pausedAt * 1000 < endClampedMs
+      ? stream.pausedAt * 1000
+      : endClampedMs;
+
+  const elapsedMs = effectiveNowMs - startMs;
+  if (elapsedMs <= 0) return 0n;
+
+  return (stream.ratePerSecond * BigInt(elapsedMs)) / 1000n;
+}
+
 export function getStreamProgress(
   stream: StreamInfo,
   currentTimestamp: number = Math.floor(Date.now() / 1000),
@@ -1449,7 +1497,7 @@ export class StreamsModule {
 
     const assembled = SorobanRpc.assembleTransaction(tx, sim).build();
     const signed = await this._signTx(assembled);
-    const { hash, returnValue } = await this._sendAndPoll(server, signed);
+    const { hash, returnValue } = await this._sendAndPoll(server, signed, signal);
 
     if (!returnValue) {
       throw new Error(`Transaction ${hash} succeeded but returned no value`);
