@@ -504,6 +504,31 @@ export interface StreamTopUpEvent {
   sequence?: bigint;
 }
 
+/** Published when a stream's recipient first withdraws after its cliff. */
+export interface StreamCliffReachedEvent {
+  /** Recipient whose withdrawal crossed the cliff. */
+  recipient: string;
+  /** Unix timestamp (seconds) at which the cliff was reached. */
+  timestamp: number;
+  /** Amount made withdrawable by the cliff. */
+  unlockAmount: bigint;
+}
+
+/** Published when a top-up extends a stream's end time. */
+export interface StreamTopUpExtendedEvent {
+  /** The address that funded the top-up (topics[1] actor). */
+  sender: string;
+  /** End time before the extension, in Unix seconds. */
+  oldEndTime: number;
+  /** Extended stream end time, in Unix seconds. */
+  newEndTime: number;
+  /** Amount added to the stream's deposit. */
+  addedAmount: bigint;
+  /** Total stream deposit after the top-up. */
+  newTotalDeposit: bigint;
+  sequence?: bigint;
+}
+
 /** Published when the sender claws back unstreamed funds (`clawback` topic). */
 export interface StreamClawbackedEvent {
   /** Amount clawed back to the sender. */
@@ -581,12 +606,10 @@ export interface EventGap {
 /**
  * Payload delivered by `onStreamEvent(..., 'CliffReached', ...)`.
  *
- * Unlike the other event payloads, this has no on-chain topic: the stream
- * contract does not emit a cliff event, since "cliff" is a vesting-schedule
- * convention (see `examples/vesting-schedule.ts`) rather than contract
- * state — a vesting cliff is just a stream whose `startTime` is set to the
- * cliff end, so nothing accrues before it. `cliffTime` is the caller-supplied
- * timestamp this notification fired against.
+ * This client-side schedule notification is distinct from the contract's
+ * {@link StreamCliffReachedEvent}, which is emitted on the first withdrawal
+ * after the cliff. `cliffTime` is the caller-supplied timestamp this
+ * notification fired against.
  */
 export interface CliffReachedEvent {
   /** Unix timestamp (seconds) at which the cliff was reached. */
@@ -600,6 +623,8 @@ export interface EventPayloadMap {
   pause: PauseEvent;
   resume: ResumeEvent;
   topUp: StreamTopUpEvent;
+  streamCliffReached: StreamCliffReachedEvent;
+  streamTopUpExtended: StreamTopUpExtendedEvent;
   clawback: StreamClawbackedEvent;
   created: CreatedEvent;
   forceCancel: ForceCancelEvent;
@@ -617,6 +642,8 @@ export interface StreamEventHandlers {
   onPause?: (e: PauseEvent) => void;
   onResume?: (e: ResumeEvent) => void;
   onTopUp?: (e: StreamTopUpEvent) => void;
+  onStreamCliffReached?: (e: StreamCliffReachedEvent) => void;
+  onStreamTopUpExtended?: (e: StreamTopUpExtendedEvent) => void;
   onClawback?: (e: StreamClawbackedEvent) => void;
   /** Called when the factory deploys a new stream. Optional — most subscribers attach after a stream already exists. */
   onCreated?: (e: CreatedEvent) => void;

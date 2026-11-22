@@ -10,6 +10,7 @@ import { createRpcServer } from './soroban.js';
 
 /** Default time (ms) to wait for a wallet/signer to return a signature. */
 export const DEFAULT_SIGNATURE_TIMEOUT_MS = 120_000;
+export const DEFAULT_HARDWARE_SIGN_TIMEOUT_MS = 60_000;
 
 export interface SignerOptions {
   /**
@@ -291,7 +292,8 @@ export function normalizeLedgerError(statusCode: number): { type: LedgerErrorTyp
  * Checks whether an error originated from a Ledger hardware wallet
  * and, if so, returns the normalized `LedgerErrorType` and message.
  *
- * Returns `null` when the error is not a Ledger error.
+ * Returns 
+ull` when the error is not a Ledger error.
  */
 export function classifyLedgerError(error: unknown): { type: LedgerErrorType; message: string } | null {
   if (!(error instanceof Error)) return null;
@@ -399,20 +401,15 @@ export class LedgerSigner implements Signer {
   private readonly device: LedgerDevice | undefined;
   private readonly timeoutMs: number;
   private cachedPublicKey: string | undefined;
+  private readonly hardwareSignTimeoutMs: number;
 
-  constructor(options?: {
-    appName?: string;
-    path?: string;
-    device?: LedgerDevice;
-    publicKey?: string;
-    /** Deadline for each device round trip; `0`/`Infinity` disables it. */
-    timeoutMs?: number;
-  }) {
+  constructor(options?: { appName?: string; path?: string; device?: LedgerDevice; publicKey?: string; hardwareSignTimeoutMs?: number }) {
     this.appName = options?.appName ?? 'Stellar';
     this.path = options?.path ?? "44'/148'/0'/0/0";
     this.device = options?.device;
     this.timeoutMs = options?.timeoutMs ?? DEFAULT_SIGNATURE_TIMEOUT_MS;
     this.cachedPublicKey = options?.publicKey;
+    this.hardwareSignTimeoutMs = options?.hardwareSignTimeoutMs ?? DEFAULT_HARDWARE_SIGN_TIMEOUT_MS;
   }
 
   /**
@@ -452,11 +449,7 @@ export class LedgerSigner implements Signer {
    */
   async sign(tx: Transaction): Promise<Transaction> {
     const device = await this.resolveDevice();
-    const { signedTxXdr } = await withDeviceTimeout(
-      device.signTransaction(this.path, tx.toXDR()),
-      this.timeoutMs,
-      'transaction signing',
-    );
+    const { signedTxXdr } = await withSignatureTimeout(device.signTransaction(this.path, tx.toXDR()), this.hardwareSignTimeoutMs);
     const passphrase = (tx as { networkPassphrase?: string }).networkPassphrase ?? '';
     return new Transaction(signedTxXdr, passphrase);
   }
