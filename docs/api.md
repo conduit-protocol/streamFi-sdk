@@ -1221,3 +1221,34 @@ new Module44(config?: Module44Config)
 * `estimateTopUpNeeded(stream: StreamInfo, targetRunwaySecs: number, nowSec?: number): bigint` — Stroops needed via `top_up()` for the stream's runway to reach `targetRunwaySecs`. Returns `0n` if the stream is inactive/paused/cancelled, the target is non-positive, or the target is already met (including any open-ended stream, whose runway is treated as unbounded).
 * `clearCache(): void` — Clears the internal lookup cache and metrics.
 * `getPerformanceMetrics(): Module44Metrics` — Returns `totalAssessed`, `cacheHits`, `cacheMisses`, `averageExecutionTimeMs`, and `measuredSpeedupPercent` (a real measurement derived from this instance's own accumulated hit/miss timings, `null` until both have occurred at least once).
+
+---
+
+## `WebSocketRelayer`
+
+### Optional binary message packing
+
+By default the relayer sends JSON frames (`JSON.stringify(message)`). For high-frequency updates
+(e.g. broadcasting stream balances to many clients), pass a binary encoding option to pack each
+`{ type, payload, id? }` envelope into a compact framed `ArrayBuffer`:
+
+```typescript
+const relayer = new WebSocketRelayer('wss://relay.example', {
+  messageEncoding: 'binary',   // or binary: true / binaryPacking: true
+});
+
+await relayer.send({ type: 'stream_balance', id: 'b1', payload: { withdrawable: '1234' } });
+```
+
+The frame uses a fixed 4-byte header (magic + flags + payload tag), length-prefixed UTF-8 `type`
+and `id`, and a typed payload: JSON, UTF-8 string, 64-bit integer (bigint), or null. Omitting the
+repeated envelope keys reduces payload size for small, frequent messages. Bigint values nested in
+objects are serialized as decimal strings by the JSON payload tag.
+
+In binary mode `binaryType` is set to `'arraybuffer'` so inbound frames decode synchronously;
+JSON text inbound is still accepted, and `Blob` frames are handled defensively. The heartbeat
+ping remains byte-for-byte `{"type":"ping"}` in the default JSON mode. Offline-queued messages
+are encoded only when actually flushed.
+
+`packMessage(message)` and `unpackMessage(data)` are exported from the root entry point (and the
+`./relayer` subpath) for testing and custom transports. Malformed frames decode to `null`.

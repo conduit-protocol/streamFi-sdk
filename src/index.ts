@@ -180,7 +180,20 @@ export type {
 } from "./fee-estimator.js";
 export { coalesceAsync, coalesceInFlight, CoalesceQueueFullError } from "./coalesce-async.js";
 export type { CoalesceOptions } from "./coalesce-async.js";
-export { WebSocketRelayer } from "./relayer/WebSocketRelayer.js";
+export {
+  WebSocketRelayer,
+  packMessage,
+  unpackMessage,
+} from "./relayer/WebSocketRelayer.js";
+export type {
+  WebSocketMessage,
+  MessageHandler,
+  StateChangeHandler,
+  RelayerState,
+  RelayerStateTransition,
+  QueuedMessage,
+  WebSocketRelayerOptions,
+} from "./relayer/WebSocketRelayer.js";
 export {
   ErrorMapper,
   DEFAULT_ERROR_MESSAGE_TYPE_MAP,
