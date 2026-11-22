@@ -446,8 +446,7 @@ export class WebAuthnSigner implements Signer {
     }).navigator;
     if (!nav?.credentials) {
       throw new Error(
-        'WebAuthnSigner: no 
-avigator.credentials` is available in this environment. ' +
+        'WebAuthnSigner: no `navigator.credentials` is available in this environment. ' +
         'Pass a `credentials` implementation explicitly (required in Node/tests, and on non-browser runtimes).',
       );
     }
