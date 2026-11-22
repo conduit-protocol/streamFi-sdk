@@ -890,7 +890,10 @@ function actorAddressesOf(entry: StreamHistoryEntry): { sender?: string; recipie
     case 'created':  return { sender: entry.event.sender, recipient: entry.event.recipient };
     case 'withdraw': return { recipient: entry.event.recipient };
     case 'top_up':   return { sender: entry.event.sender };
-    case 'cliff_reached':
+    // A cliff-reached event is emitted by a recipient's withdrawal, so the
+    // recipient is the actor. It has no `sender` field (the type error here
+    // was the signal of the previous mis-attribution).
+    case 'cliff_reached': return { recipient: entry.event.recipient };
     case 'top_up_extended': return { sender: entry.event.sender };
     case 'pause':    return { sender: entry.event.sender };
     case 'resume':   return { sender: entry.event.sender };

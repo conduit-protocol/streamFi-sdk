@@ -226,8 +226,11 @@ export class TokenModule {
     const formattedAmount = formatTokenAmount(amount, decimals);
 
     // Check if running in browser environment
-    if (typeof window !== "undefined" && window.confirm) {
-      return window.confirm(
+    const browserWindow = (globalThis as {
+      window?: { confirm?: (message: string) => boolean };
+    }).window;
+    if (browserWindow?.confirm) {
+      return browserWindow.confirm(
         `Allow StreamFi contract to transfer ${formattedAmount} tokens on your behalf? Transaction will be required.`,
       );
     }
