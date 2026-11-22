@@ -52,3 +52,25 @@ describe('StreamBuilder.build() memo payload (#1170)', () => {
     expect(parsed.memo).toBe(payload.memo);
   });
 });
+
+describe('StreamBuilder.build() memo payload — edge cases (#1170)', () => {
+  it('rejects an over-long text memo and leaves no memo in the payload', () => {
+    const b = builder();
+    expect(() => b.withMemo('x'.repeat(29))).toThrow();
+    expect('memo' in b.build()).toBe(false);
+  });
+
+  it('serializes an id memo with its numeric value intact', () => {
+    const payload = builder().withMemo(Memo.id('9007199254740993')).build();
+    const decoded = xdr.Memo.fromXDR(payload.memo as string, 'base64');
+    expect(decoded.switch().name).toBe('memoId');
+    expect(decoded.id().toString()).toBe('9007199254740993');
+  });
+
+  it('does not change the payload when the memo is replaced with a new one', () => {
+    const b = builder().withMemo('first');
+    const first = b.build().memo;
+    b.withMemo('second');
+    expect(b.build().memo).not.toBe(first);
+  });
+});

@@ -85,6 +85,26 @@ describe("soroban.ts multi-RPC failover", () => {
     expect(resolveRpcEndpoint(URLS[0] ?? "")).toBe(URLS[1]);
   });
 
+  it("does not fail over on a client error (HTTP 400)", async () => {
+    registerRpcEndpointGroup(URLS, { failureThreshold: 3 });
+    mockGetLatestLedgerA.mockRejectedValue({ response: { status: 400, headers: {} } });
+    mockGetLatestLedgerB.mockResolvedValue({ sequence: 44 });
+
+    await expect(
+      createRpcServer(URLS[0] ?? "").getLatestLedger() as Promise<unknown>,
+    ).rejects.toMatchObject({ response: { status: 400 } });
+    expect(mockGetLatestLedgerB).not.toHaveBeenCalled();
+    expect(resolveRpcEndpoint(URLS[0] ?? "")).toBe(URLS[0]);
+  });
+
+  it("classifies HTTP 502 as a service-unavailable error", async () => {
+    const { RpcServiceUnavailableError: Unavailable } = await import("../errors.js");
+    const { RateLimitError: Limit } = await import("../errors.js");
+    const mapped = Limit.fromRpcError({ response: { status: 502, headers: {} } });
+    expect(mapped).toBeInstanceOf(Unavailable);
+    expect((mapped as Error).message).toContain("(502)");
+  });
+
   it("rotates to the next endpoint on HTTP 429 without retrying the same one", async () => {
     registerRpcEndpointGroup(URLS, { failureThreshold: 3 });
     mockGetLatestLedgerA.mockRejectedValue({

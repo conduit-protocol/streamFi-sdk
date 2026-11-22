@@ -44,13 +44,13 @@ describe('calculateVestedAmount (#1173)', () => {
   });
 
   it('floors fractional stroops instead of rounding up', () => {
-    // rate 3 stroops/s, 1 ms elapsed → 0.003 stroops → 0
+    // rate 3 stroops/s (startTime 1000s), 1 ms elapsed → 0.003 stroops → 0
     const slow = makeStream({ ratePerSecond: 3n });
-    expect(calculateVestedAmount(slow, 1_001)).toBe(0n);
+    expect(calculateVestedAmount(slow, 1_000_001)).toBe(0n);
     // 333 ms elapsed → 0.999 stroops → 0
-    expect(calculateVestedAmount(slow, 1_333)).toBe(0n);
+    expect(calculateVestedAmount(slow, 1_000_333)).toBe(0n);
     // 334 ms elapsed → 1.002 stroops → 1
-    expect(calculateVestedAmount(slow, 1_334)).toBe(1n);
+    expect(calculateVestedAmount(slow, 1_000_334)).toBe(1n);
   });
 
   it('caps at the total deposit once endTime has passed', () => {
@@ -84,5 +84,37 @@ describe('calculateVestedAmount (#1173)', () => {
 
   it('returns a bigint', () => {
     expect(typeof calculateVestedAmount(makeStream(), 1_500_000)).toBe('bigint');
+  });
+});
+
+describe('calculateVestedAmount — edge cases (#1173)', () => {
+  it('returns the full deposit exactly at endTime', () => {
+    expect(calculateVestedAmount(makeStream(), 2_000_000)).toBe(1_000_000n);
+  });
+
+  it('does not reduce the vested total by amounts already withdrawn', () => {
+    // Vested is total accrued; calculateWithdrawableAmount is the net figure.
+    const stream = makeStream({ withdrawn: 200_000n });
+    expect(calculateVestedAmount(stream, 1_500_000)).toBe(500_000n);
+  });
+
+  it('ignores a pausedAt that lies in the future and keeps accruing to now', () => {
+    const paused = makeStream({ paused: true, pausedAt: 1800 });
+    expect(calculateVestedAmount(paused, 1_500_000)).toBe(500_000n);
+  });
+
+  it('keeps full precision for very large rates and long durations', () => {
+    // 1e12 stroops/s for 1e6 s = 1e18 stroops, well past Number.MAX_SAFE_INTEGER.
+    const huge = makeStream({
+      ratePerSecond: 10n ** 12n,
+      startTime: 0,
+      endTime: 0,
+    });
+    expect(calculateVestedAmount(huge, 1_000_000_000)).toBe(10n ** 18n);
+  });
+
+  it('returns 0n at the start instant of a paused stream', () => {
+    const paused = makeStream({ paused: true, pausedAt: 1000 });
+    expect(calculateVestedAmount(paused, 1_500_000)).toBe(0n);
   });
 });
