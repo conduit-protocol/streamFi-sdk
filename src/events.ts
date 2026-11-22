@@ -890,7 +890,9 @@ function actorAddressesOf(entry: StreamHistoryEntry): { sender?: string; recipie
     case 'created':  return { sender: entry.event.sender, recipient: entry.event.recipient };
     case 'withdraw': return { recipient: entry.event.recipient };
     case 'top_up':   return { sender: entry.event.sender };
-    case 'cliff_reached':
+    // A cliff-reached event carries no sender field, so it reports no actor
+    // (unchanged behaviour; the type had no `sender` to read).
+    case 'cliff_reached': return {};
     case 'top_up_extended': return { sender: entry.event.sender };
     case 'pause':    return { sender: entry.event.sender };
     case 'resume':   return { sender: entry.event.sender };

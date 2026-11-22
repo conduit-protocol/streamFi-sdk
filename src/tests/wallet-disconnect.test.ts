@@ -9,7 +9,7 @@ import { describe, it, expect, vi, afterEach } from 'vitest';
 import { renderHook, act } from '@testing-library/react';
 import { Networks } from '@stellar/stellar-sdk';
 import { WalletConnectAdapter, type WalletConnectSignClient } from '../adapters/walletconnect.js';
-import { FreighterWalletAdapter, type FreighterApi } from '../adapters/freighter.js';
+import { FreighterWalletAdapter } from '../adapters/freighter.js';
 import { ConduitClient, useWallet, WALLET_STORAGE_KEY } from '../index.js';
 
 const KEY_A = 'GAAZI4TCR3TY5OJHCTJC2A4QSYRZPB26WKP43SXUXZVTYTBAKW7N5B6X';
@@ -45,11 +45,21 @@ function makeWcSession() {
 
 /** A Freighter stub that counts how often the adapter polls it. */
 function makeFreighter(address: string) {
-  const freighter: FreighterApi = {
+  return {
     getAddress: vi.fn(async () => ({ address })),
     getNetworkDetails: vi.fn(async () => ({ networkPassphrase: Networks.TESTNET })),
   };
-  return freighter;
+}
+
+/** The adapter's remembered-wallet storage (jsdom's localStorage). */
+interface StorageLike {
+  getItem(key: string): string | null;
+  setItem(key: string, value: string): void;
+  removeItem(key: string): void;
+  clear(): void;
+}
+function localStorageLike(): StorageLike {
+  return (globalThis as unknown as { localStorage: StorageLike }).localStorage;
 }
 
 describe('WalletConnectAdapter disconnect cleanup (#1168)', () => {
@@ -167,8 +177,8 @@ describe('all wallet pollers stop on disconnect (#1168)', () => {
 
   it('useWallet().disconnect() clears the remembered wallet and stops the Freighter watcher', async () => {
     vi.useFakeTimers();
-    window.localStorage.clear();
-    window.localStorage.setItem(WALLET_STORAGE_KEY, 'freighter');
+    localStorageLike().clear();
+    localStorageLike().setItem(WALLET_STORAGE_KEY, 'freighter');
     const client = new ConduitClient({
       network: 'testnet',
       factoryAddress: 'CFACTORYPLACEHOLDER',
@@ -189,7 +199,7 @@ describe('all wallet pollers stop on disconnect (#1168)', () => {
     });
 
     expect(result.current.isConnected).toBe(false);
-    expect(window.localStorage.getItem(WALLET_STORAGE_KEY)).toBeNull();
+    expect(localStorageLike().getItem(WALLET_STORAGE_KEY)).toBeNull();
 
     const callsAtDisconnect = vi.mocked(freighter.getAddress).mock.calls.length;
     await vi.advanceTimersByTimeAsync(10_000);
