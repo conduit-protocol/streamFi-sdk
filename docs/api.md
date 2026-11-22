@@ -787,11 +787,12 @@ When `rpcUrls` contains more than one endpoint, the SDK registers a process-wide
 ### `getTokenDecimals(rpcUrl, passphrase, callerAddr, tokenId) → Promise<number>`
 
 Queries a SEP-41 token contract's `decimals()`. A token's decimals cannot change after
-deployment, so results are cached per `rpcUrl:tokenId` for the lifetime of the process —
+deployment, so results are cached per `rpcUrl:tokenId` for one hour (#1167) —
 repeated calls for the same token (e.g. across multiple `client.streams.create()` calls) resolve
-from cache instead of issuing another RPC simulation. Concurrent calls for the same token also
-dedupe onto a single in-flight simulation. A failed simulation is not cached, so the next call
-retries against the network.
+from cache instead of issuing another RPC simulation. After an hour a settled entry is evicted and
+the next call re-simulates `decimals()`, so stale metadata is never retained indefinitely. Concurrent
+calls for the same token also dedupe onto a single in-flight simulation. A failed simulation is not
+cached, so the next call retries against the network.
 
 ```typescript
 import { getTokenDecimals, clearTokenDecimalsCache } from '@conduit-protocol/sdk';
@@ -960,6 +961,13 @@ The SDK provides `StreamBuilder` and `ConduitBatcher` to construct and execute s
 ### `StreamBuilder`
 
 A helper class to build stream configurations with method chaining.
+
+**Duration validation (#1169).** When `endTime` is set, `build()` (and everything that calls it,
+including `toContractArgs()`, `buildTransaction()` and `simulate()`) throws a `ValidationError` unless
+`endTime` strictly exceeds the stream's start by more than the 3600-second protocol minimum
+(`MIN_STREAM_DURATION_SECONDS`). The start is `startTime` when set, otherwise the current time. Zero-length,
+reversed and too-short windows are rejected client-side, before a transaction is built. `validate()`
+returns the same issue as a descriptive string. Open-ended streams (no `endTime`) are not affected.
 
 #### Methods
 
