@@ -16,6 +16,7 @@ import {
   validateContext,
 } from './batch-tx.js';
 import { OperationAbortedError, ValidationError } from './errors.js';
+import { MIN_STREAM_DURATION_SECONDS } from './constants.js';
 import type { BatchTransactionContext, BuiltBatchTransaction, ScValType } from './batch-tx.js';
 import type { CreateStreamParams, Network } from './types/index.js';
 
@@ -356,6 +357,20 @@ export class StreamBuilder {
       const now = Math.floor(Date.now() / 1000);
       if (this._startTime < now - MAX_RETROACTIVE_START_AGE_SECONDS) {
         issues.push('startTime cannot be more than 30 days in the past');
+      }
+    }
+
+    // #1169: a stream whose endTime does not strictly exceed its start by the
+    // protocol minimum is rejected on-chain, so reject it here instead. When
+    // no startTime is set, the contract starts the stream at "now".
+    if (this._endTime !== undefined) {
+      const effectiveStart = this._startTime ?? Math.floor(Date.now() / 1000);
+      const duration = this._endTime - effectiveStart;
+      if (duration <= MIN_STREAM_DURATION_SECONDS) {
+        issues.push(
+          `stream duration must be greater than ${MIN_STREAM_DURATION_SECONDS} seconds ` +
+            `(endTime must exceed startTime by more than the protocol minimum); got ${duration} seconds`,
+        );
       }
     }
 
