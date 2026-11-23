@@ -248,25 +248,6 @@ export type {
 
 // Utils are exported via the /utils subpath export, but also available here
 export {
-   toStroops,
-   fromStroops,
-   calculateRate,
-   calculateYield,
-   streamProgress,
-   remainingTime,
-   estimatedCompletionDate,
-   normalizeProgress,
-   withdrawableLocal,
-   sumWithdrawable,
-   bigintSafeStringify,
-   timeoutSignal,
-   streamStatus,
-   formatDuration,
-   parseDuration,
-   validateAndNormalizeAddress,
-   isValidAddress,
-   sanitizeStellarAddress,
- } from './utils.js';
   toStroops,
   fromStroops,
   calculateRate,
@@ -286,6 +267,7 @@ export {
   parseDuration,
   validateAndNormalizeAddress,
   isValidAddress,
+  sanitizeStellarAddress,
   formatTokenAmount,
   divWithRounding,
 } from "./utils.js";
@@ -311,6 +293,7 @@ export {
   TokenModule,
   DEFAULT_TOKEN_METADATA_CACHE_SIZE,
   formatTokenAmount as formatLocalizedTokenAmount,
+  getTrustlineReserveRequirement,
 } from "./token.js";
 export type { TokenModuleOptions } from "./token.js";
 
@@ -472,6 +455,18 @@ export type {
   ReplayEventsOptions,
   ReplayEventsResult,
 } from "./events.js";
+export {
+  subscribeToStream,
+  subscribeToStreams,
+  getStreamHistory,
+  parseStreamEvent,
+  replayEvents,
+  filterStreamEvents,
+  matchesStreamEventFilter,
+  createRecipientEventFilter,
+  filterCliffReachedEvents,
+} from "./events.js";
+export type { StreamEventFilter } from "./events.js";
 export type {
   GovernorProposal,
   ExecuteProposalResult,
