@@ -410,6 +410,14 @@ export interface ListStreamsParams {
   cursor?: string;
 }
 
+export interface StreamFilterOptions {
+  token?: string;
+  sender?: string;
+  recipient?: string;
+  createdAfter?: number;
+  activeOnly?: boolean;
+}
+
 export interface PaginatedStreams {
   /** The stream info results for this page */
   streams: StreamInfo[];
