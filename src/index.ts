@@ -93,6 +93,7 @@ export {
    parseDuration,
    validateAndNormalizeAddress,
    isValidAddress,
+   sanitizeStellarAddress,
  } from './utils.js';
 
 // Constants

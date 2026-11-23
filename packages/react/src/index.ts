@@ -62,3 +62,5 @@ export { useTransactionHistory } from './hooks/useTransactionHistory.js';
 export type { UseTransactionHistoryResult, UseTransactionHistoryOptions } from './hooks/useTransactionHistory.js';
 export { useCircuitState } from './hooks/useCircuitState.js';
 export type { UseCircuitStateResult } from './hooks/useCircuitState.js';
+export { useStreamMetrics } from './hooks/useStreamMetrics.js';
+export type { StreamMetrics, UseStreamMetricsOptions, UseStreamMetricsResult } from './hooks/useStreamMetrics.js';
