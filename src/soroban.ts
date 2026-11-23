@@ -949,6 +949,92 @@ export function decodeDiagnosticEvents(
   return lines;
 }
 
+/** Structured diagnostic report for Soroban InvokeHostFunction errors */
+export interface SorobanDiagnosticReport {
+  /** True if the simulation failed */
+  failed: boolean;
+  /** RPC error message, if any */
+  error?: string;
+  /** Decoded diagnostic events with contract source, topics, and data */
+  events: Array<{
+    source: string;
+    topics: string[];
+    data: string;
+    inFailedCall: boolean;
+  }>;
+  /** Human-readable summary lines (same as decodeDiagnosticEvents output) */
+  summary: string[];
+}
+
+/**
+ * Parse Soroban InvokeHostFunction simulation errors into a structured diagnostic report.
+ * 
+ * Raw Soroban RPC transaction simulation errors contain nested ScVal structures that are
+ * difficult to interpret. This function decodes diagnostic events and returns a structured
+ * report with parsed contract events, topics, and data values.
+ * 
+ * @param simulationResponse - The simulation response from Soroban RPC
+ * @returns A structured diagnostic report with decoded events and error information
+ * 
+ * @example
+ * ```ts
+ * const sim = await server.simulateTransaction(tx);
+ * const report = parseDiagnosticEvents(sim);
+ * 
+ * if (report.failed) {
+ *   console.error(`Simulation failed: ${report.error}`);
+ *   report.events.forEach(event => {
+ *     console.log(`${event.source}: [${event.topics.join(', ')}] ${event.data}`);
+ *   });
+ * }
+ * ```
+ */
+export function parseDiagnosticEvents(
+  simulationResponse: SorobanRpc.Api.SimulateTransactionResponse,
+): SorobanDiagnosticReport {
+  const failed = SorobanRpc.Api.isSimulationError(simulationResponse);
+  const error = failed && simulationResponse.error ? simulationResponse.error : undefined;
+  
+  const events: SorobanDiagnosticReport["events"] = [];
+  const rawEvents =
+    (simulationResponse as unknown as { events?: Array<xdr.DiagnosticEvent | string> })
+      .events ?? [];
+  
+  for (const entry of rawEvents) {
+    try {
+      const event =
+        typeof entry === "string" ? xdr.DiagnosticEvent.fromXDR(entry, "base64") : entry;
+      
+      const contractEvent = event.event();
+      const contractId = contractEvent.contractId();
+      const source = contractId ? StrKey.encodeContract(contractId) : "host";
+      const v0 = contractEvent.body().v0();
+      const topics = v0.topics().map(renderScVal);
+      const data = renderScVal(v0.data());
+      const inFailedCall = !event.inSuccessfulContractCall();
+      
+      events.push({
+        source,
+        topics,
+        data,
+        inFailedCall,
+      });
+    } catch {
+      // Skip undecodable events - they won't appear in the structured output
+      // but will be in the summary as "<undecodable diagnostic event>"
+    }
+  }
+  
+  const summary = decodeDiagnosticEvents(simulationResponse);
+  
+  return {
+    failed,
+    error,
+    events,
+    summary,
+  };
+}
+
 // ── Pre-signed transaction submission (#1099) ────────────────────────────────
 
 /** Lifecycle of a pre-signed transaction submitted with {@link submitSignedTransaction}. */
