@@ -248,6 +248,25 @@ export type {
 
 // Utils are exported via the /utils subpath export, but also available here
 export {
+   toStroops,
+   fromStroops,
+   calculateRate,
+   calculateYield,
+   streamProgress,
+   remainingTime,
+   estimatedCompletionDate,
+   normalizeProgress,
+   withdrawableLocal,
+   sumWithdrawable,
+   bigintSafeStringify,
+   timeoutSignal,
+   streamStatus,
+   formatDuration,
+   parseDuration,
+   validateAndNormalizeAddress,
+   isValidAddress,
+   sanitizeStellarAddress,
+ } from './utils.js';
   toStroops,
   fromStroops,
   calculateRate,

@@ -429,6 +429,61 @@ export function validateAndNormalizeAddress(address: string): { isValid: boolean
 }
 
 /**
+ * Validates and sanitizes a Stellar ed25519 public key (or contract address).
+ *
+ * Strips accidental whitespace and trailing characters, verifies the StrKey
+ * format and checksum, and returns the normalized canonical address.
+ * Throws a descriptive error if the address is malformed or invalid.
+ *
+ * @param raw - The raw address input string (e.g. from user input or forms)
+ * @returns The normalized, validated Stellar address string
+ * @throws {TypeError} If raw is not a string
+ * @throws {Error} If raw is empty or fails StrKey validation
+ *
+ * @example
+ * ```ts
+ * sanitizeStellarAddress('  GAHJJJKMOKYE4RVPZEWZTKH5FVI4PA3VL7GK2LFNUBSGBV3CCWFCNJJJ  ')
+ * // 'GAHJJJKMOKYE4RVPZEWZTKH5FVI4PA3VL7GK2LFNUBSGBV3CCWFCNJJJ'
+ *
+ * sanitizeStellarAddress('invalid-key') // throws Error
+ * ```
+ */
+export function sanitizeStellarAddress(raw: string): string {
+  if (typeof raw !== 'string') {
+    throw new TypeError('Stellar address must be a string');
+  }
+
+  const sanitized = raw.trim();
+  if (sanitized.length === 0) {
+    throw new Error('Stellar address cannot be empty');
+  }
+
+  if (StrKey.isValidEd25519PublicKey(sanitized)) {
+    try {
+      const decoded = StrKey.decodeEd25519PublicKey(sanitized);
+      return StrKey.encodeEd25519PublicKey(decoded);
+    } catch (err) {
+      throw new Error(
+        `Invalid Stellar ed25519 public key: ${err instanceof Error ? err.message : String(err)}`,
+      );
+    }
+  }
+
+  if (StrKey.isValidContract(sanitized)) {
+    try {
+      const decoded = StrKey.decodeContract(sanitized);
+      return StrKey.encodeContract(decoded);
+    } catch (err) {
+      throw new Error(
+        `Invalid Stellar contract address: ${err instanceof Error ? err.message : String(err)}`,
+      );
+    }
+  }
+
+  throw new Error(`Invalid Stellar address format: "${raw}"`);
+}
+
+/**
  * Sum of withdrawable balances across multiple streams.
  *
  * Computes the total amount currently withdrawable from an array of streams
