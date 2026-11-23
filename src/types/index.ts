@@ -1,6 +1,122 @@
-import type { Signer } from '../signer.js';
+import type { Signer } from "../signer.js";
+import type { LedgerGap } from "../indexer.js";
 
-export type Network = 'mainnet' | 'testnet' | 'local';
+export type Network = "mainnet" | "testnet" | "local";
+
+// ── Branded Types ───────────────────────────────────────────────────────────
+
+/**
+ * Branded type for stream IDs. Prevents accidentally passing an AccountId or
+ * ContractAddress where a StreamId is expected.
+ */
+export type StreamId = bigint & { readonly __brand: unique symbol };
+
+/**
+ * Branded type for contract addresses (e.g., DripStream or token contracts).
+ * Prevents accidentally passing an AccountId where a ContractAddress is expected.
+ */
+export type ContractAddress = string & { readonly __brand: unique symbol };
+
+/**
+ * Branded type for account/wallet addresses (Stellar public keys).
+ * Prevents accidentally passing a ContractAddress or StreamId where an AccountId is expected.
+ */
+export type AccountId = string & { readonly __brand: unique symbol };
+
+/**
+ * Type guard to check if a value is a valid StreamId (bigint).
+ */
+export function isStreamId(value: unknown): value is StreamId {
+  return typeof value === "bigint";
+}
+
+/**
+ * Type guard to check if a value is a valid ContractAddress (non-empty string).
+ */
+export function isContractAddress(value: unknown): value is ContractAddress {
+  return typeof value === "string" && value.length > 0;
+}
+
+/**
+ * Type guard to check if a value is a valid AccountId (non-empty Stellar address string).
+ */
+export function isAccountId(value: unknown): value is AccountId {
+  return (
+    typeof value === "string" &&
+    value.length > 0 &&
+    (value.startsWith("G") || value === "native")
+  );
+}
+
+/**
+ * Helper to cast a bigint to a StreamId. Use only when you are certain the value is a valid stream ID.
+ */
+export function asStreamId(value: bigint): StreamId {
+  return value as StreamId;
+}
+
+/**
+ * Helper to cast a string to a ContractAddress. Use only when you are certain the value is a valid contract address.
+ */
+export function asContractAddress(value: string): ContractAddress {
+  return value as ContractAddress;
+}
+
+/**
+ * Helper to cast a string to an AccountId. Use only when you are certain the value is a valid account ID.
+ */
+export function asAccountId(value: string): AccountId {
+  return value as AccountId;
+}
+
+/**
+ * Branded type for a content-addressed metadata URI attached to a stream
+ * (e.g. an `ipfs://<cid>` URI or IPFS gateway URL) describing off-chain
+ * attachments such as invoices. Prevents passing an arbitrary string where a
+ * validated metadata URI is expected (#969).
+ */
+export type StreamMetadataURI = string & { readonly __brand: unique symbol };
+
+/**
+ * Type guard to check if a value is a valid StreamMetadataURI (non-empty string).
+ */
+export function isStreamMetadataURI(value: unknown): value is StreamMetadataURI {
+  return typeof value === "string" && value.length > 0;
+}
+
+/**
+ * Helper to cast a string to a StreamMetadataURI. Use only when you are certain the value is a valid metadata URI.
+ */
+export function asStreamMetadataURI(value: string): StreamMetadataURI {
+  return value as StreamMetadataURI;
+}
+
+/**
+ * Invoice details attached to a stream as off-chain metadata (#969).
+ */
+export interface StreamInvoiceMetadata {
+  /** Human-readable invoice number assigned by the sender's billing system. */
+  invoiceNumber: string;
+  /** VAT/tax identifier of the invoicing party, when applicable. */
+  vatId?: string;
+  /** CID of the pinned invoice document or attachment on IPFS. */
+  ipfsCid: string;
+}
+
+/**
+ * JSON payload pinned to IPFS describing a stream's invoice metadata (#969).
+ * `uri` is the resulting content-addressed location once the payload above
+ * has been pinned, so a reader can confirm the fetched JSON matches where it
+ * was retrieved from.
+ */
+export interface IPFSInvoicePayload {
+  /** Stream this invoice is attached to. */
+  streamId: bigint;
+  /** The invoice details themselves. */
+  invoice: StreamInvoiceMetadata;
+  /** Content-addressed URI this payload is (or will be) pinned at. */
+  uri?: StreamMetadataURI;
+}
 
 /**
  * Enumerates the possible lifecycle states of a stream.
@@ -11,23 +127,112 @@ export type Network = 'mainnet' | 'testnet' | 'local';
  * - `ENDED`    — stream reached its natural end time.
  */
 export enum StreamState {
-  ACTIVE    = 'ACTIVE',
-  PAUSED    = 'PAUSED',
-  CANCELLED = 'CANCELLED',
-  ENDED     = 'ENDED',
+  ACTIVE = "ACTIVE",
+  PAUSED = "PAUSED",
+  CANCELLED = "CANCELLED",
+  ENDED = "ENDED",
 }
+
+/**
+ * Identifies the vesting schedule shape a stream follows.
+ *
+ * Numeric (not string) values, since this is meant to be passed across
+ * serialization boundaries (indexer payloads, stored UI state) cheaply.
+ *
+ * - `Linear`          — funds accrue at a constant `ratePerSecond` for the
+ *                        whole duration (the only shape the deployed
+ *                        DripStream contract currently streams — see
+ *                        {@link calculateAccruedAmount}).
+ * - `CliffLinear`      — no accrual until a cliff timestamp, then linear
+ *                        accrual for the remainder of the duration.
+ * - `ExponentialDecay` — accrual rate decreases exponentially over time
+ *                        rather than staying constant.
+ *
+ * `CliffLinear` and `ExponentialDecay` describe schedule shapes the SDK's
+ * types can represent for off-chain planning/UI purposes (e.g. a stream
+ * builder form, or an indexer that tags streams by intended shape) ahead of
+ * on-chain support; only `Linear` is currently enforced by the contract.
+ */
+export enum StreamScheduleType {
+  Linear = 0,
+  CliffLinear = 1,
+  ExponentialDecay = 2,
+}
+
+// ── Stream schedule configuration (#1097) ────────────────────────────────────
+// A discriminated union replacing loose, unvalidated schedule option objects.
+// All times are Unix timestamps in seconds. Validate with
+// `validateStreamSchedule` (src/schedule.ts) before building a transaction.
+
+/** Funds vest at a constant rate from `startTime` to `endTime`. */
+export interface LinearSchedule {
+  kind: "linear";
+  startTime: number;
+  endTime: number;
+}
+
+/**
+ * Nothing vests before `cliffTime`; at the cliff everything accrued since
+ * `startTime` unlocks, then vesting continues linearly until `endTime`.
+ */
+export interface CliffSchedule {
+  kind: "cliff";
+  startTime: number;
+  cliffTime: number;
+  endTime: number;
+}
+
+/**
+ * Funds unlock in `steps` equal tranches, one every `stepDurationSeconds`,
+ * starting at `startTime + stepDurationSeconds`.
+ */
+export interface SteppedSchedule {
+  kind: "stepped";
+  startTime: number;
+  stepDurationSeconds: number;
+  steps: number;
+}
+
+/** Vesting schedule for a stream: linear, cliff, or stepped. */
+export type StreamScheduleConfig = LinearSchedule | CliffSchedule | SteppedSchedule;
 
 export interface ConduitConfig {
   /** Network to connect to */
   network: Network;
   /** Signing keypair — required for mutating operations */
-  keypair?: import('@stellar/stellar-sdk').Keypair;
+  keypair?: import("@stellar/stellar-sdk").Keypair;
   /** Custom wallet adapter (e.g. WalletConnectAdapter) for browser/mobile wallet signing */
-  wallet?: import('../adapters/types.js').WalletAdapter;
+  wallet?: import("../adapters/types.js").WalletAdapter;
   /** Custom signer plugin (KMS/HSM). Takes precedence over keypair when set. */
   signer?: Signer;
+  /** Signing behaviour for wallet adapters and custom signers (e.g. `signatureTimeoutMs`). */
+  signerOptions?: import("../signer.js").SignerOptions;
   /** Override default Soroban RPC URL */
   rpcUrl?: string;
+  /**
+   * Horizon endpoint to automatically fail over to for the account/sequence
+   * lookup when the Soroban RPC endpoint itself is unreachable (network
+   * error, HTTP 503, or an open circuit) — see #953. Defaults to the
+   * official Horizon endpoint for `network`. Horizon cannot simulate or
+   * submit Soroban contract calls, so this only covers the `getAccount`
+   * step every contract invocation needs; it does not provide failover for
+   * simulation or submission.
+   */
+  horizonUrl?: string;
+  /**
+   * Array of Soroban RPC URLs for fallback failover. When provided, takes
+   * precedence over `rpcUrl`. Endpoints are tried in order, with automatic
+   * failover to the next URL after `rpcUrlFailureThresholdConsecutive`
+   * consecutive timeouts on the current endpoint. Default behavior: round-robin
+   * with fallback on repeated failures.
+   */
+  rpcUrls?: string[];
+  /**
+   * Number of consecutive timeouts before failing over to the next RPC URL
+   * in the `rpcUrls` fallback list. Default 3. Only used when `rpcUrls` is
+   * configured.
+   */
+  rpcUrlFailureThresholdConsecutive?: number;
   /** Override deployed DripFactory contract ID */
   factoryAddress?: string;
   /** Override deployed DripGovernor contract ID */
@@ -56,28 +261,78 @@ export interface ConduitConfig {
    * retrying. Default 30_000 (30 seconds).
    */
   negativeCacheTtlMs?: number;
+  /**
+   * How long a `GovernorModule.getConfig()` read is reused, in milliseconds.
+   * Protocol parameters only change when a governance proposal passes, so a
+   * short window removes the need to re-simulate on every poll. Default
+   * 30_000 (30 seconds, ~6 ledgers). Set `0` to disable the cache and
+   * re-simulate on every call.
+   */
+  governorConfigCacheTtlMs?: number;
+  /**
+   * How long a `FactoryModule.getFactoryConfig()` read (`feeBps`,
+   * `feeRecipient`) is reused, in milliseconds (#958). Factory protocol
+   * parameters rarely change, so a stream-creation-heavy caller should not
+   * pay a simulation per call for data that is almost always unchanged.
+   * Default 300_000 (5 minutes). Set `0` to disable the cache and
+   * re-simulate on every call.
+   */
+  factoryConfigCacheTtlMs?: number;
+  /**
+   * Custom `fetch` used for Soroban RPC requests and for the fee estimator's
+   * Horizon `/fee_stats` call — for edge runtimes (Cloudflare Workers),
+   * proxies/custom HTTP agents, request-tracing headers, or timeouts that the
+   * global `fetch` does not provide.
+   *
+   * RPC routing is registered per `rpcUrl` and is process-wide, so two
+   * clients sharing an `rpcUrl` share the most recently supplied function.
+   * Indexer (GraphQL) traffic is configured separately on `GraphQLIndexer`.
+   */
+  customFetch?: typeof fetch;
+  /**
+   * Timeout in milliseconds for each Soroban RPC request sent through
+   * `customFetch`; the request is aborted via `AbortController` once it
+   * elapses. Defaults to 15000. Set to `0` to disable.
+   */
+  requestTimeoutMs?: number;
+}
+
+export enum StreamStatus {
+  Created = "Created",
+  Active = "Active",
+  Paused = "Paused",
+  Completed = "Completed",
+  Cancelled = "Cancelled",
+}
+
+export function deriveStreamStatus(stream: StreamInfo, now: number): StreamStatus {
+  if (stream.cancelled) return StreamStatus.Cancelled;
+  if (stream.paused) return StreamStatus.Paused;
+  if (stream.endTime !== 0 && now >= stream.endTime) return StreamStatus.Completed;
+  if (now < stream.startTime) return StreamStatus.Created;
+  return StreamStatus.Active;
 }
 
 export interface StreamInfo {
-  id:              bigint;
+  id: bigint;
   /** DripStream contract address */
-  address:         string;
-  sender:          string;
-  recipient:       string;
+  address: string;
+  sender: string;
+  recipient: string;
   /** Token contract address or 'native' */
-  token:           string;
+  token: string;
   /** Tokens released per second, in stroops */
-  ratePerSecond:   bigint;
+  ratePerSecond: bigint;
   /** Unix timestamp */
-  startTime:       number;
+  startTime: number;
   /** Unix timestamp; 0 = open-ended */
-  endTime:         number;
+  endTime: number;
   /** Total withdrawn by recipient so far, in stroops */
-  withdrawn:       bigint;
-  paused:          boolean;
+  withdrawn: bigint;
+  paused: boolean;
   /** Timestamp when stream was last paused; 0 if not paused */
-  pausedAt:        number;
-  cancelled:       boolean;
+  pausedAt: number;
+  cancelled: boolean;
   clawbackEnabled: boolean;
 }
 
@@ -92,41 +347,80 @@ export interface CreateStreamParams {
   durationSeconds?: number;
   /** Unix timestamp; defaults to current ledger time */
   startTime?: number;
+  /** Optional stop/end time (Unix timestamp) */
+  stopTime?: number;
+  /** Optional stop/end time alias (Unix timestamp) */
+  endTime?: number;
+  /** Optional sender address */
+  sender?: string;
   /** Whether the sender can claw back unstreamed tokens */
   clawbackEnabled?: boolean;
   /** Override rate in stroops/s (mutually exclusive with durationSeconds) */
   ratePerSecond?: string;
 }
 
-/** Configuration for a single stream in a batch creation. */
-export type StreamConfig = CreateStreamParams;
+export interface ValidationResult {
+  isValid: boolean;
+  errors: string[];
+  error?: string;
+}
 
 export interface CreateStreamResult {
-  streamId:      bigint;
+  streamId: bigint;
   streamAddress: string;
-  txHash:        string;
+  txHash: string;
+}
+
+export interface StreamProgress {
+  progress: number;
+  progressRatio: number;
+  elapsedSeconds: number;
+  remainingSeconds: number;
+  durationSeconds: number | null;
+  isOpenEnded: boolean;
+  status: "active" | "paused" | "completed" | "cancelled";
+  streamed: bigint;
+  withdrawable: bigint;
+  currentTimestamp: number;
+  formattedProgress: string;
+  formattedRemaining: string;
+}
+
+export interface StreamSimulationResult {
+  minResourceFee: bigint;
+  resourceFee: bigint;
+  storageDeposit: bigint;
+  depositAmount: bigint;
+  requiredBalance: bigint;
+  inclusionFee: bigint;
+  totalFee: bigint;
+  cpuInstructions: bigint;
+  readBytes: bigint;
+  writeBytes: bigint;
+  storageEntries: number;
+  simulationError?: string;
 }
 
 export interface ListStreamsParams {
-  sender?:    string;
+  sender?: string;
   recipient?: string;
-  offset?:    number;
-  limit?:     number;
+  offset?: number;
+  limit?: number;
   /** Opaque pagination cursor from a previous page's `nextCursor`. Takes precedence over `offset` if both are given. */
-  cursor?:    string;
+  cursor?: string;
 }
 
 export interface PaginatedStreams {
   /** The stream info results for this page */
-  streams:    StreamInfo[];
+  streams: StreamInfo[];
   /** Whether there are more results after this page */
   hasNextPage: boolean;
   /** Number of filtered stream IDs seen through the end of this page */
-  totalCount:  bigint;
+  totalCount: bigint;
   /** The offset used for this page */
-  offset:      number;
+  offset: number;
   /** The limit used for this page */
-  limit:       number;
+  limit: number;
   /** Opaque cursor to pass as `cursor` to fetch the next page. Present only when `hasNextPage` is true. */
   nextCursor?: string;
 }
@@ -136,33 +430,147 @@ export interface GetStreamInfosOptions {
   maxConcurrency?: number;
 }
 
+export interface BatchGetStreamsOptions extends GetStreamInfosOptions {
+  /** Number of stream IDs read per chunk. Defaults to 20. */
+  chunkSize?: number;
+  /** Pause in milliseconds between chunks, to stay under RPC rate limits. Defaults to 0. */
+  chunkDelayMs?: number;
+}
+
 export interface GetStreamInfosFailure {
-  id:    bigint;
+  id: bigint;
   error: string;
 }
 
 export interface GetStreamInfosResult {
-  results:  StreamInfo[];
+  results: StreamInfo[];
   failures: GetStreamInfosFailure[];
 }
 
+/** Options for `TokenModule.checkTrustline()`. */
+export interface TrustlineCheckOptions {
+  signal?: AbortSignal | undefined;
+  /**
+   * When true, a missing trustline throws `MissingTrustlineError` instead of
+   * resolving with `hasTrustline: false`. Defaults to false.
+   */
+  throwOnMissing?: boolean;
+}
+
+/** Result of a `TokenModule.checkTrustline()` pre-flight check. */
+export interface TrustlineCheckResult {
+  /** Whether `account` can receive the token without adding a trustline. */
+  hasTrustline: boolean;
+  /** The account that was checked. */
+  account: string;
+  /** The token identifier that was checked (`native`, `USDC`, or a contract ID). */
+  token: string;
+  /** Resolved classic asset code, when the token maps to a classic asset. */
+  assetCode?: string | undefined;
+  /** Resolved classic asset issuer, when the token maps to a classic asset. */
+  assetIssuer?: string | undefined;
+  /** The Stellar Asset Contract ID used for the comparison, when resolved. */
+  contractId?: string | undefined;
+  /** Human-readable explanation suitable for UI error/success messages. */
+  message: string;
+}
+
 export interface GovernorConfig {
-  feeBps:              number;
-  feeRecipient?:       string;
-  minDurationSeconds:  number;
-  maxDurationSeconds:  number;
-  maxRatePerSecond:    bigint;
-  factoryAddress?:     string;
+  feeBps: number;
+  feeRecipient?: string;
+  minDurationSeconds: number;
+  maxDurationSeconds: number;
+  maxRatePerSecond: bigint;
+  factoryAddress?: string;
+  votingDelay?: number;
+  votingPeriod?: number;
+  proposalThreshold?: bigint;
+}
+
+/** Cached result of `FactoryModule.getFactoryConfig()` (#958). */
+export interface FactoryConfig {
+  /** Current protocol fee in basis points (e.g. 30 = 0.3%). */
+  feeBps: number;
+  /** Address the protocol fee is paid to, when the factory reports one. */
+  feeRecipient?: string;
 }
 
 // ── Events ──────────────────────────────────────────────────────────────────
 
-export interface WithdrawEvent  { amount: bigint; recipient: string; totalWithdrawn: bigint; remaining: bigint; sequence?: bigint; }
-export interface CancelEvent    { refundAmount: bigint; withdrawnSoFar: bigint; sender: string; sequence?: bigint; }
-export interface PauseEvent     { pausedAt: number; withdrawable: bigint; sender: string; sequence?: bigint; }
-export interface ResumeEvent    { resumedAt: number; sender: string; sequence?: bigint; }
-export interface TopUpEvent     { amount: bigint; newBalance: bigint; sender: string; sequence?: bigint; }
-export interface ClawbackEvent  { amount: bigint; sender: string; sequence?: bigint; }
+export interface WithdrawEvent {
+  amount: bigint;
+  recipient: string;
+  totalWithdrawn: bigint;
+  remaining: bigint;
+  sequence?: bigint;
+}
+export interface CancelEvent {
+  refundAmount: bigint;
+  withdrawnSoFar: bigint;
+  sender: string;
+  sequence?: bigint;
+}
+export interface PauseEvent {
+  pausedAt: number;
+  withdrawable: bigint;
+  sender: string;
+  sequence?: bigint;
+}
+export interface ResumeEvent {
+  resumedAt: number;
+  sender: string;
+  sequence?: bigint;
+}
+/** Published when the sender tops up a stream (`topped_up` topic). */
+export interface StreamTopUpEvent {
+  /** Amount added to the stream's deposit. */
+  amount: bigint;
+  /** Stream balance after the top-up. */
+  newBalance: bigint;
+  /** The address that funded the top-up (topics[1] actor). */
+  sender: string;
+  sequence?: bigint;
+}
+
+/** Published when a stream's recipient first withdraws after its cliff. */
+export interface StreamCliffReachedEvent {
+  /** Recipient whose withdrawal crossed the cliff. */
+  recipient: string;
+  /** Unix timestamp (seconds) at which the cliff was reached. */
+  timestamp: number;
+  /** Amount made withdrawable by the cliff. */
+  unlockAmount: bigint;
+  sequence?: bigint;
+}
+
+/** Published when a top-up extends a stream's end time. */
+export interface StreamTopUpExtendedEvent {
+  /** The address that funded the top-up (topics[1] actor). */
+  sender: string;
+  /** End time before the extension, in Unix seconds. */
+  oldEndTime: number;
+  /** Extended stream end time, in Unix seconds. */
+  newEndTime: number;
+  /** Amount added to the stream's deposit. */
+  addedAmount: bigint;
+  /** Total stream deposit after the top-up. */
+  newTotalDeposit: bigint;
+  sequence?: bigint;
+}
+
+/** Published when the sender claws back unstreamed funds (`clawback` topic). */
+export interface StreamClawbackedEvent {
+  /** Amount clawed back to the sender. */
+  amount: bigint;
+  /** The address that initiated the clawback (topics[1] actor). */
+  sender: string;
+  sequence?: bigint;
+}
+
+/** @deprecated Use {@link StreamTopUpEvent}. */
+export type TopUpEvent = StreamTopUpEvent;
+/** @deprecated Use {@link StreamClawbackedEvent}. */
+export type ClawbackEvent = StreamClawbackedEvent;
 
 /** Published once when the factory deploys a new DripStream (`created` topic). */
 export interface CreatedEvent {
@@ -224,33 +632,82 @@ export interface EventGap {
   actual: bigint;
 }
 
+/**
+ * Payload delivered by `onStreamEvent(..., 'CliffReached', ...)`.
+ *
+ * This client-side schedule notification is distinct from the contract's
+ * {@link StreamCliffReachedEvent}, which is emitted on the first withdrawal
+ * after the cliff. `cliffTime` is the caller-supplied timestamp this
+ * notification fired against.
+ */
+export interface CliffReachedEvent {
+  /** Unix timestamp (seconds) at which the cliff was reached. */
+  cliffTime: number;
+}
+
+/** Maps each handler-facing event name to its decoded payload type. */
+export interface EventPayloadMap {
+  withdraw: WithdrawEvent;
+  cancel: CancelEvent;
+  pause: PauseEvent;
+  resume: ResumeEvent;
+  topUp: StreamTopUpEvent;
+  streamCliffReached: StreamCliffReachedEvent;
+  streamTopUpExtended: StreamTopUpExtendedEvent;
+  clawback: StreamClawbackedEvent;
+  created: CreatedEvent;
+  forceCancel: ForceCancelEvent;
+  recipientTransfer: RecipientTransferEvent;
+  operatorSet: OperatorSetEvent;
+  operatorRevoke: OperatorRevokedEvent;
+}
+
+/** Union of every decoded stream event payload. */
+export type StreamEventPayload = EventPayloadMap[keyof EventPayloadMap];
+
 export interface StreamEventHandlers {
-  onWithdraw?: (e: WithdrawEvent)  => void;
-  onCancel?:   (e: CancelEvent)    => void;
-  onPause?:    (e: PauseEvent)     => void;
-  onResume?:   (e: ResumeEvent)    => void;
-  onTopUp?:    (e: TopUpEvent)     => void;
-  onClawback?: (e: ClawbackEvent)  => void;
+  onWithdraw?: (e: WithdrawEvent) => void;
+  onCancel?: (e: CancelEvent) => void;
+  onPause?: (e: PauseEvent) => void;
+  onResume?: (e: ResumeEvent) => void;
+  onTopUp?: (e: StreamTopUpEvent) => void;
+  onStreamCliffReached?: (e: StreamCliffReachedEvent) => void;
+  onStreamTopUpExtended?: (e: StreamTopUpExtendedEvent) => void;
+  onClawback?: (e: StreamClawbackedEvent) => void;
   /** Called when the factory deploys a new stream. Optional — most subscribers attach after a stream already exists. */
-  onCreated?:            (e: CreatedEvent)             => void;
+  onCreated?: (e: CreatedEvent) => void;
   /** Called when the recipient force-cancels a paused stream. */
-  onForceCancel?:        (e: ForceCancelEvent)         => void;
+  onForceCancel?: (e: ForceCancelEvent) => void;
   /** Called when the recipient role is transferred to a new address — the current subscriber may have just lost the stream. */
-  onRecipientTransfer?:  (e: RecipientTransferEvent)   => void;
+  onRecipientTransfer?: (e: RecipientTransferEvent) => void;
   /** Called when an operator is delegated on the stream. */
-  onOperatorSet?:        (e: OperatorSetEvent)         => void;
+  onOperatorSet?: (e: OperatorSetEvent) => void;
   /** Called when a delegated operator is revoked. */
-  onOperatorRevoke?:     (e: OperatorRevokedEvent)     => void;
+  onOperatorRevoke?: (e: OperatorRevokedEvent) => void;
   /**
    * Called when an event polling request fails. Polling continues
    * afterward — unless this failure reaches `maxConsecutiveFailures`, in
    * which case this is the last call before the subscription stops.
    */
-  onError?:    (error: Error)      => void;
+  onError?: (error: Error) => void;
   /** Called when a non-contiguous event sequence is observed (missed events across a poll gap or reconnect). */
-  onGap?:      (gap: EventGap)     => void;
+  onGap?: (gap: EventGap) => void;
+  /**
+   * Called when two consecutively dispatched events are not from
+   * consecutive ledgers, i.e. `nextLedger !== currentLedger + 1`. Unlike
+   * `onGap` (keyed on the contract's own `topics[2]` sequence), this is
+   * derived from Soroban's `event.ledger` field, so it also catches skips
+   * for event types that don't carry a sequence topic. A detected gap
+   * triggers an automatic backfill fetch for the missed ledger range.
+   */
+  onLedgerGap?: (gap: LedgerGap) => void;
   /** Polling interval in ms; default 5000 */
   pollInterval?: number;
+  /**
+   * Number of recent event IDs remembered to drop duplicates delivered by
+   * overlapping `getEvents` ledger ranges. Default 1000; `0` disables.
+   */
+  dedupWindowSize?: number;
   /**
    * Upper bound (ms) for the exponential backoff delay applied between
    * retries after consecutive polling failures. Default 60000.
@@ -270,15 +727,86 @@ export interface Subscription {
 
 // -- Batch operations ----------------------------------------------------------
 
-export interface BatchWithdrawItem {
+/**
+ * A single stream to create as part of a batch creation.
+ *
+ * This is the strongly typed counterpart of the loosely-shaped objects that
+ * batch creation used to accept: `recipient`, `token` and `depositAmount` are
+ * required, so a missing recipient or a misformatted amount is caught by the
+ * compiler instead of at runtime.
+ *
+ * @example
+ * ```ts
+ * const payloads: BatchStreamCreationPayload[] = [
+ *   { recipient: 'G...', token: 'native', depositAmount: '100' },
+ * ];
+ * await client.streams.createBatchStreams(payloads);
+ * ```
+ */
+export interface BatchStreamCreationPayload {
+  /** Stellar recipient address. */
+  recipient: string;
+  /** 'native' (XLM), 'USDC', or a contract address. */
+  token: string;
+  /** Total deposit in display units (e.g. '1000'). */
+  depositAmount: string;
+  /** Stream duration in seconds (mutually exclusive with `ratePerSecond`). */
+  durationSeconds?: number;
+  /** Override rate in stroops/s (mutually exclusive with `durationSeconds`). */
+  ratePerSecond?: string;
+  /** Unix timestamp; defaults to current ledger time. */
+  startTime?: number;
+  /** Optional stop/end time (Unix timestamp). */
+  stopTime?: number;
+  /** Optional stop/end time alias (Unix timestamp). */
+  endTime?: number;
+  /** Optional sender address. */
+  sender?: string;
+  /** Whether the sender can claw back unstreamed tokens. */
+  clawbackEnabled?: boolean;
+}
+
+/**
+ * A single withdrawal to perform as part of a batch withdraw.
+ *
+ * `streamId` is required, so a batch can no longer contain an entry that
+ * silently targets nothing.
+ *
+ * @example
+ * ```ts
+ * const payloads: BatchWithdrawPayload[] = [{ streamId: 1n }];
+ * await client.streams.batchWithdraw(payloads);
+ * ```
+ */
+export interface BatchWithdrawPayload {
+  /** The stream to withdraw from. */
   streamId: bigint | string;
   /** Amount in stroops. Defaults to the full withdrawable balance if omitted. */
   amount?: bigint;
 }
 
+/**
+ * Configuration for a single stream in a batch creation.
+ *
+ * Alias of {@link BatchStreamCreationPayload}, kept for backwards
+ * compatibility with existing callers.
+ */
+export type StreamConfig = BatchStreamCreationPayload;
+
+export interface BatchWithdrawItem extends BatchWithdrawPayload {}
+
 export interface BatchWithdrawResult {
   streamId: bigint;
   success: boolean;
+  txHash?: string;
+  error?: string;
+}
+
+export interface BatchCreateStreamResult {
+  index: number;
+  success: boolean;
+  streamId?: bigint;
+  streamAddress?: string;
   txHash?: string;
   error?: string;
 }
@@ -293,24 +821,69 @@ export interface FeeEstimate {
 }
 
 export type StreamOperationType =
-  | 'create'
-  | 'withdraw'
-  | 'cancel'
-  | 'pause'
-  | 'resume'
-  | 'topUp'
-  | 'transferRecipient'
-  | 'batchWithdraw';
+  | "create"
+  | "withdraw"
+  | "cancel"
+  | "pause"
+  | "resume"
+  | "topUp"
+  | "transferRecipient"
+  | "batchWithdraw";
 
 export type StreamOperation =
   | StreamOperationType
-  | { type: 'create'; params?: CreateStreamParams }
-  | { type: 'withdraw'; streamId?: bigint | string; amount?: bigint }
-  | { type: 'cancel'; streamId?: bigint | string }
-  | { type: 'pause'; streamId?: bigint | string }
-  | { type: 'resume'; streamId?: bigint | string }
-  | { type: 'topUp'; streamId?: bigint | string; amount?: bigint }
-  | { type: 'transferRecipient'; streamId?: bigint | string; newRecipient?: string }
-  | { type: 'batchWithdraw'; items?: BatchWithdrawItem[] }
+  | { type: "create"; params?: CreateStreamParams }
+  | { type: "withdraw"; streamId?: bigint | string; amount?: bigint }
+  | { type: "cancel"; streamId?: bigint | string }
+  | { type: "pause"; streamId?: bigint | string }
+  | { type: "resume"; streamId?: bigint | string }
+  | { type: "topUp"; streamId?: bigint | string; amount?: bigint }
+  | {
+      type: "transferRecipient";
+      streamId?: bigint | string;
+      newRecipient?: string;
+    }
+  | { type: "batchWithdraw"; items?: BatchWithdrawItem[] }
   | { type: string; [key: string]: unknown };
 
+/**
+ * Human-readable breakdown of remaining stream duration.
+ */
+export interface DurationBreakdown {
+  days: number;
+  hours: number;
+  minutes: number;
+  seconds: number;
+  totalSeconds: number;
+}
+
+// ── Contract error codes (#1096) ──────────────────────────────────────────────
+
+/**
+ * Strictly typed Soroban contract error codes, mirroring each contract's Rust
+ * `Error` enum (`contracts/<name>/src/errors.rs`). They are defined once, in
+ * `errors.ts` alongside their messages, and re-exported here so frontend code
+ * can compare against named members instead of magic numbers:
+ *
+ * ```ts
+ * if (err.code === ContractErrorCode.NothingToWithdraw) { ... }
+ * ```
+ *
+ * The same number means different things in different contracts (code 1 is
+ * `NotAuthorized` on the stream contract but `NotInitialized` on the factory),
+ * so use the enum that matches the contract you called. `ContractErrorCode`
+ * is the DripStream enum, the contract almost every SDK call targets.
+ */
+export {
+  StreamErrorCode as ContractErrorCode,
+  StreamErrorCode,
+  FactoryErrorCode,
+  GovernorErrorCode,
+  UNKNOWN_CONTRACT_ERROR_CODE,
+} from "../errors.js";
+export type { ConduitContract } from "../errors.js";
+
+import type { StreamErrorCode, FactoryErrorCode, GovernorErrorCode } from "../errors.js";
+
+/** Any known contract error code, across all three contracts. */
+export type AnyContractErrorCode = StreamErrorCode | FactoryErrorCode | GovernorErrorCode;

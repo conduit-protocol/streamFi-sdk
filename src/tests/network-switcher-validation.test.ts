@@ -31,6 +31,9 @@ import { WalletConnectAdapter } from '../adapters/walletconnect.js';
 vi.mock('../soroban.js', () => ({
   buildContractCallTx: vi.fn().mockResolvedValue({ _stub: 'tx' }),
   simulateReadOnly:    vi.fn(),
+  createRpcServer: vi.fn(() => ({ getLatestLedger: vi.fn() })),
+  registerRpcEndpointGroup: vi.fn((urls: string[]) => urls),
+  resolveRpcEndpoint: (url: string) => url,
   resolveFee:  () => '100',
   scValToU64:  (v: { u64: () => { toString: () => string } }) => BigInt(v.u64().toString()),
   scValToI128: () => 0n,
@@ -43,6 +46,11 @@ vi.mock('../soroban.js', () => ({
     testnet:  'https://soroban-testnet.stellar.org',
     mainnet:  'https://mainnet.sorobanrpc.com',
     local:    'http://localhost:8000/soroban/rpc',
+  },
+  DEFAULT_HORIZON: {
+    testnet:  'https://horizon-testnet.stellar.org',
+    mainnet:  'https://horizon.stellar.org',
+    local:    'http://localhost:8000',
   },
 }));
 

@@ -68,7 +68,7 @@ describe('ErrorMapper + DEFAULT_ERROR_MESSAGE_TYPE_MAP (#773)', () => {
     emit(m.onmessage, 'stream_error', { code: 2 });
 
     expect(m.onError).toHaveBeenCalledTimes(1);
-    expect(m.onError.mock.calls[0][0]).toBeInstanceOf(ConduitError);
+    expect(m.onError.mock.calls[0]![0]).toBeInstanceOf(ConduitError);
 
     m.dispose();
     relayer.destroy();
@@ -85,8 +85,8 @@ describe('ErrorMapper + DEFAULT_ERROR_MESSAGE_TYPE_MAP (#773)', () => {
     emit(m.onmessage, 'factory_error', { code: 3 });
 
     expect(m.onError).toHaveBeenCalledTimes(2);
-    expect(m.onError.mock.calls[0][0].contract).toBe('factory');
-    expect(m.onError.mock.calls[1][0].contract).toBe('factory');
+    expect(m.onError.mock.calls[0]![0].contract).toBe('factory');
+    expect(m.onError.mock.calls[1]![0].contract).toBe('factory');
 
     m.dispose();
     relayer.destroy();
@@ -102,7 +102,7 @@ describe('ErrorMapper + DEFAULT_ERROR_MESSAGE_TYPE_MAP (#773)', () => {
     emit(m.onmessage, 'stream_error', { code: 2 });
 
     expect(m.onError).toHaveBeenCalledTimes(1);
-    expect(m.onError.mock.calls[0][0].contract).toBe('governor');
+    expect(m.onError.mock.calls[0]![0].contract).toBe('governor');
 
     m.dispose();
     relayer.destroy();

@@ -104,4 +104,28 @@ describe('FeeEstimator - Race condition and edge cases', () => {
     expect(estimator.lastSuccessfulFetchAt).toEqual(expect.any(Number));
     expect(estimator.isStale).toBe(false);
   });
+
+  it('caches successful estimates independently by operation key for three seconds', async () => {
+    const estimator = new FeeEstimator(100n);
+    const fetcher = vi.fn(async () => 140n);
+
+    await estimator.estimateFee(fetcher, { cacheKey: 'withdraw:1' });
+    await estimator.estimateFee(fetcher, { cacheKey: 'withdraw:1' });
+    await estimator.estimateFee(fetcher, { cacheKey: 'withdraw:2' });
+
+    expect(fetcher).toHaveBeenCalledTimes(2);
+  });
+
+  it('does not share in-flight estimates across different operation keys', async () => {
+    const estimator = new FeeEstimator(100n);
+    let releaseFirst: (fee: bigint) => void = () => {};
+    const first = new Promise<bigint>(resolve => { releaseFirst = resolve; });
+
+    const firstRequest = estimator.estimateFee(() => first, { cacheKey: 'create:a' });
+    const secondRequest = estimator.estimateFee(async () => 220n, { cacheKey: 'create:b' });
+    releaseFirst(110n);
+
+    await expect(firstRequest).resolves.toBe(110n);
+    await expect(secondRequest).resolves.toBe(220n);
+  });
 });

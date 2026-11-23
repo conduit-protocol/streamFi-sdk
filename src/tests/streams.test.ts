@@ -51,7 +51,8 @@ vi.mock('@stellar/stellar-sdk', async () => {
 });
 
 vi.mock('../events.js', () => ({
-  subscribeToStream: vi.fn().mockReturnValue({ unsubscribe: vi.fn() }),
+  subscribeToStream:  vi.fn().mockReturnValue({ unsubscribe: vi.fn() }),
+  subscribeToStreams: vi.fn().mockReturnValue({ unsubscribe: vi.fn() }),
 }));
 
 // ── Helpers ───────────────────────────────────────────────────────────────────
@@ -72,7 +73,7 @@ describe('StreamsModule — keypair guard', () => {
     const sdk = new StreamsModule(makeConfig(false));
     await expect(sdk.create({
       recipient:       'GBBD47IF6LWK7P7MDEVSCWR7DPUWV3NY3DTQEVFL4NAT4AQH3ZLLFLA5',
-      token:           'CDLZFC3SYJYDZT7K67VZ75HPJVIEUVNIXF47ZG2FB2RMQQVU2HHGCN3',
+      token:           'CBQHNAXSI55GX2GN6D67GK7BHVPSLJUGZQEU7WJ5LKR5PNUCGLIMAO4K',
       depositAmount:   '1000',
       durationSeconds: 86400,
     })).rejects.toThrow('keypair');
@@ -196,7 +197,7 @@ describe('StreamsModule — create() param validation', () => {
     const sdk = new StreamsModule(makeConfig(true));
     await expect(sdk.create({
       recipient:     'GBBD47IF6LWK7P7MDEVSCWR7DPUWV3NY3DTQEVFL4NAT4AQH3ZLLFLA5',
-      token:         'CDLZFC3SYJYDZT7K67VZ75HPJVIEUVNIXF47ZG2FB2RMQQVU2HHGCN3',
+      token:         'CBQHNAXSI55GX2GN6D67GK7BHVPSLJUGZQEU7WJ5LKR5PNUCGLIMAO4K',
       depositAmount: '100',
     })).rejects.toThrow(/durationSeconds|ratePerSecond/);
   });
@@ -207,7 +208,7 @@ describe('StreamsModule — create() param validation', () => {
     const sdk = new StreamsModule(makeConfig(true));
     await expect(sdk.create({
       recipient:       'GBBD47IF6LWK7P7MDEVSCWR7DPUWV3NY3DTQEVFL4NAT4AQH3ZLLFLA5',
-      token:           'CDLZFC3SYJYDZT7K67VZ75HPJVIEUVNIXF47ZG2FB2RMQQVU2HHGCN3',
+      token:           'CBQHNAXSI55GX2GN6D67GK7BHVPSLJUGZQEU7WJ5LKR5PNUCGLIMAO4K',
       depositAmount:   '100',
       durationSeconds: MIN_STREAM_DURATION_SECONDS - 1,
     })).rejects.toThrow(/durationSeconds.*at least.*3600/);
@@ -574,6 +575,65 @@ describe('StreamsModule — subscribeAsync()', () => {
       .subscribeAsync(1n, {});
 
     expect(spy.mock.calls[0]![0]).toBe('https://my-node.example');
+  });
+});
+
+describe('StreamsModule — subscribeToStreams() / subscribeToStreamsAsync()', () => {
+  it('returns a subscription with unsubscribe function synchronously', async () => {
+    const { StreamsModule } = await import('../streams.js');
+    const sdk = new StreamsModule(makeConfig(false));
+    const sub = sdk.subscribeToStreams([1n, 2n], {});
+    expect(sub).toHaveProperty('unsubscribe');
+    expect(typeof sub.unsubscribe).toBe('function');
+    sub.unsubscribe(); // should not throw
+  });
+
+  it('resolves every stream ID and fans out to subscribeToStreams with all addresses', async () => {
+    mockStreamAddress.mockImplementation(async (streamId: bigint) =>
+      streamId === 1n ? 'CADDR1' : 'CADDR2',
+    );
+    const { subscribeToStreams } = await import('../events.js');
+    const spy = vi.mocked(subscribeToStreams);
+    spy.mockClear();
+
+    const { StreamsModule } = await import('../streams.js');
+    await new StreamsModule(makeConfig(false)).subscribeToStreamsAsync([1n, 2n], {});
+
+    expect(spy).toHaveBeenCalledTimes(1);
+    expect(spy.mock.calls[0]![1]).toEqual(['CADDR1', 'CADDR2']);
+  });
+
+  it('reports an unresolvable stream ID via onError without dropping the others', async () => {
+    mockStreamAddress.mockImplementation(async (streamId: bigint) =>
+      streamId === 42n ? null : 'CADDR-OK',
+    );
+    const { subscribeToStreams } = await import('../events.js');
+    const spy = vi.mocked(subscribeToStreams);
+    spy.mockClear();
+
+    const { StreamsModule } = await import('../streams.js');
+    const onError = vi.fn();
+    await new StreamsModule(makeConfig(false)).subscribeToStreamsAsync([1n, 42n, 2n], { onError });
+
+    expect(onError).toHaveBeenCalledTimes(1);
+    expect(onError.mock.calls[0]![0].message).toContain('Stream 42 not found');
+    // The two resolvable streams still get subscribed.
+    expect(spy.mock.calls[0]![1]).toEqual(['CADDR-OK', 'CADDR-OK']);
+  });
+
+  it('surfaces subscribeToStreamsAsync failures through onError', async () => {
+    const warn = vi.spyOn(console, 'warn').mockImplementation(() => {});
+    mockStreamAddress.mockRejectedValue(new Error('rpc unreachable'));
+
+    const { StreamsModule } = await import('../streams.js');
+    const sdk = new StreamsModule(makeConfig(false));
+    const onError = vi.fn();
+
+    const sub = sdk.subscribeToStreams([1n], { onError });
+    await vi.waitFor(() => expect(onError).toHaveBeenCalledTimes(1));
+
+    sub.unsubscribe();
+    warn.mockRestore();
   });
 });
 

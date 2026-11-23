@@ -45,6 +45,176 @@ import type { Network } from './types/index.js';
 
 export const DEFAULT_BATCH_TIMEOUT_SECONDS = 30;
 
+// ── Deduplicated footprint builder ────────────────────────────────────────────
+
+/** Anything that can yield ledger keys for a merged batch footprint. */
+export type FootprintSource =
+  | xdr.LedgerFootprint
+  | xdr.LedgerKey[]
+  | {
+      readOnly?: xdr.LedgerKey[];
+      readWrite?: xdr.LedgerKey[];
+      footprint?: FootprintSource;
+      transactionData?: { footprint?: FootprintSource };
+    }
+  | null
+  | undefined;
+
+interface KeySets {
+  readOnly: xdr.LedgerKey[];
+  readWrite: xdr.LedgerKey[];
+}
+
+function isLedgerKey(value: unknown): value is xdr.LedgerKey {
+  return value instanceof xdr.LedgerKey;
+}
+
+function uniqueKeyId(key: xdr.LedgerKey): string {
+  return key.toXDR('base64');
+}
+
+function normalizeFootprintSource(source: FootprintSource): KeySets | undefined {
+  if (!source) return undefined;
+  if (typeof source !== 'object' && typeof source !== 'function') {
+    throw new BatchBuildError('footprint sources must be xdr.LedgerFootprint values, xdr.LedgerKey arrays, or simulation responses');
+  }
+  if (Array.isArray(source)) {
+    for (const key of source) {
+      if (!isLedgerKey(key)) {
+        throw new BatchBuildError('footprint arrays must contain only xdr.LedgerKey values');
+      }
+    }
+    return { readOnly: [], readWrite: source };
+  }
+  const record = source as Record<string, unknown>;
+  if (typeof record.footprint === 'object' || typeof record.footprint === 'function') {
+    return normalizeFootprintSource(record.footprint as FootprintSource);
+  }
+  const txData = record.transactionData as { footprint?: FootprintSource } | undefined;
+  if (txData && typeof txData === 'object' && txData.footprint) {
+    return normalizeFootprintSource(txData.footprint);
+  }
+  // Real `xdr.LedgerFootprint` instances expose accessor methods rather than
+  // plain arrays; duck-type them so a second copy of the SDK still works.
+  if (typeof record.readOnly === 'function' && typeof record.readWrite === 'function') {
+    const readOnly = (record.readOnly as () => xdr.LedgerKey[])();
+    const readWrite = (record.readWrite as () => xdr.LedgerKey[])();
+    return { readOnly, readWrite };
+  }
+  const readOnly = Array.isArray(record.readOnly) ? record.readOnly : [];
+  const readWrite = Array.isArray(record.readWrite) ? record.readWrite : [];
+  for (const key of [...readOnly, ...readWrite]) {
+    if (!isLedgerKey(key)) {
+      throw new BatchBuildError('footprint arrays must contain only xdr.LedgerKey values');
+    }
+  }
+  return { readOnly, readWrite };
+}
+
+/**
+ * Merge several footprints (or arrays of ledger keys, or Soroban simulation
+ * responses) into one {@link xdr.LedgerFootprint} with every ledger key
+ * appearing at most once.
+ *
+ * Batch payloads combine operations that often touch the same ledger entries
+ * (source account, token balances, stream contracts). Sending a footprint with
+ * duplicate keys — or with a key only in `readOnly` when another operation
+ * needs it as `readWrite` — makes the network reject the whole batch. This
+ * builder unions the sets and promotes any key seen as writable to `readWrite`.
+ *
+ * The first occurrence of each key wins the ordering, and the input footprints
+ * are never mutated.
+ *
+ * @param sources Footprints/keys to merge, passed as an array or as arguments.
+ */
+export function mergeFootprints(
+  ...sources: Array<FootprintSource | FootprintSource[]>
+): xdr.LedgerFootprint {
+  const flat: FootprintSource[] = sources.flat() as FootprintSource[];
+  const readOnly = new Map<string, xdr.LedgerKey>();
+  const readWrite = new Map<string, xdr.LedgerKey>();
+
+  for (const source of flat) {
+    const keys = normalizeFootprintSource(source);
+    if (!keys) continue;
+    for (const key of keys.readOnly) {
+      const id = uniqueKeyId(key);
+      if (!readWrite.has(id) && !readOnly.has(id)) readOnly.set(id, key);
+    }
+    for (const key of keys.readWrite) {
+      const id = uniqueKeyId(key);
+      readOnly.delete(id);
+      if (!readWrite.has(id)) readWrite.set(id, key);
+    }
+  }
+
+  return new xdr.LedgerFootprint({
+    readOnly: Array.from(readOnly.values()),
+    readWrite: Array.from(readWrite.values()),
+  });
+}
+
+/** Remove duplicate ledger keys from a single footprint, promoting writable keys. */
+export function deduplicateFootprint(footprint: FootprintSource): xdr.LedgerFootprint {
+  return mergeFootprints(footprint);
+}
+
+/** Alias of {@link mergeFootprints}. */
+export const buildDeduplicatedFootprint = mergeFootprints;
+/** Alias of {@link mergeFootprints}. */
+export const buildMergedFootprint = mergeFootprints;
+/** Alias of {@link mergeFootprints} for batch-specific call sites. */
+export const mergeBatchFootprints = mergeFootprints;
+
+/** Merge the footprints attached to a list of Soroban simulation responses. */
+export function mergeSimulationFootprints(
+  simulations: SorobanRpc.Api.SimulateTransactionResponse[],
+): xdr.LedgerFootprint {
+  return mergeFootprints(simulations as unknown as FootprintSource[]);
+}
+
+/**
+ * Split a flat list of batch operations into chunks small enough to fit
+ * Soroban's per-transaction instruction / footprint limits.
+ *
+ * A single Soroban transaction may only carry a bounded amount of work;
+ * trying to invoke 500 payroll withdrawals in one envelope reverts the whole
+ * thing. Callers pass the full list together with a safe `maxChunkSize`
+ * (default 50 — the figure the dashboard uses for payroll batches) and submit
+ * each returned chunk as its own transaction set, so one oversized list never
+ * takes the entire batch down.
+ *
+ * An empty input yields `[]` rather than a single empty chunk, so a caller
+ * that maps over the result does not emit a stray no-op batch. Order is
+ * preserved: `concat(...chunks)` is item-identical to the input.
+ *
+ * @param items - The operations to split (any element type).
+ * @param maxChunkSize - Maximum entries per chunk. Must be a positive integer;
+ *   values below 1 throw rather than silently collapsing the whole list into
+ *   one oversized chunk that would revert on-chain.
+ * @returns An array of chunks; `[items]` when `items.length <= maxChunkSize`.
+ *
+ * @example
+ * ```ts
+ * const chunks = chunkBatchOperations(payroll, 50); // 500 items -> 10 of 50
+ * for (const chunk of chunks) await submitBatch(buildBatchTransactions(chunk, ctx), rpcUrl);
+ * ```
+ */
+export function chunkBatchOperations<T>(items: T[], maxChunkSize = 50): T[][] {
+  if (!Array.isArray(items)) {
+    throw new BatchBuildError('chunkBatchOperations expects an array of items');
+  }
+  if (!Number.isInteger(maxChunkSize) || maxChunkSize < 1) {
+    throw new BatchBuildError(`maxChunkSize must be a positive integer, got ${String(maxChunkSize)}`);
+  }
+  if (items.length === 0) return [];
+  const chunks: T[][] = [];
+  for (let i = 0; i < items.length; i += maxChunkSize) {
+    chunks.push(items.slice(i, i + maxChunkSize));
+  }
+  return chunks;
+}
+
 /**
  * Everything needed to turn a validated operation list into real transactions.
  *
@@ -82,6 +252,25 @@ export interface BuiltBatchTransaction {
   xdr: string;
   /** True when simulated and assembled, so the XDR is ready to submit. */
   prepared: boolean;
+}
+
+/** Result of the pre-flight simulation for one batch operation. */
+export interface BatchSimulationResult {
+  index: number;
+  method: string;
+  success: boolean;
+  error?: string;
+}
+
+export interface BatchPayload {
+  operations: BuildableOperation[];
+  context: BatchTransactionContext;
+}
+
+export interface BatchSimulationSummary {
+  success: boolean;
+  results: BatchSimulationResult[];
+  invalidIndices: number[];
 }
 
 export class BatchBuildError extends Error {
@@ -239,7 +428,7 @@ export function operationToScVals(operation: {
   ];
 }
 
-interface BuildableOperation {
+export interface BuildableOperation {
   method: string;
   params?: Record<string, unknown> | undefined;
   /** Per-field ScVal type hints for `params` map entries (see #497). */
@@ -284,6 +473,80 @@ export function buildBatchTransactionsSync(
 
     return { index, method: operation.method, xdr: tx.toXDR(), prepared: false };
   });
+}
+
+/**
+ * Simulate every operation independently and retain the operation-level
+ * failures. This is useful for batch UIs: a failed aggregate preflight should
+ * identify the exact stream creation that would revert.
+ */
+export async function preBatchSimulate(
+  operations: BuildableOperation[],
+  context: BatchTransactionContext,
+): Promise<BatchSimulationResult[]> {
+  const errors = validateContext(context);
+  if (errors.length > 0) throw new BatchBuildError(errors.join('; '));
+  if (!context.rpcUrl) {
+    throw new BatchBuildError('preBatchSimulate requires rpcUrl');
+  }
+
+  const server = createRpcServer(context.rpcUrl);
+  let sequence = context.sequence;
+  if (sequence === undefined) {
+    try {
+      sequence = (await server.getAccount(context.sourceAccount)).sequenceNumber();
+    } catch (err) {
+      throw RateLimitError.fromRpcError(err) ?? err;
+    }
+  }
+
+  const passphrase = resolvePassphrase(context);
+  const contract = new Contract(context.contractId);
+  const fee = context.fee ?? BASE_FEE;
+  const timeout = context.timeoutSeconds ?? DEFAULT_BATCH_TIMEOUT_SECONDS;
+  const txs = operations.map((operation, index) => {
+    if (!operation?.method || typeof operation.method !== 'string') {
+      throw new BatchBuildError(`Operation at index ${index} is missing a method name`);
+    }
+    const account = new Account(context.sourceAccount, (BigInt(sequence!) + BigInt(index)).toString());
+    return {
+      operation,
+      index,
+      tx: new TransactionBuilder(account, { fee, networkPassphrase: passphrase })
+        .addOperation(contract.call(operation.method, ...operationToScVals(operation)))
+        .setTimeout(timeout)
+        .build(),
+    };
+  });
+
+  const results = await Promise.all(txs.map(async ({ tx, index, operation }) => {
+    let simulation;
+    try {
+      simulation = await server.simulateTransaction(tx);
+    } catch (err) {
+      throw RateLimitError.fromRpcError(err) ?? err;
+    }
+    if (SorobanRpc.Api.isSimulationError(simulation)) {
+      return {
+        index,
+        method: operation.method,
+        success: false,
+        error: simulation.error,
+      } satisfies BatchSimulationResult;
+    }
+    return { index, method: operation.method, success: true } satisfies BatchSimulationResult;
+  }));
+  return results;
+}
+
+export async function simulateBatch(payload: BatchPayload): Promise<BatchSimulationSummary> {
+  const results = await preBatchSimulate(payload.operations, payload.context);
+  const invalidIndices = results.filter((result) => !result.success).map((result) => result.index);
+  return {
+    success: invalidIndices.length === 0,
+    results,
+    invalidIndices,
+  };
 }
 
 /**
@@ -340,24 +603,38 @@ export async function buildBatchTransactions(
     return { operation, index, tx };
   });
 
-  const simulationResults = await Promise.all(
-    txs.map(async ({ tx, index, operation }) => {
-      let simulation;
-      try {
-        simulation = await server.simulateTransaction(tx);
-      } catch (err) {
-        throw RateLimitError.fromRpcError(err) ?? err;
-      }
-      if (SorobanRpc.Api.isSimulationError(simulation)) {
-        throw new BatchBuildError(
-          `Simulation failed for operation ${index} (${operation.method}): ${simulation.error}`,
-        );
-      }
-      return { index, operation, tx, simulation };
-    }),
-  );
+  const simulationResults = await Promise.allSettled(txs.map(async ({ tx, index, operation }) => {
+    let simulation;
+    try {
+      simulation = await server.simulateTransaction(tx);
+    } catch (err) {
+      throw RateLimitError.fromRpcError(err) ?? err;
+    }
+    if (SorobanRpc.Api.isSimulationError(simulation)) {
+      throw new BatchBuildError(
+        `Simulation failed for operation ${index} (${operation.method}): ${simulation.error}`,
+      );
+    }
+    return { index, operation, tx, simulation };
+  }));
 
-  return simulationResults.map(({ index, operation, tx, simulation }) => {
+  const rejected = simulationResults.filter(
+    (result): result is PromiseRejectedResult => result.status === 'rejected',
+  );
+  if (rejected.length > 0) {
+    const details = rejected.map(result => result.reason instanceof Error
+      ? result.reason.message
+      : String(result.reason));
+    throw new BatchBuildError(details.join('; '));
+  }
+
+  return simulationResults.map(result => {
+    const { index, operation, tx, simulation } = (result as PromiseFulfilledResult<{
+      index: number;
+      operation: BuildableOperation;
+      tx: Transaction;
+      simulation: SorobanRpc.Api.SimulateTransactionResponse;
+    }>).value;
     const assembled = SorobanRpc.assembleTransaction(tx, simulation).build();
     return { index, method: operation.method, xdr: assembled.toXDR(), prepared: true };
   });
@@ -377,6 +654,41 @@ export async function buildBatchTransactions(
  */
 export type BatchTxStatus = 'SUCCESS' | 'FAILED' | 'SKIPPED' | 'ERROR';
 
+/**
+ * Lenient batch execution outcome: operations continue even if one fails,
+ * collecting detailed results for each. Used by {@link submitBatchLenient}.
+ */
+export interface LenientBatchOutcome {
+  /** Position of this transaction in the original operations array. */
+  index: number;
+  method: string;
+  status: BatchTxStatus;
+  /** Transaction hash, present when status is 'SUCCESS'. */
+  txHash?: string;
+  /** Human-readable reason, present when status is 'FAILED' or 'ERROR'. */
+  error?: string;
+  /** True when this outcome was produced by a dry-run. */
+  dryRun?: boolean;
+}
+
+/**
+ * Summary of lenient batch execution. Unlike {@link submitBatch}, does not
+ * skip remaining transactions when one fails—all are submitted and outcomes
+ * are collected independently.
+ */
+export interface BatchExecutionReport {
+  /** True only when every transaction succeeded. */
+  allSucceeded: boolean;
+  /** Detailed outcome for each transaction in submission order. */
+  outcomes: LenientBatchOutcome[];
+  /** Number of transactions that succeeded on-chain. */
+  successCount: number;
+  /** Number of transactions that failed on-chain or in submission. */
+  failureCount: number;
+  /** Indices of all failed or errored transactions, for retry. */
+  failedIndices: number[];
+}
+
 export interface BatchTxOutcome {
   /** Position of this transaction in the original array. */
   index: number;
@@ -388,6 +700,18 @@ export interface BatchTxOutcome {
   error?: string;
   /** True when this outcome was produced by a dry-run (no on-chain submission). */
   dryRun?: boolean;
+}
+
+/** Per-transaction outcome produced by {@link submitBatch} (simple parallel variant). */
+export interface BatchSubmitOutcome {
+  /** The transaction's position in the original operations array. */
+  index: number;
+  /** `true` when the network accepted the transaction. */
+  success: boolean;
+  /** Transaction hash returned by the RPC node, when available. */
+  hash?: string;
+  /** Error message when `success` is `false`. */
+  error?: string;
 }
 
 /** Overall result returned by {@link submitBatch}. */
@@ -403,6 +727,12 @@ export interface BatchSubmitResult {
    */
   firstFailureIndex: number;
   outcomes: BatchTxOutcome[];
+  /** Per-transaction outcomes (simple parallel variant). */
+  simpleOutcomes?: BatchSubmitOutcome[];
+  /** Number of transactions the network accepted. */
+  successCount?: number;
+  /** Number of transactions that failed. */
+  failureCount?: number;
 }
 
 /**
@@ -415,17 +745,64 @@ export class BatchPartiallySubmittedError extends Error {
   readonly skippedIndices: number[];
   readonly result: BatchSubmitResult;
 
-  constructor(result: BatchSubmitResult) {
+  /**
+   * The built transactions that were passed to {@link submitBatch}.
+   * Retained so {@link getFailedOperations} can correlate outcomes back to
+   * the caller's original operation list.
+   */
+  readonly builtTransactions: BuiltBatchTransaction[];
+
+  constructor(result: BatchSubmitResult, builtTransactions?: BuiltBatchTransaction[]) {
     super(
-      `Batch submission failed at transaction ${result.firstFailureIndex}. ` +
-      `${result.outcomes.filter(o => o.status === 'SKIPPED').length} transaction(s) skipped.`,
+      result.firstFailureIndex !== undefined && result.firstFailureIndex !== -1
+        ? `Batch submission failed at transaction ${result.firstFailureIndex}. ` +
+          `${result.outcomes.filter(o => o.status === 'SKIPPED').length} transaction(s) skipped.`
+        : `Batch partially submitted: ${result.failureCount ?? 0} of ${result.outcomes.length} transaction(s) failed. ` +
+          `Call getFailedOperations(originalOperations) to get the failed subset for retry.`,
     );
     this.name = 'BatchPartiallySubmittedError';
-    this.firstFailureIndex = result.firstFailureIndex;
+    this.firstFailureIndex = result.firstFailureIndex ?? -1;
     this.skippedIndices = result.outcomes
       .filter(o => o.status === 'SKIPPED')
       .map(o => o.index);
     this.result = result;
+    this.builtTransactions = builtTransactions ?? [];
+    Object.setPrototypeOf(this, new.target.prototype);
+  }
+
+  /**
+   * Returns the subset of `originalOperations` whose transactions failed,
+   * preserving the original order.
+   *
+   * Pass the same array you supplied to {@link buildBatchTransactions} that
+   * produced the built transactions stored in {@link builtTransactions}.
+   * The returned array is ready to feed directly back into
+   * `buildBatchTransactions` + `submitBatch` for a retry.
+   *
+   * @param originalOperations - The full list of operations that was passed to
+   *   `buildBatchTransactions`. Must be indexable by the `index` field on each
+   *   {@link BuiltBatchTransaction}.
+   */
+  getFailedOperations<T extends { method: string; params?: Record<string, unknown>; args?: unknown[] }>(
+    originalOperations: T[],
+  ): T[] {
+    const failedIndices = new Set(
+      this.result.outcomes
+        .filter(o => o.status === 'FAILED' || o.status === 'ERROR')
+        .map(o => o.index),
+    );
+    return this.builtTransactions
+      .filter(tx => failedIndices.has(tx.index))
+      .map(tx => {
+        const op = originalOperations[tx.index];
+        if (op === undefined) {
+          throw new RangeError(
+            `getFailedOperations: no operation at index ${tx.index}. ` +
+            `Make sure originalOperations is the same array passed to buildBatchTransactions.`,
+          );
+        }
+        return op;
+      });
   }
 }
 
@@ -463,6 +840,12 @@ export interface BatchSubmitOptions {
   dryRun?: boolean;
   /** When true, throws BatchPartiallySubmittedError if any tx fails. Default false. */
   throwOnError?: boolean;
+  /**
+   * When `true` and at least one transaction fails, throw a
+   * {@link BatchPartiallySubmittedError} instead of returning the aggregate
+   * result. Defaults to `false`.
+   */
+  throwOnPartial?: boolean;
 }
 
 const DEFAULT_SUBMIT_POLL_INTERVAL_MS = 1_000;
@@ -634,15 +1017,375 @@ export async function submitBatch(
     }
   }
 
-  const result = {
+  const successCount = outcomes.filter(o => o.status === 'SUCCESS').length;
+  const failureCount = outcomes.length - successCount;
+
+  const result: BatchSubmitResult = {
     allSucceeded:      firstFailureIndex === -1,
     firstFailureIndex,
     outcomes,
+    successCount,
+    failureCount,
   };
 
-  if (options.throwOnError && !result.allSucceeded) {
-    throw new BatchPartiallySubmittedError(result);
+  if ((options.throwOnError || options.throwOnPartial) && !result.allSucceeded) {
+    throw new BatchPartiallySubmittedError(result, transactions);
   }
 
   return result;
+}
+
+// ── Lenient batch submission ──────────────────────────────────────────────────
+
+/**
+ * Submit a built batch with lenient execution: all transactions are submitted
+ * independently, without skipping on failure. Returns a detailed
+ * {@link BatchExecutionReport} mapping outcomes back to operation indices.
+ *
+ * Unlike {@link submitBatch}, does not enforce strict sequence ordering or
+ * stop on first failure. Useful for payroll runs and other scenarios where
+ * partial success is acceptable and you want to know which operations succeeded.
+ *
+ * @param transactions  The array returned by {@link buildBatchTransactions} or
+ *                      {@link buildBatchTransactionsSync}.
+ * @param rpcUrl        Soroban RPC endpoint used to submit and poll.
+ * @param options       Optional signer, polling tuning, and abort signal.
+ */
+export async function submitBatchLenient(
+  transactions: BuiltBatchTransaction[],
+  rpcUrl: string,
+  options: BatchSubmitOptions = {},
+): Promise<BatchExecutionReport> {
+  if (!rpcUrl || typeof rpcUrl !== 'string') {
+    throw new BatchBuildError('submitBatchLenient requires a valid rpcUrl');
+  }
+  if (!Array.isArray(transactions)) {
+    throw new BatchBuildError('submitBatchLenient requires an array of BuiltBatchTransaction');
+  }
+
+  const pollIntervalMs  = options.pollIntervalMs  ?? DEFAULT_SUBMIT_POLL_INTERVAL_MS;
+  const maxPollAttempts = options.maxPollAttempts ?? DEFAULT_SUBMIT_MAX_POLL_ATTEMPTS;
+  const server = createRpcServer(rpcUrl);
+
+  const outcomes: LenientBatchOutcome[] = [];
+
+  function pushOutcome(outcome: LenientBatchOutcome) {
+    outcomes.push(outcome);
+    if (options.onProgress) {
+      try {
+        options.onProgress({ index: outcome.index, method: outcome.method, status: outcome.status });
+      } catch (handlerErr) {
+        console.warn('[submitBatchLenient] onProgress handler error:', handlerErr);
+      }
+    }
+  }
+
+  // Submit all transactions in parallel, then poll in parallel. No sequence
+  // dependency or early-exit logic — all txs get submitted regardless of
+  // others' outcomes.
+  const submissionPromises = transactions.map(async (built) => {
+    if (options.signal?.aborted) {
+      return {
+        index: built.index,
+        method: built.method,
+        status: 'SKIPPED' as BatchTxStatus,
+        error: 'Aborted',
+      };
+    }
+
+    if (options.dryRun) {
+      return {
+        index: built.index,
+        method: built.method,
+        status: 'SUCCESS' as BatchTxStatus,
+        txHash: `dry-run:${built.index}`,
+        dryRun: true,
+      };
+    }
+
+    let xdrToSubmit = built.xdr;
+    if (options.sign) {
+      try {
+        xdrToSubmit = await options.sign(built.xdr);
+      } catch (err) {
+        const msg = err instanceof Error ? err.message : String(err);
+        return {
+          index: built.index,
+          method: built.method,
+          status: 'ERROR' as BatchTxStatus,
+          error: `Sign failed: ${msg}`,
+        };
+      }
+    }
+
+    let sent: SorobanRpc.Api.SendTransactionResponse;
+    try {
+      const tx = new Transaction(xdrToSubmit, options.networkPassphrase ?? '');
+      sent = await server.sendTransaction(tx);
+    } catch (err) {
+      const msg = err instanceof Error ? err.message : String(err);
+      return {
+        index: built.index,
+        method: built.method,
+        status: 'ERROR' as BatchTxStatus,
+        error: `Submit failed: ${msg}`,
+      };
+    }
+
+    if (sent.status === 'ERROR') {
+      const msg = sent.errorResult ? JSON.stringify(sent.errorResult) : 'Transaction rejected by network';
+      return {
+        index: built.index,
+        method: built.method,
+        status: 'FAILED' as BatchTxStatus,
+        error: msg,
+      };
+    }
+
+    return { index: built.index, method: built.method, hash: sent.hash };
+  });
+
+  const submissions = await Promise.all(submissionPromises);
+
+  // Poll all hashes in parallel. Collect outcomes as they complete.
+  const pollPromises = submissions
+    .filter((result): result is { index: number; method: string; hash: string } => 'hash' in result)
+    .map(async ({ index, method, hash }) => {
+      for (let attempt = 0; attempt < maxPollAttempts; attempt++) {
+        await new Promise<void>(resolve => setTimeout(resolve, pollIntervalMs));
+
+        if (options.signal?.aborted) {
+          return {
+            index,
+            method,
+            status: 'ERROR' as BatchTxStatus,
+            error: 'Aborted during polling',
+          };
+        }
+
+        let status: SorobanRpc.Api.GetTransactionResponse;
+        try {
+          status = await server.getTransaction(hash);
+        } catch (err) {
+          const msg = err instanceof Error ? err.message : String(err);
+          return {
+            index,
+            method,
+            status: 'ERROR' as BatchTxStatus,
+            error: `Poll failed: ${msg}`,
+          };
+        }
+
+        if (status.status === SorobanRpc.Api.GetTransactionStatus.SUCCESS) {
+          return { index, method, status: 'SUCCESS' as BatchTxStatus, txHash: hash };
+        }
+
+        if (status.status === SorobanRpc.Api.GetTransactionStatus.FAILED) {
+          return {
+            index,
+            method,
+            status: 'FAILED' as BatchTxStatus,
+            error: `Transaction failed on-chain: ${hash}`,
+          };
+        }
+      }
+
+      return {
+        index,
+        method,
+        status: 'ERROR' as BatchTxStatus,
+        error: `Transaction timed out after ${maxPollAttempts} poll attempts: ${hash}`,
+      };
+    });
+
+  const pollResults = await Promise.all(pollPromises);
+
+  // Merge submission outcomes and poll outcomes.
+  for (const result of submissions) {
+    if ('hash' in result) {
+      // This was a successful submission; look for its poll result.
+      const pollOutcome = pollResults.find(pr => pr.index === result.index);
+      if (pollOutcome) {
+        pushOutcome(pollOutcome as LenientBatchOutcome);
+      }
+    } else {
+      pushOutcome(result as LenientBatchOutcome);
+    }
+  }
+
+  const successCount = outcomes.filter(o => o.status === 'SUCCESS').length;
+  const failureCount = outcomes.length - successCount;
+  const failedIndices = outcomes
+    .filter(o => o.status === 'FAILED' || o.status === 'ERROR')
+    .map(o => o.index);
+
+  return {
+    allSucceeded: failureCount === 0,
+    outcomes,
+    successCount,
+    failureCount,
+    failedIndices,
+  };
+}
+
+/**
+ * Chunked batch transaction processing with progress reporting.
+ *
+ * Large payroll batches are split into smaller transaction chunks so that a
+ * UI can render progress bars / stage indicators while the batch is being
+ * submitted. Each chunk is processed in order and an `onProgress` callback
+ * is invoked once the chunk completes.
+ */
+
+export interface BatchProgress {
+  /** Zero-based index of the chunk that was just completed. */
+  chunkIndex: number;
+  /** Total number of chunks the batch was split into. */
+  totalChunks: number;
+  /** Cumulative number of items processed (including failures). */
+  completedItems: number;
+  /** Total number of items in the batch. */
+  totalItems: number;
+  /** Number of items that belonged to the just-completed chunk. */
+  itemsInChunk: number;
+  /** Completion percentage in the range 0-100. */
+  percent: number;
+}
+
+export interface BatchItemError {
+  /** Index of the item in the original input array. */
+  index: number;
+  /** The error thrown while processing that item. */
+  error: unknown;
+}
+
+export interface BatchTxResult<R> {
+  /** Successful handler results, in input order. */
+  results: R[];
+  /** Per-item failures; their presence does not abort the batch. */
+  errors: BatchItemError[];
+  completedItems: number;
+  failedItems: number;
+  totalItems: number;
+  chunksProcessed: number;
+  aborted: boolean;
+}
+
+export interface BatchTxOptions {
+  /** Maximum number of items per transaction chunk. Default: 50. */
+  chunkSize?: number;
+  /** Invoked once after every completed chunk. */
+  onProgress?: (progress: BatchProgress) => void;
+  /** Allows a caller to stop processing between chunks. */
+  signal?: AbortSignal;
+}
+
+export const DEFAULT_CHUNK_SIZE = 50;
+
+/** Split an array into consecutive chunks of at most `chunkSize` items. */
+export function chunkItems<T>(items: readonly T[], chunkSize: number = DEFAULT_CHUNK_SIZE): T[][] {
+  if (!Number.isInteger(chunkSize) || chunkSize <= 0) {
+    throw new RangeError('chunkSize must be a positive integer');
+  }
+
+  const chunks: T[][] = [];
+  for (let i = 0; i < items.length; i += chunkSize) {
+    chunks.push(items.slice(i, i + chunkSize));
+  }
+  return chunks;
+}
+
+/**
+ * Process a batch in chunks, reporting progress after each chunk.
+ *
+ * The handler runs sequentially so progress reflects work that has actually
+ * completed. A failing item is recorded in `errors` and processing continues
+ * with the next item, ensuring one bad transaction cannot stall a payroll
+ * run. If the abort signal fires, processing stops at the next safe boundary
+ * and the partial result is returned with `aborted: true`.
+ */
+export async function processBatch<T, R>(
+  items: readonly T[],
+  handler: (item: T, index: number) => R | Promise<R>,
+  options: BatchTxOptions = {},
+): Promise<BatchTxResult<R>> {
+  const chunkSize = options.chunkSize ?? DEFAULT_CHUNK_SIZE;
+  if (!Number.isInteger(chunkSize) || chunkSize <= 0) {
+    throw new RangeError('chunkSize must be a positive integer');
+  }
+
+  const onProgress = options.onProgress;
+  const signal = options.signal;
+  const chunks = chunkItems(items, chunkSize);
+  const results: R[] = [];
+  const errors: BatchItemError[] = [];
+  let completedItems = 0;
+  let chunksProcessed = 0;
+
+  for (let chunkIndex = 0; chunkIndex < chunks.length; chunkIndex++) {
+    if (signal?.aborted) break;
+
+    const chunk = chunks[chunkIndex]!;
+    const startIndex = chunkIndex * chunkSize;
+
+    for (let i = 0; i < chunk.length; i++) {
+      if (signal?.aborted) break;
+
+      const index = startIndex + i;
+      try {
+        results.push(await handler(chunk[i]!, index));
+      } catch (error) {
+        errors.push({ index, error });
+      }
+      completedItems++;
+    }
+
+    chunksProcessed++;
+    if (onProgress) {
+      onProgress({
+        chunkIndex,
+        totalChunks: chunks.length,
+        completedItems,
+        totalItems: items.length,
+        itemsInChunk: chunk.length,
+        percent: items.length === 0 ? 100 : Math.round((completedItems / items.length) * 100),
+      });
+    }
+  }
+
+  return {
+    results,
+    errors,
+    completedItems,
+    failedItems: errors.length,
+    totalItems: items.length,
+    chunksProcessed,
+    aborted: signal?.aborted === true,
+  };
+}
+
+/** Reusable batch processor that holds default options (e.g. a shared onProgress callback). */
+export class BatchTx {
+  private readonly defaults: BatchTxOptions;
+
+  constructor(defaults: BatchTxOptions = {}) {
+    this.defaults = defaults;
+  }
+
+  run<T, R>(
+    items: readonly T[],
+    handler: (item: T, index: number) => R | Promise<R>,
+    overrides: BatchTxOptions = {},
+  ): Promise<BatchTxResult<R>> {
+    const chunkSize = overrides.chunkSize ?? this.defaults.chunkSize;
+    const onProgress = overrides.onProgress ?? this.defaults.onProgress;
+    const signal = overrides.signal ?? this.defaults.signal;
+
+    const options: BatchTxOptions = {};
+    if (chunkSize !== undefined) options.chunkSize = chunkSize;
+    if (onProgress !== undefined) options.onProgress = onProgress;
+    if (signal !== undefined) options.signal = signal;
+
+    return processBatch(items, handler, options);
+  }
 }

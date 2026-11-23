@@ -1,4 +1,4 @@
-import { SorobanRpc, xdr } from '@stellar/stellar-sdk';
+import { xdr } from '@stellar/stellar-sdk';
 
 /**
  * Each of the three Conduit contracts defines its own `Error` enum in Rust —
@@ -17,6 +17,21 @@ export type ConduitContract = 'stream' | 'factory' | 'governor';
  * of hardcoding `-1` in consumer code.
  */
 export const UNKNOWN_CONTRACT_ERROR_CODE = -1;
+
+/**
+ * Common base for every error class this SDK throws (#1101).
+ *
+ * `isRecoverable` tells a UI whether to offer a "Retry" button (transient
+ * network, timeout, rate-limit and open-circuit failures) or to ask the user to
+ * change their inputs or permissions (contract rejections, validation, auth,
+ * user cancellation). It is derived from {@link isRecoverableError}, so the
+ * property and the standalone function can never disagree.
+ */
+export class StreamFiError extends Error {
+  get isRecoverable(): boolean {
+    return isRecoverableError(this);
+  }
+}
 
 // ── DripStream errors (contracts/stream/src/errors.rs) ────────────────────────
 
@@ -104,6 +119,83 @@ const MESSAGES_BY_CONTRACT: Record<ConduitContract, Record<number, string>> = {
   governor: GOVERNOR_MESSAGES,
 };
 
+// ── Recovery hints ────────────────────────────────────────────────────────────
+//
+// A contract panic surfaces as `HostError(Error(Contract, #14))` — a bare
+// numeric code with no indication of what to actually do about it. These
+// hints are suggested next steps a caller (or a UI) can show alongside the
+// descriptive message above, so "AlreadyInitialized" becomes "this is a
+// one-time setup call" instead of a dead end.
+
+const STREAM_RECOVERY_HINTS: Record<StreamErrorCode, string> = {
+  [StreamErrorCode.NotAuthorized]:        'Verify the calling account matches the stream’s sender or recipient; sign with the correct keypair, wallet, or signer for this operation.',
+  [StreamErrorCode.StreamNotFound]:       'Confirm the stream ID exists and was created on the network you’re currently connected to (mainnet vs. testnet IDs do not overlap).',
+  [StreamErrorCode.StreamCancelled]:      'This stream was already cancelled — no further withdrawals, pauses, or resumes are possible. Create a new stream instead.',
+  [StreamErrorCode.StreamNotStarted]:     'Wait until the stream’s startTime is reached before withdrawing or otherwise interacting with it.',
+  [StreamErrorCode.StreamEnded]:          'The stream has passed its endTime. Withdraw any remaining balance; no further streaming will occur.',
+  [StreamErrorCode.NothingToWithdraw]:    'Call withdrawable() first — the balance may already be fully withdrawn, or the stream may not have accrued anything yet.',
+  [StreamErrorCode.InsufficientDeposit]:  'Increase depositAmount or shorten durationSeconds so the resulting rate covers at least one second of streaming.',
+  [StreamErrorCode.InvalidTimeRange]:     'Ensure endTime (or stopTime) is strictly greater than startTime.',
+  [StreamErrorCode.AlreadyPaused]:        'The stream is already paused — call resume() before pausing it again.',
+  [StreamErrorCode.NotPaused]:            'The stream is not currently paused — pause() must be called before resume().',
+  [StreamErrorCode.ClawbackDisabled]:     'This stream was created with clawbackEnabled: false. Clawback is only available on streams created with that flag set.',
+  [StreamErrorCode.ArithmeticOverflow]:   'Reduce the amount, rate, or duration involved — the computation overflowed the contract’s 128-bit integer range.',
+  [StreamErrorCode.PauseThresholdNotMet]: 'force_cancel requires the stream to have been paused for at least 30 days. Wait for the threshold to elapse, or use cancel() instead if you’re authorized to.',
+  [StreamErrorCode.AlreadyInitialized]:   'This stream contract has already been initialized — initialize() is a one-time setup call per deployment.',
+  [StreamErrorCode.InvalidAmount]:        'Provide an amount greater than zero.',
+};
+
+const FACTORY_RECOVERY_HINTS: Record<FactoryErrorCode, string> = {
+  [FactoryErrorCode.NotInitialized]:      'The factory has not been initialized yet — this is normally done once during protocol deployment/governance setup.',
+  [FactoryErrorCode.InvalidDeposit]:      'depositAmount must be greater than zero.',
+  [FactoryErrorCode.InvalidRate]:         'The computed ratePerSecond must be greater than zero — check your depositAmount/durationSeconds math.',
+  [FactoryErrorCode.InvalidTimeRange]:    'Ensure endTime is strictly greater than startTime.',
+  [FactoryErrorCode.InsufficientDeposit]: 'Increase the deposit so it covers at least one second of streaming at the given rate across the full declared duration.',
+  [FactoryErrorCode.BackdatedStream]:     'startTime must be now or in the future — check for clock skew or a stale timestamp before building the transaction.',
+  [FactoryErrorCode.AlreadyInitialized]:  'The factory has already been initialized — this is a one-time setup call.',
+  [FactoryErrorCode.RateExceedsMax]:      'Lower ratePerSecond below the governor’s configured max_rate_per_second, or ask governance to raise the limit.',
+  [FactoryErrorCode.DurationTooShort]:    'Increase durationSeconds to at least the governor’s configured min_duration_seconds.',
+  [FactoryErrorCode.ArithmeticOverflow]:  'Reduce the deposit or duration involved — the validation computation overflowed.',
+};
+
+const GOVERNOR_RECOVERY_HINTS: Record<GovernorErrorCode, string> = {
+  [GovernorErrorCode.NotAuthorized]:      'Only the current governor authority can perform this action — verify you’re signing with the configured governor address.',
+  [GovernorErrorCode.InvalidParam]:       'Check fee_bps (must be ≤ 10,000) and any duration/rate parameters passed to setConfig — one of them failed validation.',
+  [GovernorErrorCode.AlreadyInitialized]: 'The governor has already been initialized — this is a one-time setup call.',
+};
+
+const RECOVERY_HINTS_BY_CONTRACT: Record<ConduitContract, Record<number, string>> = {
+  stream:   STREAM_RECOVERY_HINTS,
+  factory:  FACTORY_RECOVERY_HINTS,
+  governor: GOVERNOR_RECOVERY_HINTS,
+};
+
+/** Fallback hint for a code with no dedicated entry (e.g. {@link UNKNOWN_CONTRACT_ERROR_CODE}). */
+const DEFAULT_RECOVERY_HINT = 'No troubleshooting hint is available for this error code. Check the contract’s errors.rs and the Conduit protocol docs for its meaning.';
+
+/**
+ * Returns a human-readable, actionable troubleshooting hint for a
+ * contract-scoped error code — the suggested next step a caller (or a UI)
+ * can show alongside {@link ConduitError.message}. Falls back to
+ * {@link DEFAULT_RECOVERY_HINT} for codes the SDK's catalogue doesn't
+ * recognise for `contract` (including {@link UNKNOWN_CONTRACT_ERROR_CODE}).
+ *
+ * @example
+ * ```ts
+ * try {
+ *   await client.streams.forceCancel(streamId);
+ * } catch (err) {
+ *   if (err instanceof ConduitError) {
+ *     console.error(err.message);       // "force_cancel called before the 30-day pause threshold elapsed."
+ *     console.error(err.recoveryHint);  // "force_cancel requires the stream to have been paused for ..."
+ *   }
+ * }
+ * ```
+ */
+export function getRecoveryHint(contract: ConduitContract, code: number): string {
+  return RECOVERY_HINTS_BY_CONTRACT[contract][code] ?? DEFAULT_RECOVERY_HINT;
+}
+
 // ── Network / chain validation ─────────────────────────────────────────────────
 
 /**
@@ -143,7 +235,7 @@ export const CAIP2_TO_NETWORK: Readonly<Record<string, string>> = {
  * }
  * ```
  */
-export class UnsupportedChainError extends Error {
+export class UnsupportedChainError extends StreamFiError {
   /** The network value the caller passed in. */
   readonly providedNetwork: string;
   /** The full list of accepted network identifiers at the time of the throw. */
@@ -172,16 +264,23 @@ export class UnsupportedChainError extends Error {
  * Use {@link isConduitError} when you need a type guard instead of an
  * `instanceof` check (e.g. across bundle boundaries or when the error may
  * have been serialized).
+ *
+ * `recoveryHint` carries a suggested next step for the specific `code` (see
+ * {@link getRecoveryHint}) — useful for surfacing actionable guidance instead
+ * of a bare `HostError(Error(Contract, #14))`-style message in a UI or log.
  */
-export class ConduitError extends Error {
+export class ConduitError extends StreamFiError {
   readonly contract: ConduitContract;
   readonly code: number;
+  /** Suggested troubleshooting step for this error's `contract` + `code`. See {@link getRecoveryHint}. */
+  readonly recoveryHint: string;
 
   constructor(contract: ConduitContract, code: number, detail?: string) {
     super(detail ?? MESSAGES_BY_CONTRACT[contract][code] ?? `ConduitError(${contract}, #${code})`);
     this.name = 'ConduitError';
     this.contract = contract;
     this.code = code;
+    this.recoveryHint = getRecoveryHint(contract, code);
   }
 
   /**
@@ -193,7 +292,13 @@ export class ConduitError extends Error {
     return this.code in MESSAGES_BY_CONTRACT[this.contract];
   }
 
-  /** Builds a ConduitError from a raw `{ code: number }`-shaped contract error object. */
+  /**
+   * Builds a ConduitError from a raw `{ code: number }`-shaped contract error object.
+   *
+   * Error numbers are contract-scoped: the same numeric code can mean different
+   * things on the stream, factory, and governor contracts. Always pass the
+   * contract that produced the error; see the warning at the top of this file.
+   */
   static fromContractError(contract: ConduitContract, raw: unknown): ConduitError {
     if (raw && typeof raw === 'object' && 'code' in raw) {
       const code = Number((raw as { code: unknown }).code);
@@ -213,6 +318,10 @@ export class ConduitError extends Error {
    * `contract`. Returns a plain Error (not a ConduitError) if no contract
    * error code can be extracted — network failures, timeouts, and non-contract
    * host traps don't carry one.
+   *
+   * Error numbers are contract-scoped, so passing the wrong contract can map a
+   * valid code to the wrong meaning. See the collision warning at the top of
+   * this file.
    */
   static fromSorobanMessage(contract: ConduitContract, message: string): Error {
     // Check for WasmVm / InvalidAction which signals an insufficient balance
@@ -585,7 +694,7 @@ export function translateStreamError(err: unknown, operation: string, caller: st
  * }
  * ```
  */
-export class StreamFiNetworkError extends Error {
+export class StreamFiNetworkError extends StreamFiError {
   /** The underlying error that caused the network failure. */
   readonly cause: unknown;
 
@@ -616,7 +725,7 @@ export class StreamFiNetworkError extends Error {
  * }
  * ```
  */
-export class InsufficientBalanceError extends Error {
+export class InsufficientBalanceError extends StreamFiError {
   /** The account's current XLM balance in stroops. */
   readonly currentBalance: bigint;
   /** The minimum XLM balance required in stroops. */
@@ -660,7 +769,7 @@ function fromStroopsInternal(stroops: bigint, decimals: number): string {
  * failure mode and is reported as {@link RpcServiceUnavailableError} so
  * consumers can distinguish "throttled" from "endpoint down".
  */
-export class RateLimitError extends Error {
+export class RateLimitError extends StreamFiError {
   /** Milliseconds to wait before retrying, parsed from a Retry-After header if present. */
   readonly retryAfterMs: number | undefined;
 
@@ -710,6 +819,7 @@ export class RateLimitError extends Error {
    * error, so callers can fall back to their existing error handling.
    */
   static fromRpcError(raw: unknown): RateLimitError | RpcServiceUnavailableError | null {
+    if (raw instanceof RateLimitError) return raw;
     if (!raw || typeof raw !== 'object') return null;
 
     const response = (raw as { response?: { status?: number; headers?: Record<string, unknown> } }).response;
@@ -753,7 +863,7 @@ export class RateLimitError extends Error {
  * therefore never loop forever against a genuinely unavailable service.
  * See #456.
  */
-export class RpcServiceUnavailableError extends Error {
+export class RpcServiceUnavailableError extends StreamFiError {
   /** Milliseconds to wait before retrying, parsed from a Retry-After header if present. */
   readonly retryAfterMs: number | undefined;
 
@@ -761,6 +871,36 @@ export class RpcServiceUnavailableError extends Error {
     super(message);
     this.name = 'RpcServiceUnavailableError';
     this.retryAfterMs = retryAfterMs;
+    Object.setPrototypeOf(this, new.target.prototype);
+  }
+}
+
+// ── Circuit open ───────────────────────────────────────────────────────────────
+
+/**
+ * Thrown by {@link withRetry} when a `circuitScope` is provided and
+ * `rpc-circuit-state.ts` already reports that scope's circuit as `'open'`
+ * (repeated recent failures). Rather than dutifully retrying with
+ * exponential backoff against an endpoint the SDK itself has already
+ * determined is down, `withRetry` fails fast with this error instead of
+ * entering the retry loop. See #787.
+ */
+export class CircuitOpenError extends StreamFiError {
+  /** The circuit scope (typically an RPC URL) that is currently open. */
+  readonly scope: string;
+  /** Epoch ms when the circuit will move to 'half-open' and allow a probe request. */
+  readonly cooldownUntil: number | null;
+
+  constructor(scope: string, cooldownUntil: number | null) {
+    const waitMs = cooldownUntil !== null ? Math.max(0, cooldownUntil - Date.now()) : undefined;
+    super(
+      `Circuit for '${scope}' is open` +
+        (waitMs !== undefined ? ` — retrying in ${waitMs}ms` : '') +
+        '. Failing fast instead of retrying.',
+    );
+    this.name = 'CircuitOpenError';
+    this.scope = scope;
+    this.cooldownUntil = cooldownUntil;
     Object.setPrototypeOf(this, new.target.prototype);
   }
 }
@@ -783,7 +923,7 @@ export class RpcServiceUnavailableError extends Error {
  * }
  * ```
  */
-export class IndexerTimeoutError extends Error {
+export class IndexerTimeoutError extends StreamFiError {
   /** The indexer endpoint that timed out. */
   readonly endpoint: string;
   /** The timeout window in milliseconds that was exceeded. */
@@ -821,7 +961,7 @@ export class IndexerTimeoutError extends Error {
  }
  ```
  */
-export class OperationAbortedError extends Error {
+export class OperationAbortedError extends StreamFiError {
   /** Human-readable name of the operation that was aborted (e.g. "submitBatch"). */
   readonly operation: string;
 
@@ -843,7 +983,7 @@ export class OperationAbortedError extends Error {
  * This allows callers to distinguish a confirmed transaction from an unconfirmed
  * or timed-out submission, while preserving access to the submitted transaction `hash`.
  */
-export class ConfirmationTimeoutError extends Error {
+export class ConfirmationTimeoutError extends StreamFiError {
   /** The transaction hash that was submitted to the network. */
   readonly hash: string;
   /** The number of poll attempts performed before timing out. */
@@ -862,6 +1002,288 @@ export class ConfirmationTimeoutError extends Error {
     this.timeoutMs = timeoutMs;
     Object.setPrototypeOf(this, new.target.prototype);
   }
+}
+
+// ── Signature timeout ─────────────────────────────────────────────────────────
+
+/**
+ * Thrown when a wallet or signer does not produce a signature within the
+ * configured `signatureTimeoutMs` — e.g. the user opened a wallet popup and
+ * forgot about it or closed it without rejecting.
+ */
+export class SignatureTimeoutError extends StreamFiError {
+  /** The timeout window in milliseconds that was exceeded. */
+  readonly timeoutMs: number;
+
+  constructor(timeoutMs: number) {
+    super(`Signature request timed out after ${timeoutMs}ms without a response from the wallet or signer.`);
+    this.name = 'SignatureTimeoutError';
+    this.timeoutMs = timeoutMs;
+    Object.setPrototypeOf(this, new.target.prototype);
+  }
+}
+
+// ── Wallet adapter errors ─────────────────────────────────────────────────────
+
+/**
+ * Thrown when the user dismisses a wallet prompt (closes the popup or rejects
+ * the request) rather than the wallet failing. Apps can catch this to skip
+ * showing an error alert for a deliberate cancellation.
+ */
+export class UserCancelledError extends StreamFiError {
+  /** The wallet that reported the cancellation, e.g. `'albedo'`. */
+  readonly wallet: string;
+
+  constructor(wallet: string, message = `The ${wallet} request was cancelled by the user.`) {
+    super(message);
+    this.name = 'UserCancelledError';
+    this.wallet = wallet;
+    Object.setPrototypeOf(this, new.target.prototype);
+  }
+}
+
+/** {@link UserCancelledError} raised by the Albedo adapter when its popup is closed. */
+export class AlbedoCancelError extends UserCancelledError {
+  constructor(message?: string) {
+    super('albedo', message);
+    this.name = 'AlbedoCancelError';
+    Object.setPrototypeOf(this, new.target.prototype);
+  }
+}
+
+/**
+ * Thrown when the wallet's active network does not match the network the
+ * client is configured for (e.g. Freighter on Testnet, client on Mainnet).
+ */
+export class NetworkMismatchError extends StreamFiError {
+  readonly expectedPassphrase: string;
+  readonly walletPassphrase: string;
+
+  constructor(expectedPassphrase: string, walletPassphrase: string) {
+    super(
+      `Wallet network mismatch: the client expects "${expectedPassphrase}" ` +
+        `but the wallet is connected to "${walletPassphrase}". Switch networks in the wallet and retry.`,
+    );
+    this.name = 'NetworkMismatchError';
+    this.expectedPassphrase = expectedPassphrase;
+    this.walletPassphrase = walletPassphrase;
+    Object.setPrototypeOf(this, new.target.prototype);
+  }
+}
+
+/**
+ * Thrown when a browser-extension wallet adapter's `signTransaction` call
+ * does not resolve within its configured timeout — e.g. the user left the
+ * Freighter popup open without approving or closing it, which would
+ * otherwise hang the caller's promise indefinitely (#970).
+ */
+export class WalletTimeoutError extends StreamFiError {
+  /** The wallet that failed to respond in time, e.g. `'freighter'`. */
+  readonly wallet: string;
+  /** The timeout window in milliseconds that was exceeded. */
+  readonly timeoutMs: number;
+
+  constructor(wallet: string, timeoutMs: number) {
+    super(
+      `${wallet} signTransaction timed out after ${timeoutMs}ms without a response. ` +
+        'The wallet popup may have been left open — close it and retry.',
+    );
+    this.name = 'WalletTimeoutError';
+    this.wallet = wallet;
+    this.timeoutMs = timeoutMs;
+    Object.setPrototypeOf(this, new.target.prototype);
+  }
+}
+
+/**
+ * Thrown when the Albedo iframe returns a signed transaction whose
+ * decorated signature is not a well-formed 64-byte Ed25519 signature.
+ * Catches a malformed signature before it is submitted on-chain, where it
+ * would otherwise fail with a less specific `bad_auth` error (#971).
+ */
+export class AlbedoInvalidSignatureError extends StreamFiError {
+  /** The actual signature length Albedo returned, in bytes. */
+  readonly actualLength: number;
+
+  constructor(actualLength: number) {
+    super(
+      `Albedo returned a malformed signature: expected 64 bytes (Ed25519), got ${actualLength}. ` +
+        'The transaction was not returned to the caller.',
+    );
+    this.name = 'AlbedoInvalidSignatureError';
+    this.actualLength = actualLength;
+    Object.setPrototypeOf(this, new.target.prototype);
+  }
+}
+
+// ── Horizon transaction submission errors (#975) ──────────────────────────────
+
+/**
+ * The `extras.result_codes` block Horizon attaches to a failed
+ * `/transactions` submission: the transaction-level result code, plus one
+ * result code per operation in the envelope (same index as the operation).
+ *
+ * See https://developers.stellar.org/docs/data/horizon/api-reference/errors/result-codes.
+ */
+export interface HorizonResultCodes {
+  /** The transaction-level result code, e.g. `'tx_bad_auth'`, `'tx_failed'`. */
+  transaction?: string;
+  /** Per-operation result codes, e.g. `'op_underfunded'`. Only present when `transaction === 'tx_failed'`. */
+  operations?: string[];
+}
+
+/** Transaction/operation result codes that indicate a missing or invalid signature. */
+const HORIZON_BAD_AUTH_CODES = new Set(['tx_bad_auth', 'tx_bad_auth_extra', 'op_bad_auth']);
+/** Transaction/operation result codes that indicate the source account can't cover the operation. */
+const HORIZON_UNDERFUNDED_CODES = new Set(['tx_insufficient_balance', 'op_underfunded', 'op_low_reserve']);
+
+/**
+ * Thrown by {@link mapHorizonError} when Horizon rejects a transaction for
+ * `tx_bad_auth`, `tx_bad_auth_extra`, or `op_bad_auth` — the submitted
+ * envelope is missing a required signature, carries an unexpected one, or a
+ * signature does not verify against the signer's key.
+ *
+ * @example
+ * ```ts
+ * try {
+ *   await horizonServer.submitTransaction(signedTx);
+ * } catch (err) {
+ *   const mapped = mapHorizonError(err);
+ *   if (mapped instanceof BadAuthError) {
+ *     console.error('Missing or invalid signature(s):', mapped.resultCodes);
+ *   }
+ * }
+ * ```
+ */
+export class BadAuthError extends StreamFiError {
+  /** The raw Horizon result codes this error was mapped from. */
+  readonly resultCodes: HorizonResultCodes;
+
+  constructor(resultCodes: HorizonResultCodes, detail?: string) {
+    super(detail ?? 'Transaction rejected: missing or invalid signature(s).');
+    this.name = 'BadAuthError';
+    this.resultCodes = resultCodes;
+    Object.setPrototypeOf(this, new.target.prototype);
+  }
+}
+
+/**
+ * Thrown by {@link mapHorizonError} for a Horizon result code that isn't one
+ * of the dedicated typed errors ({@link BadAuthError},
+ * {@link InsufficientBalanceError}) — e.g. `tx_bad_seq`, `op_no_trust`,
+ * `op_no_destination`. Carries the raw result codes and response body so
+ * callers can still branch on the specific code.
+ *
+ * @example
+ * ```ts
+ * const mapped = mapHorizonError(err);
+ * if (mapped instanceof HorizonTransactionError) {
+ *   console.error(mapped.resultCodes.transaction, mapped.resultCodes.operations);
+ * }
+ * ```
+ */
+export class HorizonTransactionError extends StreamFiError {
+  /** The raw Horizon result codes this error was mapped from. */
+  readonly resultCodes: HorizonResultCodes;
+  /** The raw Horizon error response `mapHorizonError` was given. */
+  readonly raw: unknown;
+
+  constructor(resultCodes: HorizonResultCodes, detail?: string, raw?: unknown) {
+    super(
+      detail ??
+        (resultCodes.transaction
+          ? `Horizon rejected the transaction: ${resultCodes.transaction}` +
+            (resultCodes.operations?.length ? ` (${resultCodes.operations.join(', ')})` : '')
+          : 'Horizon rejected the transaction.'),
+    );
+    this.name = 'HorizonTransactionError';
+    this.resultCodes = resultCodes;
+    this.raw = raw;
+    Object.setPrototypeOf(this, new.target.prototype);
+  }
+}
+
+/**
+ * Extracts `extras.result_codes` from a raw Horizon error response. Accepts
+ * the plain Horizon JSON body (`{ extras: { result_codes } }`), an
+ * axios-style wrapper (`{ response: { data: { extras } } }`), or a fetch-style
+ * wrapper (`{ data: { extras } }`). Returns `null` when no result codes can
+ * be found.
+ *
+ * @internal
+ */
+function extractHorizonResultCodes(json: unknown): HorizonResultCodes | null {
+  if (!json || typeof json !== 'object') return null;
+
+  const obj = json as Record<string, unknown>;
+  const response = obj.response as { data?: unknown } | undefined;
+  const data = obj.data as Record<string, unknown> | undefined;
+  const body = (obj.extras ? obj : response?.data ?? data ?? obj) as Record<string, unknown>;
+
+  const extras = body.extras as Record<string, unknown> | undefined;
+  const resultCodes = extras?.result_codes as Record<string, unknown> | undefined;
+  if (!resultCodes) return null;
+
+  const transaction = typeof resultCodes.transaction === 'string' ? resultCodes.transaction : undefined;
+  const operations = Array.isArray(resultCodes.operations)
+    ? resultCodes.operations.filter((code): code is string => typeof code === 'string')
+    : undefined;
+
+  if (!transaction && !operations?.length) return null;
+  const result: HorizonResultCodes = {};
+  if (transaction !== undefined) result.transaction = transaction;
+  if (operations !== undefined) result.operations = operations;
+  return result;
+}
+
+/**
+ * Converts a raw Horizon transaction-submission error (as thrown by
+ * `Server.submitTransaction()` / `POST /transactions`) into a typed SDK
+ * error, instead of leaving callers to parse `extras.result_codes` JSON by
+ * hand.
+ *
+ * - `tx_bad_auth` / `tx_bad_auth_extra` / `op_bad_auth` → {@link BadAuthError}
+ * - `tx_insufficient_balance` / `op_underfunded` / `op_low_reserve` →
+ *   {@link InsufficientBalanceError} (balances are unknown from the Horizon
+ *   response alone, so both are reported as `0n`; see `currentBalance`/
+ *   `requiredBalance` in that class's docs)
+ * - any other recognised `result_codes` → {@link HorizonTransactionError}
+ * - anything without `extras.result_codes` (network failures, timeouts) is
+ *   returned unchanged (wrapped in `Error` if it isn't one already), so this
+ *   is safe to call in a catch block
+ *
+ * @example
+ * ```ts
+ * try {
+ *   await horizonServer.submitTransaction(signedTx);
+ * } catch (err) {
+ *   throw mapHorizonError(err);
+ * }
+ * ```
+ */
+export function mapHorizonError(json: unknown): Error {
+  const resultCodes = extractHorizonResultCodes(json);
+  if (!resultCodes) {
+    if (json instanceof Error) return json;
+    return new Error(typeof json === 'string' ? json : String(json));
+  }
+
+  const codes = [resultCodes.transaction, ...(resultCodes.operations ?? [])].filter(
+    (code): code is string => typeof code === 'string',
+  );
+
+  if (codes.some((code) => HORIZON_UNDERFUNDED_CODES.has(code))) {
+    return new InsufficientBalanceError(0n, 0n, `Horizon result codes: ${codes.join(', ')}`);
+  }
+  if (codes.some((code) => HORIZON_BAD_AUTH_CODES.has(code))) {
+    return new BadAuthError(resultCodes, `Transaction rejected: missing or invalid signature(s) (${codes.join(', ')}).`);
+  }
+
+  const detail =
+    json && typeof json === 'object' && typeof (json as { detail?: unknown }).detail === 'string'
+      ? (json as { detail: string }).detail
+      : undefined;
+  return new HorizonTransactionError(resultCodes, detail, json);
 }
 
 // ── Type guard ────────────────────────────────────────────────────────────────
@@ -890,7 +1312,15 @@ export class ConfirmationTimeoutError extends Error {
  * - {@link DurationTooShortError}
  * - {@link BackdatedStreamError}
  * - {@link ConfirmationTimeoutError}
+ * - {@link SignatureTimeoutError}
+ * - {@link CircuitOpenError}
  * - {@link ValidationError}
+ * - {@link IndexerMaxPagesExceededError}
+ * - {@link UserCancelledError}
+ * - {@link AlbedoCancelError}
+ * - {@link NetworkMismatchError}
+ * - {@link BadAuthError}
+ * - {@link HorizonTransactionError}
  */
 export function isConduitError(value: unknown): value is Error {
   if (!(value instanceof Error)) return false;
@@ -913,7 +1343,15 @@ export function isConduitError(value: unknown): value is Error {
     'DurationTooShortError',
     'BackdatedStreamError',
     'ConfirmationTimeoutError',
+    'SignatureTimeoutError',
+    'CircuitOpenError',
     'ValidationError',
+    'IndexerMaxPagesExceededError',
+    'UserCancelledError',
+    'AlbedoCancelError',
+    'NetworkMismatchError',
+    'BadAuthError',
+    'HorizonTransactionError',
    ].includes(value.name);
 }
 
@@ -954,7 +1392,7 @@ export interface SorobanDiagnosticInfo {
  * }
  * ```
  */
-export class SorobanRpcError extends Error {
+export class SorobanRpcError extends StreamFiError {
   /** The raw RPC error string. */
   readonly rpcError: string;
   /** Structured diagnostic information extracted from the simulation response. */
@@ -1088,7 +1526,7 @@ export class SorobanRpcError extends Error {
  * }
  * ```
  */
-export class ValidationError extends Error {
+export class ValidationError extends StreamFiError {
   /** The individual validation messages collected by `validate()`. */
   readonly issues: readonly string[];
 
@@ -1101,4 +1539,396 @@ export class ValidationError extends Error {
     this.issues = Object.freeze(issues.slice());
     Object.setPrototypeOf(this, new.target.prototype);
   }
+}
+
+/**
+ * Thrown by `TokenModule.checkTrustline()` when an account is about to
+ * receive or deposit a non-native Stellar asset but has no established
+ * trustline for it.
+ *
+ * This is a pre-flight, client-side guard: it turns an opaque contract revert
+ * into an actionable message that names the account, the asset and the
+ * missing trustline so the UI can prompt the user to add it first.
+ */
+export class MissingTrustlineError extends Error {
+  /** The account that is missing the trustline. */
+  readonly account: string;
+  /** The token identifier that was checked. */
+  readonly token: string;
+  /** Resolved classic asset code, when known. */
+  readonly assetCode?: string | undefined;
+  /** Resolved classic asset issuer, when known. */
+  readonly assetIssuer?: string | undefined;
+
+  constructor(options: {
+    account: string;
+    token: string;
+    assetCode?: string | undefined;
+    assetIssuer?: string | undefined;
+  }) {
+    const asset = options.assetCode
+      ? `${options.assetCode}${options.assetIssuer ? ` (${options.assetIssuer})` : ''}`
+      : options.token;
+    super(
+      `Account ${options.account} has no trustline for ${asset}. ` +
+      'Create the trustline before sending or depositing this asset.',
+    );
+    this.name = 'MissingTrustlineError';
+    this.account = options.account;
+    this.token = options.token;
+    this.assetCode = options.assetCode;
+    this.assetIssuer = options.assetIssuer;
+    Object.setPrototypeOf(this, new.target.prototype);
+  }
+}
+
+/**
+ * Thrown by {@link GraphQLIndexer.fetchAll} when the paginated query
+ * accumulates more pages than the configured maximum
+ * (`DEFAULT_INDEXER_MAX_PAGES`, 1 000 by default), preventing runaway
+ * memory usage or accidental full-table scans.
+ *
+ * Consumers can distinguish this from network failures or timeouts with a
+ * standard `instanceof` check:
+ *
+ * @example
+ * ```ts
+ * try {
+ *   const rows = await indexer.fetchAll({ query, getNextCursor });
+ * } catch (err) {
+ *   if (err instanceof IndexerMaxPagesExceededError) {
+ *     console.error(
+ *       `Query aborted after ${err.attemptedPages} pages ` +
+ *       `(limit is ${err.maxPages}).`,
+ *     );
+ *   }
+ * }
+ * ```
+ *
+ * See #801.
+ */
+export class IndexerMaxPagesExceededError extends StreamFiError {
+  /** The number of pages that had been fetched when the limit was hit. */
+  readonly attemptedPages: number;
+  /** The maximum number of pages that was configured. */
+  readonly maxPages: number;
+
+  constructor(attemptedPages: number, maxPages: number) {
+    super(
+      `GraphQLIndexer.fetchAll exceeded the maximum page limit of ${maxPages} ` +
+      `(fetched ${attemptedPages} pages). ` +
+      `Refine your query filters or increase the limit via fetchAllOptions.maxPages.`,
+    );
+    this.name = 'IndexerMaxPagesExceededError';
+    this.attemptedPages = attemptedPages;
+    this.maxPages = maxPages;
+    Object.setPrototypeOf(this, new.target.prototype);
+  }
+}
+
+// ── Recoverable error classification ─────────────────────────────────────────
+
+const RECOVERABLE_HTTP_STATUSES = new Set([408, 425, 429, 500, 502, 503, 504]);
+const RECOVERABLE_NODE_CODES = new Set([
+  'ECONNRESET', 'ECONNREFUSED', 'ECONNABORTED', 'ETIMEDOUT', 'ENOTFOUND',
+  'EAI_AGAIN', 'EPIPE', 'ENETUNREACH', 'EHOSTUNREACH', 'UND_ERR_CONNECT_TIMEOUT',
+]);
+const RECOVERABLE_ERROR_NAMES = new Set([
+  'RateLimitError', 'RpcServiceUnavailableError', 'StreamFiNetworkError',
+  'IndexerTimeoutError', 'ConfirmationTimeoutError', 'CircuitOpenError', 'TimeoutError',
+]);
+
+function isRecoverableOnce(err: unknown): boolean | undefined {
+  if (err === null || typeof err !== 'object') return undefined;
+  const e = err as {
+    name?: unknown; code?: unknown; status?: unknown;
+    response?: { status?: unknown };
+  };
+
+  if (typeof e.name === 'string' && RECOVERABLE_ERROR_NAMES.has(e.name)) return true;
+  // The caller cancelled; retrying would defy their intent.
+  if (e.name === 'OperationAbortedError' || e.name === 'AbortError') return false;
+  // Typed SDK errors that are not transport-related (contract rejections,
+  // validation, signature timeouts) will fail identically on retry.
+  if (isConduitError(err)) return false;
+
+  const status = typeof e.status === 'number' ? e.status : e.response?.status;
+  if (typeof status === 'number') return RECOVERABLE_HTTP_STATUSES.has(status);
+
+  // JSON-RPC style numeric codes mirror the HTTP status (see RateLimitError).
+  if (typeof e.code === 'number') return RECOVERABLE_HTTP_STATUSES.has(e.code) ? true : undefined;
+  if (typeof e.code === 'string' && RECOVERABLE_NODE_CODES.has(e.code)) return true;
+
+  // `fetch` rejects with a bare TypeError when the network is unreachable.
+  if (err instanceof TypeError && /failed to fetch|network|load failed/i.test(err.message)) return true;
+  return undefined;
+}
+
+/**
+ * Returns `true` when `err` represents a transient failure that is worth
+ * retrying or failing over to another RPC endpoint: rate limits, 408/425/429/5xx
+ * HTTP statuses, socket-level errors (`ECONNRESET`, `ETIMEDOUT`, …), timeouts,
+ * and an open circuit. Contract errors, validation errors, user aborts and
+ * unknown values return `false`. The `cause` chain is followed.
+ */
+export function isRecoverableError(err: unknown): boolean {
+  let current: unknown = err;
+  for (let depth = 0; depth < 5 && current != null; depth++) {
+    const verdict = isRecoverableOnce(current);
+    if (verdict !== undefined) return verdict;
+    current = (current as { cause?: unknown }).cause;
+  }
+  return false;
+}
+
+// ── Contract error parsing ────────────────────────────────────────────────────
+
+/**
+ * A human-readable diagnostic for a contract error code, keyed by the contract
+ * that raised it. Used by {@link parseContractError} to describe codes that
+ * cannot be mapped to a dedicated error class.
+ */
+export interface ContractErrorDiagnostic {
+  /** The contract that raised the error. */
+  contract: ConduitContract;
+  /** The numeric contract error code. */
+  code: number;
+  /** The human-readable message for `code` on `contract`. */
+  message: string;
+}
+
+/**
+ * Extra context used to build the richer typed error classes.
+ *
+ * The dedicated error classes for some stream codes carry details that cannot
+ * be recovered from the numeric code alone (the stream ID, the attempted
+ * operation, the rejected caller). When this context is not supplied,
+ * {@link parseContractError} falls back to a {@link ConduitError} — which
+ * still carries the correct contract-scoped message — rather than inventing
+ * placeholder values.
+ */
+export interface ContractErrorContext {
+  /** The stream ID the failing call was operating on. */
+  streamId?: bigint | string;
+  /** The lifecycle operation that was attempted, e.g. `"withdraw"`. */
+  operation?: string;
+  /** The address that was rejected by the contract's auth check. */
+  caller?: string;
+}
+
+/**
+ * Error raised for a contract error code that could be parsed but does not map
+ * to one of the dedicated typed errors — either because the code has no
+ * dedicated class, or because the contract it belongs to could not be
+ * determined unambiguously.
+ *
+ * Carries the parsed code (and diagnostic, when the contract is known) so
+ * callers can still surface a meaningful message.
+ *
+ * @example
+ * ```ts
+ * try {
+ *   await client.streams.withdraw(streamId);
+ * } catch (err) {
+ *   const parsed = parseContractError(err, 'stream');
+ *   if (parsed instanceof ContractError) {
+ *     console.error(`Contract error #${parsed.code}: ${parsed.message}`);
+ *   }
+ * }
+ * ```
+ */
+export class ContractError extends StreamFiError {
+  /** The contract that raised the error, when it could be determined. */
+  readonly contract: ConduitContract | undefined;
+  /** The numeric contract error code, when one could be extracted. */
+  readonly code: number | undefined;
+  /** The parsed diagnostic, when the code could be resolved to a contract. */
+  readonly diagnostic: ContractErrorDiagnostic | undefined;
+  /**
+   * Suggested troubleshooting step for `code`, when `contract` is known
+   * (see {@link getRecoveryHint}); falls back to {@link DEFAULT_RECOVERY_HINT}
+   * when the contract couldn't be determined (e.g. an ambiguous code).
+   */
+  readonly recoveryHint: string;
+
+  constructor(
+    message: string,
+    contract?: ConduitContract,
+    code?: number,
+    diagnostic?: ContractErrorDiagnostic,
+  ) {
+    super(message);
+    this.name = 'ContractError';
+    this.contract = contract;
+    this.code = code;
+    this.diagnostic = diagnostic;
+    this.recoveryHint = contract !== undefined && code !== undefined
+      ? getRecoveryHint(contract, code)
+      : DEFAULT_RECOVERY_HINT;
+    Object.setPrototypeOf(this, new.target.prototype);
+  }
+}
+
+/**
+ * Extracts a numeric contract error code from a raw error value.
+ *
+ * Recognises the shapes a Soroban contract error takes on the wire:
+ * - `Error(Contract, #12)` embedded in an error message (the host error format);
+ * - an object carrying a numeric `code` property (e.g. an `xdr.ScError`);
+ * - an `Error` whose `cause` chain contains either of the above.
+ *
+ * Returns `undefined` when no contract error code can be found.
+ *
+ * @internal
+ */
+function extractContractErrorCode(error: unknown): number | undefined {
+  let current: unknown = error;
+  for (let depth = 0; depth < 5 && current != null; depth++) {
+    if (typeof current === 'object') {
+      const code = (current as { code?: unknown }).code;
+      if (typeof code === 'number' && Number.isInteger(code) && code > 0) {
+        return code;
+      }
+    }
+    if (typeof current === 'string') {
+      const match = /Error\(Contract,\s*#(\d+)\)/.exec(current);
+      if (match?.[1]) return Number(match[1]);
+    }
+    if (current instanceof Error) {
+      const match = /Error\(Contract,\s*#(\d+)\)/.exec(current.message);
+      if (match?.[1]) return Number(match[1]);
+    }
+    current = (current as { cause?: unknown }).cause;
+  }
+  return undefined;
+}
+
+/**
+ * Returns the contracts whose error catalogue defines `code`.
+ *
+ * Because error numbers are contract-scoped, the same numeric code can mean
+ * different things on different contracts (e.g. code 1 is `NotAuthorized` on
+ * DripStream/DripGovernor but `NotInitialized` on DripFactory). When more than
+ * one contract defines a code, the code alone cannot identify the contract.
+ *
+ * @internal
+ */
+function contractsDefiningCode(code: number): ConduitContract[] {
+  return (Object.keys(MESSAGES_BY_CONTRACT) as ConduitContract[]).filter(
+    (contract) => code in MESSAGES_BY_CONTRACT[contract],
+  );
+}
+
+/**
+ * Parses an arbitrary error into a typed contract error.
+ *
+ * Soroban host errors surface as raw integers (e.g. `Error(Contract, #12)`),
+ * which makes them hard to diagnose. This function extracts the numeric
+ * contract error code from an unknown value and maps it to the matching typed
+ * error class — {@link StreamNotFoundError}, {@link UnauthorizedStreamActionError},
+ * {@link InvalidStreamStateError}, {@link ClawbackNotEnabledError},
+ * {@link RateExceedsMaxError}, {@link DurationTooShortError},
+ * {@link BackdatedStreamError}, {@link GovernorInvalidParamError} — or to a
+ * {@link ConduitError} carrying the contract-scoped message.
+ *
+ * Error numbers are contract-scoped, so the `contract` argument tells the
+ * parser which catalogue to read. When it is omitted, the parser only resolves
+ * the code automatically if exactly one contract defines it; otherwise it
+ * returns a {@link ContractError} listing the candidates instead of guessing
+ * and reporting the wrong meaning.
+ *
+ * Errors that do not carry a contract error code (network failures, timeouts,
+ * user cancellations) are returned unchanged, so this is safe to call in a
+ * catch block.
+ *
+ * @param error - The raw error value to parse.
+ * @param contract - The contract the error came from, when known.
+ * @param context - Optional details used to build the richer typed errors.
+ * @returns A typed contract error, or the original error when it carries no
+ *          contract error code.
+ *
+ * @example
+ * ```ts
+ * try {
+ *   await client.streams.withdraw(streamId);
+ * } catch (err) {
+ *   const parsed = parseContractError(err, 'stream', { streamId, operation: 'withdraw' });
+ *   if (parsed instanceof ClawbackNotEnabledError) {
+ *     console.error('Clawback was not enabled for this stream.');
+ *   } else if (parsed instanceof ContractError) {
+ *     console.error(`Contract error #${parsed.code}: ${parsed.message}`);
+ *   }
+ * }
+ * ```
+ */
+export function parseContractError(
+  error: unknown,
+  contract?: ConduitContract,
+  context: ContractErrorContext = {},
+): Error {
+  // Already a typed contract error — nothing to parse.
+  if (error instanceof ConduitError) return error;
+
+  const code = extractContractErrorCode(error);
+  if (code === undefined) {
+    // Not a contract error (network failure, timeout, user abort, …).
+    return error instanceof Error ? error : new Error(String(error));
+  }
+
+  // Determine which contract's catalogue to read.
+  let scope: ConduitContract;
+  if (contract) {
+    scope = contract;
+  } else {
+    const candidates = contractsDefiningCode(code);
+    if (candidates.length !== 1) {
+      const options = candidates
+        .map((c) => `${c} #${code} (${MESSAGES_BY_CONTRACT[c][code]})`)
+        .join(', ');
+      return new ContractError(
+        candidates.length === 0
+          ? `Unknown contract error code #${code}.`
+          : `Contract error code #${code} is ambiguous — it is defined by more than one contract: ${options}. Pass the contract to disambiguate.`,
+        undefined,
+        code,
+      );
+    }
+    scope = candidates[0] as ConduitContract;
+  }
+
+  if (!(code in MESSAGES_BY_CONTRACT[scope])) {
+    return new ContractError(
+      `Unknown ${scope} contract error code #${code}.`,
+      scope,
+      code,
+    );
+  }
+
+  // Map to the dedicated typed error class where one exists.
+  switch (scope) {
+    case 'governor':
+      if (code === GovernorErrorCode.InvalidParam) {
+        return new GovernorInvalidParamError();
+      }
+      break;
+    case 'factory':
+      if (code === FactoryErrorCode.RateExceedsMax) return new RateExceedsMaxError();
+      if (code === FactoryErrorCode.DurationTooShort) return new DurationTooShortError();
+      if (code === FactoryErrorCode.BackdatedStream) return new BackdatedStreamError();
+      break;
+    case 'stream':
+      if (code === StreamErrorCode.ClawbackDisabled) return new ClawbackNotEnabledError();
+      if (code === StreamErrorCode.NotAuthorized && context.operation && context.caller) {
+        return new UnauthorizedStreamActionError(context.operation, context.caller);
+      }
+      if (code === StreamErrorCode.StreamNotFound && context.streamId !== undefined) {
+        return new StreamNotFoundError(context.streamId);
+      }
+      if (code in STATE_BY_CODE && context.operation) {
+        return new InvalidStreamStateError(context.operation, code as StreamErrorCode);
+      }
+      break;
+  }
+
+  return new ConduitError(scope, code);
 }

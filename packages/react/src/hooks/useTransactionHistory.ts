@@ -13,7 +13,7 @@ import {
   selectVisibleTransactions,
   selectTotalPages,
   selectViewStatus,
-} from '../../src/dashboard/transaction-history.js';
+} from '../../../../src/dashboard/transaction-history.js';
 
 export interface UseTransactionHistoryOptions {
   /** Wallet address used to derive transaction direction. */

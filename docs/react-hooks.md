@@ -234,6 +234,139 @@ All hooks will now automatically use the provided client from context.
 
 ---
 
+## useTokenAllowance
+
+Reads a SEP-41 token allowance and exposes an approval mutation. The owner
+address must match the connected wallet or signer when calling `approve`.
+
+`approveInfinite(expirationLedger)` approves `i128::MAX` so later streams need no re-approval. It
+still takes an expiration ledger, because SEP-41 requires a valid expiration for a non-zero amount.
+
+```tsx
+import { useTokenAllowance } from '@streamfi/react';
+
+function FundingApproval({ token, owner, streamContract }) {
+  const { allowance, loading, isPending, approve, txHash, error } =
+    useTokenAllowance(token, owner, streamContract);
+
+  const approveFunding = () => approve(1_000_000n, 2_000_000);
+
+  return (
+    <div>
+      <p>Allowance: {loading ? 'Loading...' : allowance?.toString() ?? 'Unavailable'}</p>
+      <button onClick={approveFunding} disabled={isPending}>
+        {isPending ? 'Approving...' : 'Approve funding'}
+      </button>
+      {txHash && <p>Approval transaction: {txHash}</p>}
+      {error && <p>{error.message}</p>}
+    </div>
+  );
+}
+```
+
+`approve(amount, expirationLedger)` accepts a bigint-compatible integer and a
+u32 ledger sequence, then returns the confirmed transaction hash. The hook
+also exposes `refetch()` and `reset()`.
+
+---
+
+## useStreamCountdown
+
+Live countdown to a cliff, cancellation, or completion deadline. The hook
+ticks once per second, so a vesting or payroll card can render the remaining
+time without wiring up its own timer.
+
+`targetTimestamp` and the optional `startTimestamp` are Unix timestamps in
+**seconds** (the same unit as `StreamInfo.startTime` / `StreamInfo.endTime`),
+not milliseconds.
+
+```tsx
+import { useStreamCountdown } from '@streamfi/react';
+
+function CliffCountdown({ stream }) {
+  const { days, hours, minutes, seconds, isPast, progressFraction } =
+    useStreamCountdown(stream.endTime, stream.startTime);
+
+  if (isPast) return <p>Stream complete — everything has unlocked.</p>;
+
+  return (
+    <div>
+      <p>
+        {days}d {hours}h {minutes}m {seconds}s remaining
+      </p>
+      {progressFraction !== null && (
+        <progress value={progressFraction} max={1} />
+      )}
+    </div>
+  );
+}
+```
+
+### Return Type
+
+```ts
+interface UseStreamCountdownResult {
+  days: number;
+  hours: number;
+  minutes: number;
+  seconds: number;
+  isPast: boolean;
+  progressFraction: number | null;
+}
+```
+
+### Parameters
+
+- `targetTimestamp`: The deadline to count down to, in Unix seconds. Pass
+  `null` or `undefined` to render a zeroed, not-yet-started state (handy
+  while a stream is still loading).
+- `startTimestamp` (optional): The start of the window, in Unix seconds.
+  Supplying it adds `progressFraction` — the elapsed share of the window,
+  clamped to `0`-`1`. Without it `progressFraction` is `null`, since a
+  deadline alone cannot define a range.
+
+---
+
+## Stream lifecycle helpers
+
+Four lifecycle hooks expose state that lets a UI preview or label an action
+before the user commits to it.
+
+```tsx
+import { useCancelStream, useCreateBatchStreams, usePauseStream, useResumeStream } from '@streamfi/react';
+
+function StreamControls({ streamId }) {
+  const { estimatedRefund, cancel } = useCancelStream(streamId);
+  const { isPausing, pause } = usePauseStream(streamId);
+  const { resume } = useResumeStream(streamId);
+  const { estimateTotalBatchCost } = useCreateBatchStreams();
+
+  return (
+    <div>
+      <p>Refund if cancelled: {estimatedRefund === null ? 'Unknown' : estimatedRefund.toString()}</p>
+      <button onClick={() => pause().catch(() => {})} disabled={isPausing}>
+        {isPausing ? 'Pausing Stream...' : 'Pause'}
+      </button>
+      <button onClick={() => resume().catch(() => {})}>Resume</button>
+      <button onClick={() => cancel().catch(() => {})}>Cancel</button>
+      <p>Batch total: {estimateTotalBatchCost(batchConfigs).toString()} stroops</p>
+    </div>
+  );
+}
+```
+
+- `useCancelStream(streamId).estimatedRefund` is the sender's unstreamed balance
+  in stroops, or `null` until the stream loads and for open-ended streams.
+- `usePauseStream(streamId).isPausing` is `true` only while the pause
+  transaction is in flight.
+- `useResumeStream(streamId).resume()` rejects without contacting the wallet
+  when the loaded stream is active or cancelled. Streams that have not loaded
+  yet are not pre-checked.
+- `useCreateBatchStreams().estimateTotalBatchCost(configs)` returns the sum of
+  every config's `depositAmount` in stroops. It is pure and makes no network call.
+
+---
+
 ## Error Handling
 
 Each hook exposes an `error` field that captures:
@@ -265,3 +398,189 @@ function StreamForm() {
   );
 }
 ```
+
+---
+
+## useStreamHistoryInfinite
+
+Infinite-scroll activity history (withdrawals, top-ups, pauses, …) for a stream, built on
+TanStack Query's `useInfiniteQuery`. Requires `@tanstack/react-query` v5 (an optional peer
+dependency) and a `<QueryClientProvider>` above the component.
+
+```tsx
+import { useStreamHistoryInfinite } from '@streamfi/react';
+
+function Activity({ streamId }) {
+  const { entries, hasNextPage, fetchNextPage, isFetchingNextPage, isLoading, error } =
+    useStreamHistoryInfinite(streamId, 25);
+
+  if (isLoading) return <p>Loading…</p>;
+  if (error) return <p>{error.message}</p>;
+
+  return (
+    <>
+      <ul>
+        {entries.map((e) => (
+          <li key={e.id}>{e.kind} · ledger {e.ledger}</li>
+        ))}
+      </ul>
+      {hasNextPage && (
+        <button disabled={isFetchingNextPage} onClick={() => fetchNextPage()}>
+          Load more
+        </button>
+      )}
+    </>
+  );
+}
+```
+
+`entries` is oldest first. Pages come from `client.streams.getHistory()`, which reads Soroban RPC
+events and so only covers the RPC retention window (about seven days); use the indexer for
+older history. `pageSize` is 1–200 (default 50); the query is disabled while `streamId` is
+`undefined`.
+
+Pass `filterEventTypes` to keep only some categories: `'Deposit'` (created and top-up events),
+`'Withdraw'` or `'Cancel'`. The filter runs on the loaded entries, so a page can hold fewer
+matches than `pageSize`; keep calling `fetchNextPage` while `hasNextPage` is true.
+
+```tsx
+const withdrawals = useStreamHistoryInfinite(streamId, 25, { filterEventTypes: ['Withdraw'] });
+```
+
+## `useStreamSearch`
+
+Client-side search over streams you have already loaded; no indexer refetch.
+
+```tsx
+const { results, total } = useStreamSearch(streams, query, {
+  status: ['active', 'paused'], // optional, case-insensitive
+  fuzzy: true,                  // default; substring hits rank above fuzzy-only hits
+  limit: 50,                    // `total` still reports the pre-limit count
+});
+```
+
+Whitespace-separated terms must all match. By default it searches `id`, `address`, `sender`, `recipient`, `token`, `memo`, `note`, `txHash` and string/number metadata values; pass `fields` (e.g. `['sender', 'metadata.dept']`) to narrow it.
+
+To find a stream from its creation transaction, set `txHash` on each stream (for example from the
+`created` entry in `useStreamHistoryInfinite`) and search for the hash. Transaction hashes match by
+substring only, so a partial hash works but fuzzy matching never applies to them.
+
+---
+
+## `useStreamHistory`
+
+Fetches a stream's past **deposits** (creations + top-ups), **withdrawals** and **cancellations**
+for history tables and audit trails. Unlike `useStreamHistoryInfinite`, this hook needs no
+`QueryClientProvider`: it implements stale-while-revalidate directly on top of
+`client.streams.getHistory()`.
+
+```tsx
+import { useStreamHistory } from '@conduit-protocol/sdk';
+
+function StreamAudit({ streamId }: { streamId: bigint }) {
+  const { entries, deposits, withdrawals, cancellations, isLoading, isValidating, error, refresh } =
+    useStreamHistory(streamId, { refreshIntervalMs: 30_000 });
+
+  if (isLoading) return <p>Loading history…</p>;
+  if (error) return <p>{error.message}</p>;
+
+  return (
+    <>
+      <button onClick={() => void refresh()} disabled={isValidating}>Refresh</button>
+      <p>{deposits.length} deposits · {withdrawals.length} withdrawals · {cancellations.length} cancellations</p>
+      <ul>
+        {entries.map((e) => <li key={e.id}>{e.kind} · ledger {e.ledger}</li>)}
+      </ul>
+    </>
+  );
+}
+```
+
+### Return Type
+
+```ts
+interface UseStreamHistoryResult {
+  entries: StreamHistoryEntry[];        // selected categories, oldest first
+  deposits: StreamHistoryEntry[];
+  withdrawals: StreamHistoryEntry[];
+  cancellations: StreamHistoryEntry[];
+  isLoading: boolean;                   // initial load only
+  isValidating: boolean;                // any background revalidation
+  error: Error | null;
+  refresh: () => Promise<void>;         // keeps stale data on screen
+}
+```
+
+### Parameters
+
+- `streamId`: `bigint | string | null | undefined`. Pass `null` to stop fetching.
+- `options`:
+  - `refreshIntervalMs` — background revalidation interval (default `30_000`; `0` disables it).
+  - `revalidateOnFocus` — also revalidate when the tab regains focus (default `true`).
+  - `limit` — page size passed to `getHistory` (1–200, default `50`).
+  - `types` — restrict `entries` to `'deposit' | 'withdrawal' | 'cancellation'` (default all).
+  - `enabled` / `client` — as with other hooks.
+
+Background revalidations do **not** clear `entries`: the previous page stays visible (with
+`isValidating: true`) until fresh data arrives. Only changing the `streamId` (or disabling the
+hook) clears it.
+
+---
+
+## `useEstimatedFee`
+
+Debounced network-fee estimate for create/cancel forms. It recomputes at most once after the user
+stops changing inputs, and discards stale responses from superseded requests.
+
+```tsx
+import { useEstimatedFee } from '@conduit-protocol/sdk';
+
+function CreateStreamForm({ params }) {
+  const { estimate, isLoading, error } = useEstimatedFee(
+    { type: 'create', params },
+    { debounceMs: 300 },
+  );
+
+  return <p>{isLoading ? 'Estimating…' : estimate ? `${estimate.totalFee} stroops` : error?.message}</p>;
+}
+```
+
+### Return Type
+
+```ts
+interface UseEstimatedFeeResult {
+  estimate: FeeEstimate | null;
+  isLoading: boolean;
+  error: Error | null;
+  refresh: () => Promise<void>;  // recompute now, bypassing the debounce
+  refetch: () => Promise<void>;  // alias of refresh
+}
+```
+
+### Parameters
+
+- `operation`: a `StreamOperation` (string or object). `null`/`undefined` disables estimation.
+- `options`: `debounceMs` (default `300`), `enabled` (default `true`), `client`.
+
+---
+
+## Provider connection status
+
+`StreamFiProvider` now tracks wallet connection state and remembers the last adapter id in
+`localStorage`, so a page reload restores the previous provider without a manual reconnect.
+
+```tsx
+<StreamFiProvider
+  client={client}
+  adapters={{ freighter: freighterAdapter, albedo: albedoAdapter }}
+  adapterStorageKey="streamfi:last-adapter"  // optional override
+  autoReconnect                               // default true
+>
+  <App />
+</StreamFiProvider>
+```
+
+`useStreamFiContext()` exposes `connectionStatus` (`'connected' | 'connecting' | 'disconnected' |
+'error'`), `walletId`, `error`, and the `connect(walletId)` / `disconnect()` actions. Only the
+adapter **id** is persisted — never keys or signatures. The `wallet` prop still attaches an
+adapter directly and reports `connected` status.

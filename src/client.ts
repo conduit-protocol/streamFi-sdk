@@ -9,11 +9,32 @@ import type {
   Subscription,
   FeeEstimate,
   StreamOperation,
+  Network,
+  BatchGetStreamsOptions,
+  GetStreamInfosResult,
+  StreamProgress,
+  StreamSimulationResult,
 } from "./types/index.js";
 import type { WalletAdapter } from "./adapters/types.js";
-import { DEFAULT_RPC, getServer } from "./soroban.js";
-import { SorobanRpc } from '@stellar/stellar-sdk';
-import { StreamsModule } from "./streams.js";
+import type { ConnectionHealthStatus } from "./connection-health.js";
+import {
+  DEFAULT_RPC,
+  createRpcServer,
+  registerRpcEndpointGroup,
+  resolveRpcEndpoint,
+} from "./soroban.js";
+import {
+  getEndpointHealth,
+  getRelayerHealth,
+  recordConnectionResult,
+} from "./connection-health.js";
+import { registerCustomFetch } from "./custom-fetch.js";
+import { SorobanRpc } from "@stellar/stellar-sdk";
+import {
+  StreamsModule,
+  getStreamProgress as calculateStreamProgress,
+  getStreamStatus as calculateStreamStatus,
+} from "./streams.js";
 import { FactoryModule } from "./factory.js";
 import { GovernorModule } from "./governor.js";
 import { Module26 } from "./module26.js";
@@ -21,11 +42,43 @@ import { Module36 } from "./module36.js";
 import { Module44 } from "./module44.js";
 import { Module48 } from "./module48.js";
 import { Module49 } from "./module49.js";
+import { TokenModule } from "./token.js";
 import {
   SUPPORTED_NETWORKS,
   UnsupportedChainError,
   CAIP2_TO_NETWORK,
+  CircuitOpenError,
 } from "./errors.js";
+
+let rpcConnectionPoolingConfigured = false;
+
+/**
+ * Configures `@stellar/stellar-sdk`'s shared Soroban RPC axios instance with
+ * keep-alive HTTP(S) agents (#952), so repeated RPC calls reuse TCP/TLS
+ * connections instead of renegotiating a handshake on every request.
+ *
+ * `SorobanRpc.AxiosClient` is a single instance shared by every
+ * `SorobanRpc.Server` in the process (see `soroban.ts`'s server cache), so
+ * this only needs to run once. A no-op outside Node — e.g. an edge/browser
+ * bundle with no `http`/`https` module — where axios falls back to its
+ * normal per-request behaviour, same as before this change.
+ */
+function configureRpcConnectionPooling(): void {
+  if (rpcConnectionPoolingConfigured) return;
+  rpcConnectionPoolingConfigured = true;
+
+  try {
+    // eslint-disable-next-line @typescript-eslint/no-var-requires -- optional Node-only dependency, guarded by the catch below for non-Node bundles
+    const { Agent: HttpAgent } = require("node:http");
+    // eslint-disable-next-line @typescript-eslint/no-var-requires -- see above
+    const { Agent: HttpsAgent } = require("node:https");
+    const axiosDefaults = SorobanRpc.AxiosClient.defaults;
+    axiosDefaults.httpAgent ??= new HttpAgent({ keepAlive: true, maxSockets: 50 });
+    axiosDefaults.httpsAgent ??= new HttpsAgent({ keepAlive: true, maxSockets: 50 });
+  } catch {
+    // Not running under Node — nothing to configure.
+  }
+}
 
 /**
  * Validate that `wallet`'s network/chain matches the SDK's configured
@@ -86,6 +139,8 @@ function assertWalletNetworkMatch(
 export class ConduitClient {
   readonly streams: StreamsModule;
   readonly governor: GovernorModule;
+  /** SEP-41 token allowance reads and approvals. */
+  readonly tokens: TokenModule;
 
   /**
    * Access the DripFactory read-query module.
@@ -184,17 +239,26 @@ export class ConduitClient {
   }
 
   /**
+   * The Stellar network this client is connected to.
+   */
+  get network(): Network {
+    return this.config.network;
+  }
+
+  /**
    * The underlying raw {@link SorobanRpc.Server} instance used by
    * this client. Advanced integrators building custom contract
    * interactions can use this to call Soroban RPC methods directly
    * without creating a duplicate connection.
    */
   get rpcServer(): SorobanRpc.Server {
-    return getServer(this.config.rpcUrl);
+    return createRpcServer(this.config.rpcUrl);
   }
 
   private readonly config: Required<Pick<ConduitConfig, "network" | "rpcUrl">> &
     ConduitConfig;
+
+  private readonly rpcUrls: string[] = [];
 
   /**
    * Initializes a new ConduitClient instance.
@@ -213,10 +277,39 @@ export class ConduitClient {
       throw new UnsupportedChainError(config.network);
     }
 
+    configureRpcConnectionPooling();
+
+    const configuredUrls =
+      config.rpcUrls ?? [config.rpcUrl ?? DEFAULT_RPC[config.network]];
+    const uniqueUrls = [
+      ...new Set(
+        configuredUrls
+          .map((url) => url.trim())
+          .filter((url) => url.length > 0),
+      ),
+    ];
+    const rpcUrl = uniqueUrls[0] ?? DEFAULT_RPC[config.network];
+    this.rpcUrls.push(...uniqueUrls);
+
     this.config = {
       ...config,
-      rpcUrl: config.rpcUrl ?? DEFAULT_RPC[config.network],
+      rpcUrl,
     };
+
+    registerRpcEndpointGroup(this.rpcUrls, {
+      failureThreshold: config.rpcUrlFailureThresholdConsecutive ?? 3,
+    });
+
+    // Must precede module construction: modules may issue RPC calls at once.
+    if (this.config.customFetch) {
+      for (const url of this.rpcUrls) {
+        registerCustomFetch(
+          url,
+          this.config.customFetch,
+          this.config.requestTimeoutMs,
+        );
+      }
+    }
 
     // If a wallet is provided at construction time, validate its chain too.
     if (this.config.wallet) {
@@ -225,6 +318,45 @@ export class ConduitClient {
 
     this.streams = new StreamsModule(this.config);
     this.governor = new GovernorModule(this.config);
+    this.tokens = new TokenModule(this.config);
+  }
+
+  /**
+   * Read many streams while staying under RPC rate limits.
+   *
+   * Duplicate IDs are collapsed, the remaining IDs are split into chunks of
+   * `chunkSize` (default 20) and chunks are read one after another, each with
+   * bounded concurrency (`maxConcurrency`, default 8). `chunkDelayMs` adds a
+   * pause between chunks. A failing stream is reported in `failures` rather
+   * than failing the whole batch.
+   *
+   * @example
+   * const { results, failures } = await client.getStreamsBatch(ids, { chunkSize: 10 });
+   */
+  async getStreamsBatch(
+    streamIds: (bigint | string)[],
+    options: BatchGetStreamsOptions = {},
+  ): Promise<GetStreamInfosResult> {
+    const chunkSize = Math.max(1, Math.floor(options.chunkSize ?? 20) || 20);
+    const chunkDelayMs = Math.max(0, options.chunkDelayMs ?? 0);
+    const unique = [...new Set(streamIds.map((id) => BigInt(id)))];
+
+    const results: StreamInfo[] = [];
+    const failures: GetStreamInfosResult["failures"] = [];
+    for (let i = 0; i < unique.length; i += chunkSize) {
+      if (i > 0 && chunkDelayMs > 0) {
+        await new Promise((resolve) => setTimeout(resolve, chunkDelayMs));
+      }
+      const chunk = await this.streams.getStreamInfos(
+        unique.slice(i, i + chunkSize),
+        options.maxConcurrency === undefined
+          ? {}
+          : { maxConcurrency: options.maxConcurrency },
+      );
+      results.push(...chunk.results);
+      failures.push(...chunk.failures);
+    }
+    return { results, failures };
   }
 
   /**
@@ -319,6 +451,33 @@ export class ConduitClient {
     return this.streams.streamedTotal(streamId);
   }
 
+  /** Get formatted stream progress without an RPC round-trip. */
+  getStreamProgress(
+    stream: StreamInfo,
+    currentTimestamp?: number,
+  ): StreamProgress {
+    return currentTimestamp === undefined
+      ? calculateStreamProgress(stream)
+      : calculateStreamProgress(stream, currentTimestamp);
+  }
+
+  /** Alias for {@link getStreamProgress}. */
+  getStreamStatus(
+    stream: StreamInfo,
+    currentTimestamp?: number,
+  ): StreamProgress {
+    return currentTimestamp === undefined
+      ? calculateStreamStatus(stream)
+      : calculateStreamStatus(stream, currentTimestamp);
+  }
+
+  /** Simulate stream creation to preview fees before signing. */
+  async simulateCreateStream(
+    params: CreateStreamParams,
+  ): Promise<StreamSimulationResult> {
+    return this.streams.simulateCreateStream(params);
+  }
+
   /** Estimate the network fee for a stream operation. */
   async estimateFee(operation: StreamOperation): Promise<FeeEstimate> {
     return this.streams.estimateFee(operation);
@@ -342,9 +501,13 @@ export class ConduitClient {
    * **Wallet propagation contract:**
    * - {@link StreamsModule}: Updated immediately — all subsequent stream
    *   operations (create, withdraw, cancel, etc.) use the new wallet.
-   * - {@link FactoryModule}: NOT updated — this module is read-only and
-   *   uses `config.keypair` for simulation fee sourcing. It does not hold
-   *   a wallet reference and is unaffected by `setWallet()`.
+   * - {@link TokenModule}: Updated immediately — subsequent token approvals
+   *   use the new wallet.
+   * - {@link FactoryModule}: Updated — its read simulations are sourced
+   *   from the active wallet's public key, so a wallet swap re-resolves the
+   *   simulation source instead of leaving it pinned to the previous
+   *   wallet. A `client.factory` that has not been constructed yet picks
+   *   the new wallet up from `config` when it is lazily built (#784).
    * - {@link GovernorModule}: NOT updated — this module is read-only and
    *   uses `config.keypair` for simulation fee sourcing. It does not hold
    *   a wallet reference and is unaffected by `setWallet()`.
@@ -357,6 +520,13 @@ export class ConduitClient {
     assertWalletNetworkMatch(wallet, this.config.network);
     this.config.wallet = wallet;
     this.streams.setWallet(wallet);
+    this.tokens.setWallet(wallet);
+    // #784 — `FactoryModule` resolves its read-simulation source from a
+    // wallet adapter captured at construction, so it needs the swap too.
+    // Only when already constructed: a factory built later from the updated
+    // `config.wallet` above has nothing to catch up on. GovernorModule
+    // deliberately stays out — it holds no wallet at all.
+    this._factory?.setWallet(wallet);
   }
 
   /**
@@ -366,6 +536,66 @@ export class ConduitClient {
    */
   clearAddressCache(): void {
     this.streams.clearAddressCache();
+  }
+
+  getConnectionHealth(): ConnectionHealthStatus {
+    const activeRpcUrl = resolveRpcEndpoint(this.config.rpcUrl);
+    const rpc = getEndpointHealth(activeRpcUrl);
+    const endpoints = this.rpcUrls.map((url) => getEndpointHealth(url));
+    const relayer = getRelayerHealth();
+    const connected = rpc.connected || relayer.connected;
+    const statuses = [...endpoints.map((endpoint) => endpoint.status), relayer.status];
+    const status = !connected
+      ? "disconnected"
+      : statuses.includes("degraded")
+        ? "degraded"
+        : "healthy";
+    const packetLossValues = [
+      ...endpoints.map((endpoint) => endpoint.packetLossRate),
+      relayer.packetLossRate,
+    ];
+    const packetLossRate =
+      packetLossValues.length === 0
+        ? 0
+        : Math.round(
+            (packetLossValues.reduce((sum, value) => sum + value, 0) /
+              packetLossValues.length) *
+              100,
+          ) / 100;
+    const updatedAt = [...endpoints, relayer]
+      .map((entry) => entry.updatedAt)
+      .filter((value): value is number => value !== null)
+      .sort((a, b) => b - a)[0] ?? null;
+
+    return {
+      connected,
+      status,
+      latencyMs: rpc.latencyMs ?? relayer.latencyMs,
+      packetLossRate,
+      activeRpcUrl,
+      rpc,
+      endpoints,
+      relayer,
+      updatedAt,
+    };
+  }
+
+  async refreshConnectionHealth(): Promise<ConnectionHealthStatus> {
+    const url = resolveRpcEndpoint(this.config.rpcUrl);
+    const startedAt = Date.now();
+    try {
+      await createRpcServer(this.config.rpcUrl).getLatestLedger();
+      recordConnectionResult(url, true, Date.now() - startedAt, "rpc");
+    } catch (err) {
+      if (!(err instanceof CircuitOpenError)) {
+        recordConnectionResult(url, false, Date.now() - startedAt, "rpc");
+      }
+    }
+    return this.getConnectionHealth();
+  }
+
+  getCurrentRpcUrl(): string {
+    return resolveRpcEndpoint(this.config.rpcUrl);
   }
 
   /**
@@ -406,11 +636,7 @@ export class ConduitClient {
    */
   private async _checkRpcHealth(): Promise<boolean> {
     try {
-      // Use getLatestLedger() as a lightweight RPC health check
-      // that works across all Soroban RPC endpoints.
-      const { SorobanRpc } = await import("@stellar/stellar-sdk");
-      const server = new SorobanRpc.Server(this.config.rpcUrl);
-      await server.getLatestLedger();
+      await createRpcServer(this.config.rpcUrl).getLatestLedger();
       return true;
     } catch {
       return false;

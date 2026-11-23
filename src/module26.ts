@@ -113,6 +113,32 @@ function fingerprintPortfolio(items: PortfolioStreamItem[], nowSec: number): str
  * from caching is workload-dependent (proportional to cache hit rate);
  * call `getPerformanceMetrics()` for this instance's own measured hit/miss
  * timing rather than assuming a fixed percentage.
+ *
+ * @example
+ * ```ts
+ * import { Module26 } from '@conduit-protocol/sdk';
+ *
+ * // `active` and `cancelled` are StreamInfo values (for example from
+ * // client.getStream()). `active` streams 10n per second from t=1000 to
+ * // t=2000 with nothing withdrawn yet.
+ * const portfolio = new Module26({ cacheSize: 500 });
+ * const items = [
+ *   { id: 'a', stream: active },
+ *   { id: 'b', stream: cancelled },
+ * ];
+ *
+ * const summary = portfolio.aggregatePortfolio(items, 1_500);
+ * console.log(summary.activeCount);        // 1
+ * console.log(summary.cancelledCount);     // 1
+ * console.log(summary.totalWithdrawable);  // 5000n
+ * console.log(summary.totalRatePerSecond); // 10n
+ *
+ * // Same inputs again: served from the LRU cache.
+ * portfolio.aggregatePortfolio(items, 1_500).isCached; // true
+ *
+ * // What the active stream will still release over the next 100 seconds.
+ * portfolio.projectRemaining(active, 100, 1_500); // 1000n
+ * ```
  */
 export class Module26 {
   private readonly enableOptimization: boolean;

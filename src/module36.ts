@@ -52,6 +52,25 @@ function statusKey(stream: StreamInfo): string {
  * (proportional to cache hit rate); call `getPerformanceMetrics()` for
  * this instance's own measured hit/miss timing rather than assuming a
  * fixed percentage.
+ *
+ * @example
+ * ```ts
+ * import { Module36 } from '@conduit-protocol/sdk';
+ *
+ * // `stream` is an active StreamInfo: 10n per second from t=1000 to t=2000
+ * // with nothing withdrawn yet.
+ * const differ = new Module36();
+ * const diff = differ.diffSnapshots(
+ *   { stream, observedAt: 1_200 },
+ *   { stream, observedAt: 1_500 },
+ * );
+ * console.log(diff.withdrawableDelta); // 3000n
+ * console.log(diff.progressDelta);     // 0.3
+ * console.log(diff.statusChanged);     // false
+ *
+ * // Accrual between two timestamps at a constant rate.
+ * differ.computeAccrual(10n, 1_200, 1_500); // 3000n
+ * ```
  */
 export class Module36 {
   private readonly enableOptimization: boolean;

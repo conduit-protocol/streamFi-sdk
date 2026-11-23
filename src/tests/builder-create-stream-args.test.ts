@@ -86,12 +86,13 @@ describe('StreamBuilder.toContractArgs()', () => {
     const now = Math.floor(Date.now() / 1000);
     const args = baseBuilder()
       .startTime(now + 60)
-      .endTime(now + 3600)
+      // 3660s from start: strictly above the 3600s protocol minimum (#1169).
+      .endTime(now + 3720)
       .clawbackEnabled(true)
       .toContractArgs() as import('@stellar/stellar-sdk').xdr.ScVal[];
 
     expect(Number(scValToNative(args[5]!))).toBe(now + 60);
-    expect(Number(scValToNative(args[6]!))).toBe(now + 3600);
+    expect(Number(scValToNative(args[6]!))).toBe(now + 3720);
     expect(scValToNative(args[7]!)).toBe(true);
   });
 
@@ -113,6 +114,14 @@ describe('StreamBuilder.toContractArgs()', () => {
   it('rejects a non-boolean clawbackEnabled', () => {
     const builder = baseBuilder();
     expect(() => builder.clawbackEnabled('yes' as unknown as boolean)).toThrow('clawbackEnabled must be a boolean');
+  });
+
+  it('supports cancelable and clawbackable fluent flags', () => {
+    const config = baseBuilder().setCancelable(false).setClawbackable(true).build();
+
+    expect(config.cancelable).toBe(false);
+    expect(config.clawbackable).toBe(true);
+    expect(config.clawbackEnabled).toBe(true);
   });
 });
 

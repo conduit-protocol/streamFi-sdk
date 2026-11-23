@@ -83,7 +83,9 @@ function i128(n: bigint) {
 // ── Tests ─────────────────────────────────────────────────────────────────────
 
 beforeEach(() => {
-  mockBuildTx.mockResolvedValue({ _stub: 'tx' });
+  // mockBuildTx needs a full reset, not just a re-resolve: an earlier test's
+  // calls would otherwise leak into a later `not.toHaveBeenCalled()`.
+  mockBuildTx.mockReset().mockResolvedValue({ _stub: 'tx' });
   mockSimulate.mockReset();
 });
 
@@ -147,7 +149,9 @@ describe('GovernorModule — getConfig()', () => {
     const controller = new AbortController();
     controller.abort();
 
-    await expect(new GovernorModule(cfg()).getConfig(controller.signal)).rejects.toThrow('AbortError');
+    // 'AbortError' only appears in the exception's `name`; the message is
+    // 'Aborted', so matchObject on `name` rather than toThrow(string).
+    await expect(new GovernorModule(cfg()).getConfig(controller.signal)).rejects.toMatchObject({ name: 'AbortError' });
     expect(mockBuildTx).not.toHaveBeenCalled();
     expect(mockSimulate).not.toHaveBeenCalled();
   });

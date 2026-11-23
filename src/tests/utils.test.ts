@@ -10,8 +10,11 @@ import {
   normalizeProgress,
   withdrawableLocal,
   sumWithdrawable,
+  streamedTotalLocal,
+  sumStreamedTotal,
   bigintSafeStringify,
   isValidAddress,
+  formatTokenAmount,
 } from '../utils.js';
 import { ZERO_ADDR } from '../constants.js';
 import { Keypair } from '@stellar/stellar-sdk';
@@ -394,6 +397,145 @@ describe('sumWithdrawable', () => {
   });
 });
 
+// ── streamedTotalLocal ───────────────────────────────────────────────────────
+
+describe('streamedTotalLocal', () => {
+  it('returns 0 before stream starts', () => {
+    const now = Math.floor(Date.now() / 1000);
+    const s   = makeStream({ startTime: now + 100, endTime: now + 3700 });
+    expect(streamedTotalLocal(s, now)).toBe(0n);
+  });
+
+  it('equals rate × elapsed', () => {
+    const now  = Math.floor(Date.now() / 1000);
+    const rate = 100n;
+    const s    = makeStream({ ratePerSecond: rate, startTime: now - 500, endTime: now + 500 });
+    expect(streamedTotalLocal(s, now)).toBe(rate * 500n);
+  });
+
+  it('does not subtract withdrawn amounts', () => {
+    const now  = Math.floor(Date.now() / 1000);
+    const rate = 100n;
+    const s    = makeStream({ ratePerSecond: rate, startTime: now - 1000, withdrawn: 50_000n });
+    expect(streamedTotalLocal(s, now)).toBe(rate * 1000n);
+    // ...whereas the withdrawable balance does.
+    expect(withdrawableLocal(s, now)).toBe(rate * 1000n - 50_000n);
+  });
+
+  it('caps at end_time', () => {
+    const now  = Math.floor(Date.now() / 1000);
+    const rate = 100n;
+    const s    = makeStream({ ratePerSecond: rate, startTime: now - 2000, endTime: now - 1000 });
+    expect(streamedTotalLocal(s, now)).toBe(rate * 1000n);
+  });
+
+  it('keeps accruing for an open-ended stream (endTime 0)', () => {
+    const now  = Math.floor(Date.now() / 1000);
+    const rate = 100n;
+    const s    = makeStream({ ratePerSecond: rate, startTime: now - 1000, endTime: 0 });
+    expect(streamedTotalLocal(s, now)).toBe(rate * 1000n);
+  });
+
+  it('freezes at pausedAt when paused', () => {
+    const now  = Math.floor(Date.now() / 1000);
+    const rate = 100n;
+    const s = makeStream({
+      ratePerSecond: rate,
+      startTime:     now - 1000,
+      endTime:       now + 1000,
+      paused:        true,
+      pausedAt:      now - 500,
+    });
+    expect(streamedTotalLocal(s, now)).toBe(rate * 500n);
+  });
+
+  it('a stream paused *after* end_time has fully streamed (matches on-chain clamp order)', () => {
+    const now  = Math.floor(Date.now() / 1000);
+    const rate = 100n;
+    const s = makeStream({
+      ratePerSecond: rate,
+      startTime:     now - 3000,
+      endTime:       now - 2000,
+      paused:        true,
+      pausedAt:      now - 500,
+    });
+    expect(streamedTotalLocal(s, now)).toBe(rate * 1000n);
+  });
+
+  it('returns withdrawn (a lower bound) for a cancelled stream instead of accruing', () => {
+    const now = Math.floor(Date.now() / 1000);
+    const s   = makeStream({ startTime: now - 1000, cancelled: true, withdrawn: 25_000n });
+    expect(streamedTotalLocal(s, now)).toBe(25_000n);
+    expect(streamedTotalLocal(s, now + 500)).toBe(25_000n);
+  });
+
+  it('agrees with withdrawableLocal: streamed total minus withdrawn', () => {
+    const now = Math.floor(Date.now() / 1000);
+    const streams = [
+      makeStream({ ratePerSecond: 100n, startTime: now - 1000, endTime: now + 1000, withdrawn: 30_000n }),
+      makeStream({ ratePerSecond: 200n, startTime: now - 1000, endTime: now + 1000, paused: true, pausedAt: now - 400 }),
+      makeStream({ ratePerSecond: 50n, startTime: now - 2000, endTime: now - 1000, withdrawn: 10_000n }),
+      makeStream({ ratePerSecond: 100n, startTime: now + 100, endTime: now + 1000 }),
+    ];
+    for (const s of streams) {
+      const diff = streamedTotalLocal(s, now) - s.withdrawn;
+      expect(withdrawableLocal(s, now)).toBe(diff > 0n ? diff : 0n);
+    }
+  });
+});
+
+// ── sumStreamedTotal ─────────────────────────────────────────────────────────
+
+describe('sumStreamedTotal', () => {
+  it('returns 0 for empty array', () => {
+    expect(sumStreamedTotal([])).toBe(0n);
+  });
+
+  it('sums streamed totals across multiple active streams', () => {
+    const now = Math.floor(Date.now() / 1000);
+    const streams = [
+      makeStream({ ratePerSecond: 100n, startTime: now - 1000, endTime: now + 1000 }),
+      makeStream({ ratePerSecond: 200n, startTime: now - 500, endTime: now + 1500 }),
+      makeStream({ ratePerSecond: 50n, startTime: now - 2000, endTime: now + 500 }),
+    ];
+    const expected = (100n * 1000n) + (200n * 500n) + (50n * 2000n);
+    expect(sumStreamedTotal(streams, now)).toBe(expected);
+  });
+
+  it('does not subtract withdrawn amounts, unlike sumWithdrawable', () => {
+    const now = Math.floor(Date.now() / 1000);
+    const streams = [
+      makeStream({ ratePerSecond: 100n, startTime: now - 1000, endTime: now + 1000, withdrawn: 50_000n }),
+      makeStream({ ratePerSecond: 200n, startTime: now - 500, endTime: now + 1500, withdrawn: 75_000n }),
+    ];
+    expect(sumStreamedTotal(streams, now)).toBe((100n * 1000n) + (200n * 500n));
+    expect(sumWithdrawable(streams, now)).toBe((100n * 1000n - 50_000n) + (200n * 500n - 75_000n));
+  });
+
+  it('handles mixed stream states (active, paused, completed, cancelled)', () => {
+    const now = Math.floor(Date.now() / 1000);
+    const streams = [
+      makeStream({ ratePerSecond: 100n, startTime: now - 1000, endTime: now + 1000 }),
+      makeStream({ ratePerSecond: 200n, startTime: now - 1000, endTime: now + 1000, paused: true, pausedAt: now - 500 }),
+      makeStream({ ratePerSecond: 50n, startTime: now - 2000, endTime: now - 1000 }),
+      makeStream({ ratePerSecond: 999n, startTime: now - 1000, endTime: now + 1000, cancelled: true, withdrawn: 1_000n }),
+    ];
+    const expected = (100n * 1000n) + (200n * 500n) + (50n * 1000n) + 1_000n;
+    expect(sumStreamedTotal(streams, now)).toBe(expected);
+  });
+
+  it('reflects time progression', () => {
+    const baseTime = Math.floor(Date.now() / 1000);
+    const streams = [
+      makeStream({ ratePerSecond: 100n, startTime: baseTime - 1000, endTime: baseTime + 1000 }),
+      makeStream({ ratePerSecond: 200n, startTime: baseTime - 1000, endTime: baseTime + 1000 }),
+    ];
+    const later = sumStreamedTotal(streams, baseTime + 100);
+    const atBase = sumStreamedTotal(streams, baseTime);
+    expect(later - atBase).toBe((100n + 200n) * 100n);
+  });
+});
+
 // ── bigintSafeStringify ─────────────────────────────────────────────────────
 
 describe('bigintSafeStringify', () => {
@@ -677,5 +819,94 @@ describe('bigintSafeStringify edge cases', () => {
     const input = { a: { b: { c: { d: 9007199254740993n } } } };
     const result = bigintSafeStringify(input);
     expect(result.a.b.c.d).toBe('9007199254740993');
+  });
+});
+
+describe('formatTokenAmount', () => {
+  // XLM: 7 decimals
+  it('formats XLM (7 decimals) with default displayDecimals', () => {
+    expect(formatTokenAmount(10_000_000n, 7)).toBe('1.0000000');
+    expect(formatTokenAmount(100_000_000n, 7)).toBe('10.0000000');
+    expect(formatTokenAmount(1n, 7)).toBe('0.0000001');
+  });
+
+  it('formats XLM with custom displayDecimals (fewer)', () => {
+    expect(formatTokenAmount(10_000_000n, 7, 2)).toBe('1.00');
+    expect(formatTokenAmount(15_000_000n, 7, 2)).toBe('1.50');
+    expect(formatTokenAmount(12_345_678n, 7, 2)).toBe('1.23');
+  });
+
+  it('formats XLM with custom displayDecimals (more)', () => {
+    expect(formatTokenAmount(10_000_000n, 7, 10)).toBe('1.0000000000');
+    expect(formatTokenAmount(1n, 7, 10)).toBe('0.0000001000');
+  });
+
+  // USDC: 6 decimals
+  it('formats USDC (6 decimals) with default displayDecimals', () => {
+    expect(formatTokenAmount('1000000', 6)).toBe('1.000000');
+    expect(formatTokenAmount('1500000', 6)).toBe('1.500000');
+    expect(formatTokenAmount('123456', 6)).toBe('0.123456');
+  });
+
+  it('formats USDC with fewer display decimals', () => {
+    expect(formatTokenAmount('1500000', 6, 2)).toBe('1.50');
+    expect(formatTokenAmount('123456', 6, 2)).toBe('0.12');
+  });
+
+  // Rounding behavior
+  it('rounds correctly at display precision boundary', () => {
+    // 0.12345678 with 7 decimals, display 2 -> 0.12 (0.1234 rounds down)
+    expect(formatTokenAmount(1234567n, 7, 2)).toBe('0.12');
+    // 0.125 with 3 decimals, display 2 -> 0.13 (0.125 rounds up)
+    expect(formatTokenAmount(125n, 3, 2)).toBe('0.13');
+    // 0.999 with 3 decimals, display 0 -> 1
+    expect(formatTokenAmount(999n, 3, 0)).toBe('1');
+  });
+
+  // Edge cases
+  it('handles zero amount', () => {
+    expect(formatTokenAmount(0n, 7)).toBe('0.0000000');
+    expect(formatTokenAmount(0n, 7, 2)).toBe('0.00');
+    expect(formatTokenAmount('0', 6)).toBe('0.000000');
+  });
+
+  it('handles negative amounts', () => {
+    expect(formatTokenAmount(-10_000_000n, 7)).toBe('-1.0000000');
+    expect(formatTokenAmount(-15_000_000n, 7, 2)).toBe('-1.50');
+    expect(formatTokenAmount('-1000000', 6)).toBe('-1.000000');
+  });
+
+  it('handles large amounts', () => {
+    const large = 1_000_000_000_000_000_000n; // 1e18 = 100,000,000,000 XLM (1e11)
+    expect(formatTokenAmount(large, 7)).toContain('100000000000.0000000');
+  });
+
+  it('handles displayDecimals = 0', () => {
+    expect(formatTokenAmount(10_000_000n, 7, 0)).toBe('1');
+    expect(formatTokenAmount(15_000_000n, 7, 0)).toBe('2'); // rounds up
+    expect(formatTokenAmount(14_999_999n, 7, 0)).toBe('1'); // rounds down
+    expect(formatTokenAmount(0n, 7, 0)).toBe('0');
+  });
+
+  it('handles displayDecimals > decimals (padding with zeros)', () => {
+    expect(formatTokenAmount(10_000_000n, 7, 10)).toBe('1.0000000000');
+    expect(formatTokenAmount(1n, 7, 10)).toBe('0.0000001000');
+  });
+
+  it('works with string input', () => {
+    expect(formatTokenAmount('10000000', 7)).toBe('1.0000000');
+    expect(formatTokenAmount('15000000', 7, 2)).toBe('1.50');
+  });
+
+  it('handles carry from rounding correctly', () => {
+    // 0.9999999 with 7 decimals, display 0 -> should round to 1
+    expect(formatTokenAmount(9_999_999n, 7, 0)).toBe('1');
+    // 0.99999999 with 8 decimals, display 2 -> 1.00
+    expect(formatTokenAmount(99_999_999n, 8, 2)).toBe('1.00');
+  });
+
+  it('handles decimals=0 (integer tokens)', () => {
+    expect(formatTokenAmount(100n, 0)).toBe('100');
+    expect(formatTokenAmount(100n, 0, 2)).toBe('100.00');
   });
 });

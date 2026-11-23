@@ -1,6 +1,11 @@
 import { describe, it, expect } from 'vitest';
 import { StrKey, Asset } from '@stellar/stellar-sdk';
-import { USDC_ISSUER, MIN_STREAM_DURATION_SECONDS } from '../constants.js';
+import {
+  EXPLORER_URLS,
+  NETWORK_NAMES,
+  USDC_ISSUER,
+  MIN_STREAM_DURATION_SECONDS,
+} from '../constants.js';
 
 // See #508 — the previous mainnet USDC issuer constant was a placeholder
 // strkey ("...ANYOUR") that failed checksum validation, so
@@ -27,4 +32,23 @@ describe('MIN_STREAM_DURATION_SECONDS', () => {
   it('equals 3600 (1 hour)', () => {
     expect(MIN_STREAM_DURATION_SECONDS).toBe(3600);
   });
+});
+
+describe('network explorer constants', () => {
+  it('exports human-readable names for every explorer network', () => {
+    expect(NETWORK_NAMES).toEqual({
+      mainnet: 'Mainnet',
+      testnet: 'Testnet',
+      futurenet: 'Futurenet',
+    });
+  });
+
+  it.each(['mainnet', 'testnet', 'futurenet'] as const)(
+    'provides transaction, contract, and account URL bases for %s',
+    (network) => {
+      expect(EXPLORER_URLS[network].transaction).toMatch(/^https:\/\/stellar\.expert\/explorer\/.+\/tx\/$/);
+      expect(EXPLORER_URLS[network].contract).toMatch(/^https:\/\/stellar\.expert\/explorer\/.+\/contract\/$/);
+      expect(EXPLORER_URLS[network].account).toMatch(/^https:\/\/stellar\.expert\/explorer\/.+\/account\/$/);
+    },
+  );
 });

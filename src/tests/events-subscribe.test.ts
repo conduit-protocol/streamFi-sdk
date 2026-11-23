@@ -495,4 +495,122 @@ describe('subscribeToStream', () => {
 
     sub.unsubscribe();
   });
+
+  it('restarts from the last acknowledged ledger after a polling failure', async () => {
+    const warn = vi.spyOn(console, 'warn').mockImplementation(() => {});
+    const { Address, Keypair, nativeToScVal } = await import('@stellar/stellar-sdk');
+    const sender = Keypair.random().publicKey();
+    const missedEvent = {
+      id: 'missed-after-reconnect',
+      ledger: 101,
+      topic: [
+        xdr.ScVal.scvSymbol('clawback'),
+        new Address(sender).toScVal(),
+        nativeToScVal(1n, { type: 'u64' }),
+      ],
+      value: xdr.ScVal.scvI128(
+        new xdr.Int128Parts({ hi: xdr.Int64.fromString('0'), lo: xdr.Uint64.fromString('1') }),
+      ),
+    };
+    mockGetEvents
+      .mockResolvedValueOnce({ events: [], latestLedger: 100 })
+      .mockRejectedValueOnce(new Error('temporary disconnect'))
+      .mockResolvedValueOnce({ events: [missedEvent], latestLedger: 101 });
+    const { subscribeToStream } = await import('../events.js');
+    const received: unknown[] = [];
+
+    const sub = subscribeToStream('http://localhost:8000', 'CSTREAM', {
+      pollInterval: 1000,
+      onClawback: (event) => { received.push(event); },
+    });
+    await vi.waitFor(() => expect(mockGetEvents).toHaveBeenCalledTimes(1));
+    await vi.advanceTimersByTimeAsync(1000);
+    await vi.waitFor(() => expect(mockGetEvents).toHaveBeenCalledTimes(2));
+    await vi.advanceTimersByTimeAsync(1000);
+    await vi.waitFor(() => expect(mockGetEvents).toHaveBeenCalledTimes(3));
+
+    expect(mockGetEvents.mock.calls[2]?.[0]).toHaveProperty('startLedger', 101);
+    expect(received).toHaveLength(1);
+    sub.unsubscribe();
+    warn.mockRestore();
+  });
+});
+
+describe('subscribeToStreams', () => {
+  beforeEach(() => {
+    vi.useFakeTimers();
+    mockGetEvents.mockReset();
+    mockGetLatestLedger.mockReset();
+    mockGetLatestLedger.mockResolvedValue({ id: 'ledger-x', sequence: 100, protocolVersion: '20' });
+  });
+
+  afterEach(() => {
+    vi.useRealTimers();
+  });
+
+  it('polls each address independently', async () => {
+    mockGetEvents.mockResolvedValue({ events: [] });
+    const { subscribeToStreams } = await import('../events.js');
+
+    const sub = subscribeToStreams('http://localhost:8000', ['CSTREAM1', 'CSTREAM2', 'CSTREAM3'], {});
+    await vi.waitFor(() => expect(mockGetEvents).toHaveBeenCalledTimes(3));
+
+    const contractIds = mockGetEvents.mock.calls.map(
+      (call) => (call[0] as { filters: Array<{ contractIds: string[] }> }).filters[0]!.contractIds[0],
+    );
+    expect(contractIds.sort()).toEqual(['CSTREAM1', 'CSTREAM2', 'CSTREAM3']);
+
+    sub.unsubscribe();
+  });
+
+  it('shares the same handlers across every address', async () => {
+    mockGetEvents.mockResolvedValue({ events: [] });
+    const { subscribeToStreams } = await import('../events.js');
+    const onError = vi.fn();
+
+    const sub = subscribeToStreams('http://localhost:8000', ['CSTREAM1', 'CSTREAM2'], { onError });
+    await vi.waitFor(() => expect(mockGetEvents).toHaveBeenCalledTimes(2));
+
+    sub.unsubscribe();
+  });
+
+  it('unsubscribe() tears down every underlying subscription', async () => {
+    mockGetEvents.mockResolvedValue({ events: [], cursor: 'page-2', latestLedger: 100 });
+    const { subscribeToStreams } = await import('../events.js');
+
+    const sub = subscribeToStreams(
+      'http://localhost:8000',
+      ['CSTREAM1', 'CSTREAM2'],
+      { pollInterval: 1000 },
+    );
+    await vi.waitFor(() => expect(mockGetEvents).toHaveBeenCalledTimes(2));
+
+    sub.unsubscribe();
+
+    // No further polling from either address after unsubscribe.
+    await vi.advanceTimersByTimeAsync(5000);
+    expect(mockGetEvents).toHaveBeenCalledTimes(2);
+  });
+
+  it('returns a working, no-op subscription for an empty address list', async () => {
+    const { subscribeToStreams } = await import('../events.js');
+
+    const sub = subscribeToStreams('http://localhost:8000', [], {});
+    expect(mockGetEvents).not.toHaveBeenCalled();
+    expect(() => sub.unsubscribe()).not.toThrow();
+  });
+
+  it('one address failing to poll does not stop the others', async () => {
+    mockGetEvents
+      .mockRejectedValueOnce(new Error('rpc down for this address'))
+      .mockResolvedValue({ events: [] });
+    const { subscribeToStreams } = await import('../events.js');
+    const onError = vi.fn();
+
+    const sub = subscribeToStreams('http://localhost:8000', ['CBAD', 'CGOOD'], { onError });
+    await vi.waitFor(() => expect(onError).toHaveBeenCalledTimes(1));
+    await vi.waitFor(() => expect(mockGetEvents).toHaveBeenCalledTimes(2));
+
+    sub.unsubscribe();
+  });
 });

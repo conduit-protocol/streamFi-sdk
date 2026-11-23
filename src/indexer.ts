@@ -1,4 +1,4 @@
-import { ConduitError, UNKNOWN_CONTRACT_ERROR_CODE } from './errors.js';
+import { ConduitError, IndexerMaxPagesExceededError, UNKNOWN_CONTRACT_ERROR_CODE } from './errors.js';
 import { IndexerTimeoutError, OperationAbortedError } from './errors.js';
 import { bigintSafeStringify } from './utils.js';
 
@@ -31,6 +31,18 @@ export interface GraphQLQueryOptions {
   persist?: boolean;
 }
 
+export interface IndexerQueryMetric {
+  queryName: string;
+  durationMs: number;
+  success: boolean;
+  error?: Error;
+}
+
+export interface IndexerConfig {
+  endpoint: string;
+  onQueryMetric?: (metric: IndexerQueryMetric) => void;
+}
+
 export interface GraphQLSubscriptionOptions {
   query: string;
   variables?: Record<string, unknown>;
@@ -41,7 +53,37 @@ export interface GraphQLSubscriptionOptions {
   maxReconnectAttempts?: number;
   /** Base delay in ms; actual wait uses capped exponential backoff (max 30s) with jitter. Default 1000. */
   reconnectDelayMs?: number;
+  /**
+   * Heartbeat interval (ms). When positive, the client sends a `ping` frame
+   * every `heartbeatIntervalMs` and expects a `pong` back within
+   * `heartbeatTimeoutMs`; if none arrives the socket is treated as half-open
+   * (NAT timeout, device sleep) and force-reconnected. Defaults to 30_000ms.
+   * Set to `0` to disable the heartbeat.
+   */
+  heartbeatIntervalMs?: number;
+  /**
+   * How long (ms) to wait for a `pong` after sending `ping` before assuming
+   * the connection is dead and triggering a reconnect. Defaults to 5_000ms.
+   */
+  heartbeatTimeoutMs?: number;
+  /**
+   * When the WebSocket cannot be re-established after `maxReconnectAttempts`,
+   * keep the subscription alive by polling the endpoint over HTTP instead of
+   * tearing it down (#1089). Defaults to `true`; set `false` to restore the
+   * previous behaviour (report the error and unsubscribe).
+   */
+  pollingFallback?: boolean;
+  /** Interval (ms) between HTTP polls once in polling fallback. Default 10_000. */
+  pollingIntervalMs?: number;
+  /**
+   * Query sent on each poll. Defaults to the subscription document with its
+   * leading `subscription` keyword replaced by `query`.
+   */
+  pollingQuery?: string;
 }
+
+/** Default interval for {@link GraphQLSubscriptionOptions.pollingIntervalMs}. */
+export const DEFAULT_SUBSCRIPTION_POLLING_INTERVAL_MS = 10_000;
 
 export interface IndexerSubscription {
   unsubscribe: () => void;
@@ -77,8 +119,38 @@ interface GraphQLServerMessage {
  * `dashboard/transaction-history.ts` and `examples/dashboard/.../apollo-client.ts`).
  */
 export const DEFAULT_INDEXER_TIMEOUT_MS = 15_000;
-/** Maximum number of pages fetched by {@link GraphQLIndexer.fetchAll}. */
+
+/**
+ * The default upper bound on the number of pages {@link GraphQLIndexer.fetchAll}
+ * will request before throwing an {@link IndexerMaxPagesExceededError}.
+ * Override per-call via `fetchAllOptions.maxPages`.
+ */
 export const DEFAULT_INDEXER_MAX_PAGES = 1_000;
+
+/**
+ * Options accepted by {@link GraphQLIndexer.fetchAll} (typed variant).
+ */
+export interface FetchAllOptions<TPage> {
+  /**
+   * The initial GraphQL query options (same shape as {@link GraphQLQueryOptions}).
+   * `variables` will be merged with `{ cursor }` on every subsequent page.
+   */
+  query: string;
+  variables?: Record<string, unknown>;
+  headers?: Record<string, string>;
+  /**
+   * Called after each page is fetched. Return the cursor string to use for
+   * the next page, or `null` / `undefined` when there are no more pages.
+   */
+  getNextCursor: (page: TPage) => string | null | undefined;
+  /**
+   * Maximum number of pages to fetch before throwing
+   * {@link IndexerMaxPagesExceededError}. Defaults to
+   * {@link DEFAULT_INDEXER_MAX_PAGES} (1 000).
+   */
+  maxPages?: number;
+}
+
 /**
  * Computes the SHA-256 hex digest of `input` using the Web Crypto API,
  * falling back to Node's `crypto` module when `crypto.subtle` is not
@@ -110,6 +182,59 @@ function isPersistedQueryNotFound(body: unknown): boolean {
   );
 }
 
+/** Relay-style page metadata decoded from a GraphQL `pageInfo` object. */
+export interface IndexerPageInfo {
+  hasNextPage: boolean;
+  hasPreviousPage: boolean;
+  startCursor: string | null;
+  endCursor: string | null;
+}
+
+/** A single cursor-paginated page of results. */
+export interface IndexerPage<T> {
+  items: T[];
+  pageInfo: IndexerPageInfo;
+}
+
+/** Options for {@link GraphQLIndexer.fetchStreamsBySender}. */
+export interface FetchStreamsBySenderOptions
+  extends Omit<GraphQLQueryOptions, 'query' | 'variables'> {
+  /** Page size when paging forward (with or without `afterCursor`). */
+  first?: number;
+  /** Page size when paging backward with `beforeCursor`. */
+  last?: number;
+  /** Return items after this cursor (a previous page's `pageInfo.endCursor`). */
+  afterCursor?: string;
+  /** Return items before this cursor (a previous page's `pageInfo.startCursor`). */
+  beforeCursor?: string;
+}
+
+/**
+ * Stream lifecycle filter for {@link GraphQLIndexer.streamsByRecipient} (#1090).
+ * `active` streams are still vesting or withdrawable; `completed` streams have
+ * ended or been cancelled; `all` (the default) applies no filter.
+ */
+export type StreamStatusFilter = 'active' | 'completed' | 'all';
+
+const STREAM_STATUS_FILTERS: readonly StreamStatusFilter[] = ['active', 'completed', 'all'];
+
+/** Options for {@link GraphQLIndexer.streamsByRecipient}. */
+export interface StreamsByRecipientOptions
+  extends Omit<GraphQLQueryOptions, 'query' | 'variables'> {
+  /** Restrict results to active or completed streams. Default `'all'`. */
+  status?: StreamStatusFilter;
+}
+
+function decodePageInfo(raw: unknown): IndexerPageInfo {
+  const info = (raw && typeof raw === 'object' ? raw : {}) as Record<string, unknown>;
+  return {
+    hasNextPage: info.hasNextPage === true,
+    hasPreviousPage: info.hasPreviousPage === true,
+    startCursor: typeof info.startCursor === 'string' ? info.startCursor : null,
+    endCursor: typeof info.endCursor === 'string' ? info.endCursor : null,
+  };
+}
+
 interface PaginatedCollection {
   items: unknown[];
   hasNextPage: boolean;
@@ -139,17 +264,210 @@ function findPaginatedCollection(value: unknown): PaginatedCollection | undefine
 }
 
 
+// ── Historical event replay by ledger sequence ────────────────────────────────
+
+/** Default number of ledgers scanned by {@link GraphQLIndexer.replayEventsFrom} when `ledgerOffset` is given. */
+export const DEFAULT_REPLAY_LEDGER_OFFSET = 1_000;
+/** Default page size for {@link GraphQLIndexer.replayEventsFrom}. */
+export const DEFAULT_REPLAY_EVENTS_PAGE_SIZE = 100;
+/** Default page cap for {@link GraphQLIndexer.replayEventsFrom}. */
+export const DEFAULT_REPLAY_EVENTS_MAX_PAGES = 1_000;
+
+/**
+ * Options for {@link GraphQLIndexer.replayEventsFrom}.
+ *
+ * A client that lost connectivity remembers the last ledger it processed and
+ * asks only for the events after it. `fromLedger` (or `lastProcessedLedger`)
+ * is that ledger-sequence offset; `toLedger` optionally bounds the replay so a
+ * single call cannot walk the chain's entire history.
+ */
+export interface ReplayEventsFromOptions
+  extends Omit<GraphQLQueryOptions, 'query' | 'variables'> {
+  /** First ledger sequence to include (inclusive). */
+  fromLedger?: number;
+  /**
+   * Last ledger the client successfully processed. Used when `fromLedger` is
+   * omitted: replay starts at `lastProcessedLedger + 1` (set `inclusive` to
+   * replay the ledger itself too).
+   */
+  lastProcessedLedger?: number;
+  /** Include the `lastProcessedLedger` itself instead of starting one past it. Default false. */
+  inclusive?: boolean;
+  /** Highest ledger sequence to include (inclusive). When omitted, no upper bound is sent. */
+  toLedger?: number;
+  /**
+   * Ledger-sequence window size. When `toLedger` is omitted it becomes
+   * `fromLedger + ledgerOffset`; when `fromLedger` is omitted it becomes
+   * `max(1, toLedger - ledgerOffset)`.
+   */
+  ledgerOffset?: number;
+  /** Events per page. Default {@link DEFAULT_REPLAY_EVENTS_PAGE_SIZE}. */
+  pageSize?: number;
+  /** Maximum pages fetched before throwing. Default {@link DEFAULT_REPLAY_EVENTS_MAX_PAGES}. */
+  maxPages?: number;
+  /** GraphQL document override (defaults to a `ReplayEventsFrom` query). */
+  query?: string;
+  /** Extra variables merged into every request (e.g. contract filters). */
+  variables?: Record<string, unknown>;
+  /** Deduplicate events by id across overlapping pages. Default true. */
+  dedupe?: boolean;
+  /** Called once for every dispatched event, in ledger order. */
+  onEvent?: (event: unknown) => void;
+}
+
+/** Result metadata attached to the array returned by {@link GraphQLIndexer.replayEventsFrom}. */
+export interface ReplayEventsFromResult<T> {
+  /** The events in replay order. */
+  events: T[];
+  /** First ledger requested (inclusive). */
+  fromLedger: number;
+  /** Highest ledger requested, when bounded. */
+  toLedger: number | undefined;
+  /** Ledger sequence of the last dispatched event, or `undefined` when none were replayed. */
+  lastLedger: number | undefined;
+  /** Number of events dispatched. */
+  dispatched: number;
+  /** Number of pages fetched from the indexer. */
+  pagesFetched: number;
+}
+
+/** Default GraphQL document used to replay events over a ledger range. */
+export const REPLAY_EVENTS_FROM_QUERY = `
+  query ReplayEventsFrom($fromLedger: Int!, $toLedger: Int, $limit: Int, $cursor: String) {
+    streamEvents(fromLedger: $fromLedger, toLedger: $toLedger, first: $limit, after: $cursor) {
+      items {
+        id
+        ledger
+        timestamp
+        txHash
+        topic
+        value
+      }
+      pageInfo {
+        hasNextPage
+        endCursor
+      }
+    }
+  }
+`;
+
+function ledgerOf(value: unknown): number | undefined {
+  if (!value || typeof value !== 'object') return undefined;
+  const ledger = (value as { ledger?: unknown }).ledger;
+  return typeof ledger === 'number' ? ledger : undefined;
+}
+
+function eventIdOf(value: unknown, index: number): string {
+  if (value && typeof value === 'object') {
+    const record = value as { id?: unknown; pagingToken?: unknown; txHash?: unknown };
+    if (typeof record.id === 'string' || typeof record.id === 'number') return String(record.id);
+    if (typeof record.pagingToken === 'string') return record.pagingToken;
+    if (typeof record.txHash === 'string') {
+      return `${record.txHash}:${String(ledgerOf(value) ?? '')}:${index}`;
+    }
+  }
+  return `index:${index}`;
+}
+
+/** Find the first event array in a (possibly nested) GraphQL response. */
+function findReplayEventArray(value: unknown, depth = 0): unknown[] | undefined {
+  if (depth > 4 || !value || typeof value !== 'object') return undefined;
+  if (Array.isArray(value)) return value;
+  const record = value as Record<string, unknown>;
+  for (const key of ['events', 'streamEvents', 'items', 'nodes', 'results']) {
+    const candidate = record[key];
+    if (Array.isArray(candidate)) return candidate;
+  }
+  for (const candidate of Object.values(record)) {
+    const nested = findReplayEventArray(candidate, depth + 1);
+    if (nested) return nested;
+  }
+  return undefined;
+}
+
+/** Locate Relay-style `pageInfo` anywhere within a GraphQL response. */
+function findPageInfo(value: unknown, depth = 0): IndexerPageInfo | undefined {
+  if (depth > 4 || !value || typeof value !== 'object') return undefined;
+  const record = value as Record<string, unknown>;
+  const candidate = record.pageInfo;
+  if (candidate && typeof candidate === 'object') return decodePageInfo(candidate);
+  for (const nested of Object.values(record)) {
+    const found = findPageInfo(nested, depth + 1);
+    if (found) return found;
+  }
+  return undefined;
+}
+
+/** A detected skip in an otherwise-monotonic ledger sequence. */
+export interface LedgerGap {
+  /** The ledger sequence that should have come next (`currentLedger + 1`). */
+  expected: number;
+  /** The ledger sequence actually observed. */
+  actual: number;
+}
+
+/**
+ * Tracks a monotonically increasing ledger sequence and flags a skip —
+ * `nextLedger !== currentLedger + 1` — so a streaming poller can trigger a
+ * backfill fetch instead of silently continuing past missed ledgers (a
+ * network hiccup during polling would otherwise corrupt off-chain balance
+ * indexing and state projections built from the stream).
+ *
+ * This is framework-agnostic: feed it any monotonically-intended ledger
+ * sequence (e.g. each dispatched event's `event.ledger`) from whichever
+ * poller observes it.
+ */
+export class LedgerGapDetector {
+  private current: number | undefined;
+
+  /** The last ledger sequence observed, or `undefined` before the first `observe()` call. */
+  get currentLedger(): number | undefined {
+    return this.current;
+  }
+
+  /**
+   * Records the next observed ledger sequence.
+   *
+   * Returns the detected {@link LedgerGap} if `ledger` is not exactly one
+   * past the previously observed ledger, otherwise `undefined`. A `ledger`
+   * at or behind the current value (a duplicate or re-ordered delivery) is
+   * recorded without being treated as a gap.
+   */
+  observe(ledger: number): LedgerGap | undefined {
+    if (!Number.isInteger(ledger) || ledger < 0) {
+      throw new Error(`LedgerGapDetector.observe: ledger must be a non-negative integer, got ${String(ledger)}`);
+    }
+
+    let gap: LedgerGap | undefined;
+    if (this.current !== undefined && ledger > this.current + 1) {
+      gap = { expected: this.current + 1, actual: ledger };
+    }
+    if (this.current === undefined || ledger > this.current) {
+      this.current = ledger;
+    }
+    return gap;
+  }
+
+  /** Clears the tracked ledger so the next `observe()` call cannot be flagged as a gap. */
+  reset(): void {
+    this.current = undefined;
+  }
+}
+
 export class GraphQLIndexer {
   private endpoint: string;
+  private readonly onQueryMetric: ((metric: IndexerQueryMetric) => void) | undefined;
   private activeSubscriptions: Set<IndexerSubscription> = new Set();
   private isDestroyed = false;
   private subCounter = 0;
 
-  constructor(endpoint: string) {
+  constructor(endpointOrConfig: string | IndexerConfig) {
+    const endpoint = typeof endpointOrConfig === 'string' ? endpointOrConfig : endpointOrConfig?.endpoint;
     if (!endpoint || typeof endpoint !== 'string' || endpoint.trim().length === 0) {
       throw new Error('GraphQLIndexer endpoint must be a non-empty string');
     }
     this.endpoint = endpoint;
+    this.onQueryMetric = typeof endpointOrConfig === 'string' ? undefined : endpointOrConfig.onQueryMetric;
   }
 
   /**
@@ -175,6 +493,20 @@ export class GraphQLIndexer {
    * @returns The unwrapped `body.data` payload typed as `T`.
    */
   async query<T = unknown>(options: GraphQLQueryOptions): Promise<T> {
+    const startedAt = Date.now();
+    const queryName = this.getQueryName(options?.query);
+    try {
+      const result = await this.queryInternal<T>(options);
+      this.emitQueryMetric({ queryName, durationMs: Date.now() - startedAt, success: true });
+      return result;
+    } catch (error) {
+      const normalizedError = error instanceof Error ? error : new Error(String(error));
+      this.emitQueryMetric({ queryName, durationMs: Date.now() - startedAt, success: false, error: normalizedError });
+      throw error;
+    }
+  }
+
+  private async queryInternal<T = unknown>(options: GraphQLQueryOptions): Promise<T> {
     if (this.isDestroyed) {
       throw new Error('GraphQLIndexer has been destroyed');
     }
@@ -243,14 +575,32 @@ export class GraphQLIndexer {
     return (body?.data) as T;
   }
 
+  private getQueryName(query: unknown): string {
+    if (typeof query !== 'string') return 'unknown';
+    const match = query.match(/\b(?:query|mutation|subscription)\s+([A-Za-z_][A-Za-z0-9_]*)/);
+    return match?.[1] ?? 'anonymous';
+  }
+
+  private emitQueryMetric(metric: IndexerQueryMetric): void {
+    try {
+      this.onQueryMetric?.(metric);
+    } catch {
+      // Telemetry must never change query behavior.
+    }
+  }
+
   /**
    * Fetches every page of a cursor-based GraphQL collection.
    *
    * The response is expected to contain one collection with an `items`,
    * `nodes`, or `results` array and GraphQL-style `pageInfo`. The helper
    * preserves the original query and updates its `variables.cursor` value.
+   *
+   * @deprecated Use the typed {@link fetchAll} overload with {@link FetchAllOptions}
+   * and a `getNextCursor` callback instead, which provides stronger types and
+   * throws {@link IndexerMaxPagesExceededError} on page-limit violations.
    */
-  async fetchAll(options: GraphQLQueryOptions): Promise<unknown[]> {
+  async fetchAllAuto(options: GraphQLQueryOptions): Promise<unknown[]> {
     const results: unknown[] = [];
     let cursor: unknown = options.variables?.cursor;
 
@@ -261,21 +611,21 @@ export class GraphQLIndexer {
       });
       const collection = findPaginatedCollection(data);
       if (!collection) {
-        throw new Error('GraphQLIndexer.fetchAll expected a paginated collection response');
+        throw new Error('GraphQLIndexer.fetchAllAuto expected a paginated collection response');
       }
       results.push(...collection.items);
 
       if (!collection.hasNextPage) return results;
       if (typeof collection.endCursor !== 'string' || collection.endCursor.length === 0) {
-        throw new Error('GraphQLIndexer.fetchAll received a page with no next cursor');
+        throw new Error('GraphQLIndexer.fetchAllAuto received a page with no next cursor');
       }
       if (collection.endCursor === cursor) {
-        throw new Error('GraphQLIndexer.fetchAll received an unchanged pagination cursor');
+        throw new Error('GraphQLIndexer.fetchAllAuto received an unchanged pagination cursor');
       }
       cursor = collection.endCursor;
     }
 
-    throw new Error(`GraphQLIndexer.fetchAll exceeded the maximum page limit of ${DEFAULT_INDEXER_MAX_PAGES}`);
+    throw new IndexerMaxPagesExceededError(DEFAULT_INDEXER_MAX_PAGES, DEFAULT_INDEXER_MAX_PAGES);
   }
 
   /**
@@ -409,6 +759,30 @@ export class GraphQLIndexer {
       60_000,
       'reconnectDelayMs',
     );
+    const heartbeatIntervalMs = this.parseBoundedInt(
+      options.heartbeatIntervalMs,
+      30_000,
+      0,
+      600_000,
+      'heartbeatIntervalMs',
+    );
+    const heartbeatTimeoutMs = this.parseBoundedInt(
+      options.heartbeatTimeoutMs,
+      5_000,
+      0,
+      600_000,
+      'heartbeatTimeoutMs',
+    );
+    const pollingIntervalMs = this.parseBoundedInt(
+      options.pollingIntervalMs,
+      DEFAULT_SUBSCRIPTION_POLLING_INTERVAL_MS,
+      100,
+      600_000,
+      'pollingIntervalMs',
+    );
+    const pollingFallback = options.pollingFallback !== false;
+    const pollingQuery =
+      options.pollingQuery ?? options.query.replace(/^\s*subscription\b/, 'query');
 
     let unsubscribed = false;
     const subId = `sub_${++this.subCounter}_${Date.now()}`;
@@ -417,6 +791,47 @@ export class GraphQLIndexer {
     let abortController: AbortController | null = null;
     let reconnectAttempts = 0;
     let reconnectTimer: ReturnType<typeof setTimeout> | null = null;
+    let heartbeatInterval: ReturnType<typeof setInterval> | null = null;
+    let heartbeatTimeout: ReturnType<typeof setTimeout> | null = null;
+    let awaitingPong = false;
+    let polling = false;
+    let pollTimer: ReturnType<typeof setTimeout> | null = null;
+
+    /**
+     * WebSocket is unrecoverable: poll the endpoint over HTTP every
+     * `pollingIntervalMs` and feed each result to `onData`, so dashboards stay
+     * fresh behind proxies or firewalls that block WebSocket upgrades (#1089).
+     * The next poll is scheduled only after the previous one settles, so a slow
+     * indexer never has overlapping requests in flight.
+     */
+    const startPolling = (): void => {
+      if (polling || unsubscribed || this.isDestroyed) return;
+      polling = true;
+      const poll = (): void => {
+        pollTimer = null;
+        if (unsubscribed || this.isDestroyed) return;
+        abortController = typeof AbortController !== 'undefined' ? new AbortController() : null;
+        const pollOptions: GraphQLQueryOptions = { query: pollingQuery, variables };
+        if (options.headers) pollOptions.headers = options.headers;
+        if (abortController) pollOptions.signal = abortController.signal;
+        this.query(pollOptions)
+          .then((data) => {
+            if (!unsubscribed && !this.isDestroyed) options.onData(data);
+          })
+          .catch((err: unknown) => {
+            const isAbort = err instanceof Error && err.name === 'AbortError';
+            if (!unsubscribed && !this.isDestroyed && !isAbort) {
+              this.handleError(options.onError, err);
+            }
+          })
+          .finally(() => {
+            if (!unsubscribed && !this.isDestroyed) {
+              pollTimer = setTimeout(poll, pollingIntervalMs);
+            }
+          });
+      };
+      poll();
+    };
 
     const clearReconnectTimer = (): void => {
       if (reconnectTimer !== null) {
@@ -425,11 +840,122 @@ export class GraphQLIndexer {
       }
     };
 
+    const clearHeartbeatTimeout = (): void => {
+      if (heartbeatTimeout !== null) {
+        clearTimeout(heartbeatTimeout);
+        heartbeatTimeout = null;
+      }
+    };
+
+    const stopHeartbeat = (): void => {
+      clearHeartbeatTimeout();
+      if (heartbeatInterval !== null) {
+        clearInterval(heartbeatInterval);
+        heartbeatInterval = null;
+      }
+      awaitingPong = false;
+    };
+
+    /**
+     * Schedule a reconnect using the same capped exponential backoff already
+     * used by {@link socket.onclose}. Extracted so a dead socket whose
+     * `close()` never fires `onclose` (the classic half-open failure) can drive
+     * a reconnect itself after a heartbeat timeout.
+     */
+    const scheduleReconnect = (): void => {
+      if (unsubscribed || this.isDestroyed) return;
+      if (reconnectAttempts >= maxReconnectAttempts) {
+        const exhausted = `GraphQL subscription WebSocket closed on ${this.endpoint} after ${maxReconnectAttempts} reconnect attempts exhausted`;
+        if (pollingFallback) {
+          this.handleError(
+            options.onError,
+            new Error(`${exhausted}; falling back to HTTP polling every ${pollingIntervalMs}ms`),
+          );
+          startPolling();
+          return;
+        }
+        this.handleError(options.onError, new Error(exhausted));
+        subscription.unsubscribe();
+        return;
+      }
+      reconnectAttempts += 1;
+      // Exponential backoff: base * 2^(attempt - 1), capped at 30s. Linear
+      // growth kept hammering an endpoint that was still recovering.
+      const exponentialDelay = reconnectDelayMs * 2 ** (reconnectAttempts - 1);
+      const cappedDelay = Math.min(exponentialDelay, 30_000);
+      // Randomized jitter (up to 30% of the capped delay) de-synchronises
+      // clients reconnecting after the same network transition, preventing a
+      // reconnection storm against a recovering indexer.
+      const jitter = Math.random() * 0.3 * cappedDelay;
+      const delay = cappedDelay + jitter;
+      reconnectTimer = setTimeout(() => {
+        reconnectTimer = null;
+        if (unsubscribed || this.isDestroyed) return;
+        openSocket();
+      }, delay);
+    };
+
+    /**
+     * Drive the keepalive ping/pong heartbeat for one socket. Every
+     * `heartbeatIntervalMs` (when the socket is OPEN and we are not already
+     * awaiting a `pong`) we send a `ping` and arm a `heartbeatTimeoutMs`
+     * timer; if no `pong` comes back in time, the connection is considered
+     * dead and force-reconnected.
+     */
+    const startHeartbeat = (socket: WebSocket): void => {
+      stopHeartbeat();
+      if (!(heartbeatIntervalMs > 0)) return;
+      heartbeatInterval = setInterval(() => {
+        if (unsubscribed || this.isDestroyed) return;
+        if (socket.readyState === 1 /* OPEN */ && !awaitingPong) {
+          try {
+            socket.send(JSON.stringify({ type: 'ping' }));
+            awaitingPong = true;
+            heartbeatTimeout = setTimeout(() => {
+              if (awaitingPong) {
+                handleHeartbeatTimeout();
+              }
+            }, heartbeatTimeoutMs);
+          } catch {
+            // Ignore send errors — the next interval will retry.
+          }
+        }
+      }, heartbeatIntervalMs);
+    };
+
+    /**
+     * No `pong` arrived in time: the socket is half-open. `close()` on such a
+     * socket may never fire `onclose`, so detach the dead socket and drive the
+     * reconnect ourselves rather than waiting on an event that may never come.
+     */
+    const handleHeartbeatTimeout = (): void => {
+      const dead = ws;
+      stopHeartbeat();
+      ws = null;
+      if (dead) {
+        dead.onopen = null;
+        dead.onmessage = null;
+        dead.onerror = null;
+        dead.onclose = null;
+        try {
+          dead.close();
+        } catch {
+          // Socket already closed/closing; nothing to clean up.
+        }
+      }
+      scheduleReconnect();
+    };
+
     const subscription: IndexerSubscription = {
       unsubscribe: () => {
         if (unsubscribed) return;
         unsubscribed = true;
         clearReconnectTimer();
+        stopHeartbeat();
+        if (pollTimer !== null) {
+          clearTimeout(pollTimer);
+          pollTimer = null;
+        }
 
         if (ws) {
           try {
@@ -488,6 +1014,7 @@ export class GraphQLIndexer {
           return;
         }
         reconnectAttempts = 0;
+        startHeartbeat(socket);
         try {
           socket.send(JSON.stringify({ type: 'connection_init' }));
           queuedSubscribeMessage = JSON.stringify({
@@ -512,6 +1039,23 @@ export class GraphQLIndexer {
               : (event.data as unknown);
           if (!raw || typeof raw !== 'object') return;
           const data = raw as GraphQLServerMessage;
+
+          // Heartbeat keepalive (graphql-transport-ws).
+          if (data.type === 'ping') {
+            // Server-initiated keepalive — the client MUST respond with pong.
+            try {
+              socket.send(JSON.stringify({ type: 'pong' }));
+            } catch {
+              // Ignore send errors — the next ping will retry.
+            }
+            return;
+          }
+          if (data.type === 'pong') {
+            // Response to our heartbeat ping: the link is alive.
+            awaitingPong = false;
+            clearHeartbeatTimeout();
+            return;
+          }
 
           if (data.type === 'connection_ack') {
             if (queuedSubscribeMessage !== null) {
@@ -540,31 +1084,13 @@ export class GraphQLIndexer {
       };
 
       socket.onclose = () => {
+        stopHeartbeat();
         if (unsubscribed || this.isDestroyed) return;
         this.handleError(
           options.onError,
           new Error(`GraphQL subscription WebSocket closed on ${this.endpoint}`),
         );
-        if (reconnectAttempts >= maxReconnectAttempts) {
-          this.handleError(
-            options.onError,
-            new Error(
-              `GraphQL subscription WebSocket closed on ${this.endpoint} after ${maxReconnectAttempts} reconnect attempts exhausted`,
-            ),
-          );
-          subscription.unsubscribe();
-          return;
-        }
-        reconnectAttempts += 1;
-        const baseDelay = reconnectDelayMs * reconnectAttempts;
-        const cappedDelay = Math.min(baseDelay, 30_000);
-        const jitter = Math.random() * 0.3 * cappedDelay;
-        const delay = cappedDelay + jitter;
-        reconnectTimer = setTimeout(() => {
-          reconnectTimer = null;
-          if (unsubscribed || this.isDestroyed) return;
-          openSocket();
-        }, delay);
+        scheduleReconnect();
       };
     };
 
@@ -635,6 +1161,210 @@ export class GraphQLIndexer {
     return subscription;
   }
 
+  /**
+   * Fetches all pages of a paginated GraphQL query and returns the
+   * accumulated results as a single array.
+   *
+   * Each successive page is requested by merging the cursor returned by
+   * `getNextCursor` into the query variables as `{ cursor }`. Pagination
+   * stops when `getNextCursor` returns `null` or `undefined`.
+   *
+   * Throws {@link IndexerMaxPagesExceededError} (not a plain `Error`) if more
+   * than `maxPages` (default {@link DEFAULT_INDEXER_MAX_PAGES}) pages are
+   * required, so callers can `instanceof`-check for the page-limit case
+   * independently of network failures or timeouts. See #801.
+   *
+   * @example
+   * ```ts
+   * const rows = await indexer.fetchAll<{ transfers: Transfer[] }>({
+   *   query: LIST_TRANSFERS_QUERY,
+   *   variables: { limit: 100 },
+   *   getNextCursor: (page) => page.transfers.at(-1)?.cursor ?? null,
+   * });
+   * ```
+   */
+  async fetchAll<TPage>(options: FetchAllOptions<TPage>): Promise<TPage[]> {
+    const maxPages = options.maxPages ?? DEFAULT_INDEXER_MAX_PAGES;
+    const pages: TPage[] = [];
+    let cursor: string | null | undefined = undefined;
+    let pagesFetched = 0;
+
+    for (;;) {
+      if (pagesFetched >= maxPages) {
+        throw new IndexerMaxPagesExceededError(pagesFetched, maxPages);
+      }
+
+      const variables: Record<string, unknown> = {
+        ...options.variables,
+        ...(cursor != null ? { cursor } : {}),
+      };
+
+      const result = await this.query({
+        query: options.query,
+        variables,
+        ...(options.headers != null ? { headers: options.headers } : {}),
+      });
+
+      pages.push(result as TPage);
+      pagesFetched += 1;
+
+      cursor = options.getNextCursor(result as TPage);
+      if (cursor == null) break;
+    }
+
+    return pages;
+  }
+
+  /**
+   * Replay events missed while the client was offline, starting at a ledger
+   * sequence offset rather than at "now".
+   *
+   * A reconnecting client passes the last ledger it processed; every event
+   * from that point forward is fetched (in order, deduplicated across pages)
+   * so the UI can rebuild the state it missed. The method delegates to
+   * {@link query}, so timeouts, signals, headers and persisted queries are
+   * handled exactly like any other indexer request.
+   *
+   * The returned value is an array of events with {@link ReplayEventsFromResult}
+   * metadata (`events`, `lastLedger`, `dispatched`, …) attached as
+   * non-enumerable properties, so it can be used as either an array or a
+   * result object.
+   *
+   * @example
+   * ```ts
+   * const events = await indexer.replayEventsFrom(lastProcessedLedger, {
+   *   ledgerOffset: 500,
+   *   onEvent: (event) => applyEvent(event),
+   * });
+   * ```
+   */
+  async replayEventsFrom<TEvent = unknown>(
+    fromLedgerOrOptions: number | ReplayEventsFromOptions,
+    maybeOptions: ReplayEventsFromOptions = {},
+  ): Promise<TEvent[] & ReplayEventsFromResult<TEvent>> {
+    const options: ReplayEventsFromOptions =
+      typeof fromLedgerOrOptions === 'number'
+        ? { ...maybeOptions, fromLedger: fromLedgerOrOptions }
+        : fromLedgerOrOptions;
+
+    const fromLedger = options.fromLedger ??
+      (options.lastProcessedLedger !== undefined
+        ? options.lastProcessedLedger + (options.inclusive ? 0 : 1)
+        : undefined);
+    if (!Number.isInteger(fromLedger) || (fromLedger as number) < 1) {
+      throw new Error(
+        `replayEventsFrom: fromLedger must be a positive integer, got ${String(fromLedger)}`,
+      );
+    }
+
+    if (options.ledgerOffset !== undefined &&
+        (!Number.isInteger(options.ledgerOffset) || options.ledgerOffset < 0)) {
+      throw new Error(
+        `replayEventsFrom: ledgerOffset must be a non-negative integer, got ${String(options.ledgerOffset)}`,
+      );
+    }
+
+    let toLedger = options.toLedger;
+    if (toLedger !== undefined &&
+        (!Number.isInteger(toLedger) || toLedger < (fromLedger as number))) {
+      throw new Error(
+        `replayEventsFrom: toLedger must be an integer >= fromLedger, got ${String(toLedger)}`,
+      );
+    }
+    if (toLedger === undefined && options.ledgerOffset !== undefined) {
+      toLedger = (fromLedger as number) + options.ledgerOffset;
+    }
+
+    const pageSize = options.pageSize ?? DEFAULT_REPLAY_EVENTS_PAGE_SIZE;
+    if (!Number.isInteger(pageSize) || pageSize < 1) {
+      throw new Error(`replayEventsFrom: pageSize must be a positive integer, got ${String(pageSize)}`);
+    }
+    const maxPages = options.maxPages ?? DEFAULT_REPLAY_EVENTS_MAX_PAGES;
+    if (!Number.isInteger(maxPages) || maxPages < 1) {
+      throw new Error(`replayEventsFrom: maxPages must be a positive integer, got ${String(maxPages)}`);
+    }
+
+    const query = options.query ?? REPLAY_EVENTS_FROM_QUERY;
+    const dedupe = options.dedupe !== false;
+    const seen = new Set<string>();
+    const events: TEvent[] = [];
+    let lastLedger: number | undefined;
+    let cursor: string | undefined;
+    let pagesFetched = 0;
+
+    for (;;) {
+      if (pagesFetched >= maxPages) {
+        throw new Error(
+          `replayEventsFrom: exceeded maxPages (${maxPages}) before the replay was complete`,
+        );
+      }
+
+      const variables: Record<string, unknown> = {
+        fromLedger,
+        ...(toLedger !== undefined ? { toLedger } : {}),
+        limit: pageSize,
+        ...options.variables,
+        ...(cursor !== undefined ? { cursor } : {}),
+      };
+
+      const data = await this.query<unknown>({
+        query,
+        variables,
+        ...(options.headers !== undefined ? { headers: options.headers } : {}),
+        ...(options.timeoutMs !== undefined ? { timeoutMs: options.timeoutMs } : {}),
+        ...(options.signal !== undefined ? { signal: options.signal } : {}),
+        ...(options.persist !== undefined ? { persist: options.persist } : {}),
+      });
+
+      pagesFetched += 1;
+      const page = findReplayEventArray(data) ?? [];
+      let pastRange = false;
+
+      for (let index = 0; index < page.length; index++) {
+        const event = page[index] as TEvent;
+        const ledger = ledgerOf(event);
+        if (ledger !== undefined && toLedger !== undefined && ledger > toLedger) {
+          pastRange = true;
+          break;
+        }
+        const id = eventIdOf(event, index);
+        if (dedupe && seen.has(id)) continue;
+        seen.add(id);
+        events.push(event);
+        if (ledger !== undefined) lastLedger = ledger;
+        try {
+          options.onEvent?.(event);
+        } catch (handlerError) {
+          console.warn('[conduit-sdk] replayEventsFrom onEvent handler error:', handlerError);
+        }
+      }
+      if (pastRange) break;
+
+      const pageInfo = findPageInfo(data);
+      const nextCursor = pageInfo?.endCursor ??
+        (data && typeof data === 'object' ? (data as { cursor?: unknown }).cursor : undefined);
+      const hasNextPage = pageInfo?.hasNextPage ?? page.length >= pageSize;
+      if (!hasNextPage || typeof nextCursor !== 'string' || nextCursor.length === 0 || nextCursor === cursor) {
+        break;
+      }
+      cursor = nextCursor;
+    }
+
+    const result = events as TEvent[] & ReplayEventsFromResult<TEvent>;
+    const metadata: ReplayEventsFromResult<TEvent> = {
+      events,
+      fromLedger: fromLedger as number,
+      toLedger,
+      lastLedger,
+      dispatched: events.length,
+      pagesFetched,
+    };
+    for (const [key, value] of Object.entries(metadata)) {
+      Object.defineProperty(result, key, { value, enumerable: false, configurable: true });
+    }
+    return result;
+  }
+
   getSubscriptionCount(): number {
     return this.activeSubscriptions.size;
   }
@@ -696,6 +1426,93 @@ export class GraphQLIndexer {
   }
 
   /**
+   * Cursor-paginated variant of {@link streamsBySender}.
+   *
+   * Uses Relay-style `first`/`after` (forward) or `last`/`before` (backward)
+   * arguments instead of offset/limit, so deep pages cost the same as the
+   * first and records created between page fetches cannot shift the window.
+   * The returned `pageInfo` is decoded so callers can feed `endCursor` /
+   * `startCursor` straight back in as `afterCursor` / `beforeCursor`.
+   *
+   * @param senderAddress The sender's Stellar account address
+   * @param options Page size, cursors and query configuration
+   * @throws if both `afterCursor` and `beforeCursor` are given, if a cursor is
+   *   mixed with the opposite page-size argument, or if a page size is not a
+   *   positive integer
+   */
+  async fetchStreamsBySender<T = unknown>(
+    senderAddress: string,
+    options: FetchStreamsBySenderOptions = {},
+  ): Promise<IndexerPage<T>> {
+    const { first, last, afterCursor, beforeCursor, ...queryOptions } = options;
+
+    if (afterCursor !== undefined && beforeCursor !== undefined) {
+      throw new Error('fetchStreamsBySender: afterCursor and beforeCursor are mutually exclusive');
+    }
+    for (const [name, size] of [['first', first], ['last', last]] as const) {
+      if (size !== undefined && (!Number.isInteger(size) || size < 1)) {
+        throw new Error(`fetchStreamsBySender: ${name} must be a positive integer`);
+      }
+    }
+    if (first !== undefined && last !== undefined) {
+      throw new Error('fetchStreamsBySender: first and last are mutually exclusive');
+    }
+    if (beforeCursor !== undefined && first !== undefined) {
+      throw new Error('fetchStreamsBySender: beforeCursor must be paired with last, not first');
+    }
+    if (afterCursor !== undefined && last !== undefined) {
+      throw new Error('fetchStreamsBySender: afterCursor must be paired with first, not last');
+    }
+
+    const backward = beforeCursor !== undefined || last !== undefined;
+    const variables: Record<string, unknown> = { sender: senderAddress };
+    if (backward) {
+      if (last !== undefined) variables.last = last;
+      if (beforeCursor !== undefined) variables.before = beforeCursor;
+    } else {
+      if (first !== undefined) variables.first = first;
+      if (afterCursor !== undefined) variables.after = afterCursor;
+    }
+
+    const query = `
+      query FetchStreamsBySender($sender: String!, $first: Int, $after: String, $last: Int, $before: String) {
+        streamsBySender(sender: $sender, first: $first, after: $after, last: $last, before: $before) {
+          items {
+            id
+            sender
+            recipient
+            token
+            ratePerSecond
+            startTime
+            endTime
+            withdrawn
+            deposited
+            paused
+            pausedAt
+            cancelled
+            clawbackEnabled
+          }
+          pageInfo {
+            hasNextPage
+            hasPreviousPage
+            startCursor
+            endCursor
+          }
+        }
+      }
+    `;
+    const data = await this.query<{
+      streamsBySender?: { items?: T[]; nodes?: T[]; results?: T[]; pageInfo?: unknown };
+    }>({ ...queryOptions, query, variables });
+
+    const connection = data?.streamsBySender;
+    return {
+      items: connection?.items ?? connection?.nodes ?? connection?.results ?? [],
+      pageInfo: decodePageInfo(connection?.pageInfo),
+    };
+  }
+
+  /**
    * Convenience method to query all streams received by a specific address.
    *
    * Builds and executes a GraphQL query to fetch all streams where the given
@@ -709,11 +1526,22 @@ export class GraphQLIndexer {
    */
   async streamsByRecipient<T = unknown>(
     recipientAddress: string,
-    options?: Omit<GraphQLQueryOptions, 'query' | 'variables'>,
+    options: StreamsByRecipientOptions = {},
   ): Promise<T> {
+    const { status = 'all', ...queryOptions } = options;
+    if (!STREAM_STATUS_FILTERS.includes(status)) {
+      throw new Error(
+        `streamsByRecipient: status must be one of ${STREAM_STATUS_FILTERS.join(', ')}`,
+      );
+    }
+    // Only send `status` when it narrows the result, so the default request
+    // is unchanged for indexers that predate the argument (#1090).
+    const filtered = status !== 'all';
+    const variables: Record<string, unknown> = { recipient: recipientAddress };
+    if (filtered) variables.status = status;
     const query = `
-      query StreamsByRecipient($recipient: String!) {
-        streamsByRecipient(recipient: $recipient) {
+      query StreamsByRecipient($recipient: String!${filtered ? ', $status: String' : ''}) {
+        streamsByRecipient(recipient: $recipient${filtered ? ', status: $status' : ''}) {
           items {
             id
             sender
@@ -737,9 +1565,9 @@ export class GraphQLIndexer {
       }
     `;
     return this.query<T>({
-      ...options,
+      ...queryOptions,
       query,
-      variables: { recipient: recipientAddress },
+      variables,
     });
   }
 
@@ -788,4 +1616,19 @@ export class GraphQLIndexer {
       }
     }
   }
+}
+
+/**
+ * Standalone form of {@link GraphQLIndexer.replayEventsFrom}. Accepts either
+ * an existing indexer or an endpoint/config to construct one on the fly.
+ */
+export function replayEventsFrom<TEvent = unknown>(
+  indexerOrEndpoint: GraphQLIndexer | string | IndexerConfig,
+  fromLedgerOrOptions: number | ReplayEventsFromOptions,
+  maybeOptions: ReplayEventsFromOptions = {},
+): Promise<TEvent[] & ReplayEventsFromResult<TEvent>> {
+  const indexer = indexerOrEndpoint instanceof GraphQLIndexer
+    ? indexerOrEndpoint
+    : new GraphQLIndexer(indexerOrEndpoint);
+  return indexer.replayEventsFrom<TEvent>(fromLedgerOrOptions, maybeOptions);
 }

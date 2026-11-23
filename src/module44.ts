@@ -61,6 +61,28 @@ const DEFAULT_WARNING_THRESHOLD_SECS  = 604_800;  // 7 days
  * (proportional to cache hit rate); call `getPerformanceMetrics()` for this
  * instance's own measured hit/miss timing rather than assuming a fixed
  * percentage.
+ *
+ * @example
+ * ```ts
+ * import { Module44 } from '@conduit-protocol/sdk';
+ *
+ * // `stream` is an active StreamInfo streaming 10n per second until t=2000.
+ * // By default, under 1 day of runway is 'critical' and under 7 days is 'warning'.
+ * const risk = new Module44();
+ * const assessment = risk.assessSingleItem({ id: 'a', stream, timestamp: 1_500 });
+ * console.log(assessment.runwaySecs); // 500
+ * console.log(assessment.riskLevel);  // 'critical'
+ *
+ * // Amount to add via top_up() so the stream has 1000 seconds of runway left.
+ * risk.estimateTopUpNeeded(stream, 1_000, 1_500); // 5000n
+ *
+ * // Custom thresholds (`warningThresholdSecs` must exceed `criticalThresholdSecs`).
+ * const strict = new Module44({ criticalThresholdSecs: 300, warningThresholdSecs: 3_600 });
+ * strict.assessSingleItem({ id: 'a', stream, timestamp: 1_500 }).riskLevel; // 'warning'
+ * ```
+ *
+ * An open-ended stream (`endTime === 0`) has no scheduled runway: it is
+ * reported as `{ runwaySecs: null, riskLevel: 'healthy' }`.
  */
 export class Module44 {
   private readonly enableOptimization: boolean;
