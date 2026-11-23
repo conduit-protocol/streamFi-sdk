@@ -1124,6 +1124,64 @@ export class StreamsModule {
   }
 
   /**
+   * Dry-run simulation of a stream withdrawal transaction.
+   * 
+   * Estimates the exact claimable amount and transaction fee before submitting
+   * a live withdrawal. Prevents failed on-chain submissions due to zero balance
+   * or insufficient fee buffer.
+   * 
+   * @param streamId - The stream to simulate withdrawal from
+   * @param recipient - The recipient address (must match stream recipient)
+   * @returns Object containing claimableAmount and feeEstimate in stroops
+   * 
+   * @example
+   * ```ts
+   * const { claimableAmount, feeEstimate } = await client.streams.simulateWithdraw('123', 'G...');
+   * console.log(`Can claim ${claimableAmount} stroops with fee ${feeEstimate} stroops`);
+   * ```
+   */
+  async simulateWithdraw(
+    streamId: bigint | string,
+    recipient: string,
+  ): Promise<{ claimableAmount: bigint; feeEstimate: bigint }> {
+    const id = BigInt(streamId);
+    const addr = await this._resolveAddr(id);
+
+    // Get the current withdrawable amount (this is the claimable amount)
+    const claimableAmount = await this.withdrawable(id);
+
+    // Build a withdrawal transaction to simulate (but don't sign or submit)
+    const tx = await buildContractCallTx(
+      this.rpcUrl,
+      this.passphrase,
+      recipient,
+      addr,
+      "withdraw",
+      [nativeToScVal(claimableAmount, { type: "i128" })],
+      undefined,
+      undefined,
+      this._txOptions(),
+    );
+
+    const server = this._server();
+    const sim = await catchNetworkError(
+      "simulateTransaction (withdraw)",
+      server.simulateTransaction(tx),
+    );
+
+    if (SorobanRpc.Api.isSimulationError(sim)) {
+      throw ConduitError.fromSorobanMessage("stream", sim.error);
+    }
+
+    // Extract fee estimate from simulation
+    const resourceFee = BigInt(sim.minResourceFee || "0");
+    const baseFee = BigInt(this._fee || BASE_FEE);
+    const feeEstimate = resourceFee + baseFee;
+
+    return { claimableAmount, feeEstimate };
+  }
+
+  /**
    * Withdraw from multiple streams.
    *
    * Note: Soroban currently permits only one invoke_host_function
