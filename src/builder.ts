@@ -150,6 +150,33 @@ export class StreamBuilder {
   }
 
   /**
+   * Sets the recipient address with normalization (trims whitespace and validates StrKey).
+   * This is the recommended way to set recipient addresses from user input.
+   * @param address - The address that will receive tokens (may contain leading/trailing whitespace).
+   * @returns The builder instance for chaining.
+   * @throws {Error} If the address is not a valid ed25519 public key after normalization.
+   */
+  withRecipient(address: string): this {
+    if (typeof address !== 'string') {
+      throw new Error('Invalid StreamBuilder parameter: recipient must be a string');
+    }
+    
+    const trimmed = address.trim();
+    if (trimmed.length === 0) {
+      throw new Error('Invalid StreamBuilder parameter: recipient cannot be empty');
+    }
+
+    if (!StrKey.isValidEd25519PublicKey(trimmed)) {
+      throw new Error(
+        `Invalid StreamBuilder parameter: recipient must be a valid ed25519 public key (G-address), got "${trimmed}"`
+      );
+    }
+
+    this._recipient = trimmed;
+    return this;
+  }
+
+  /**
    * Sets the amount of tokens to stream.
    * Accepts a number, bigint, or numeric string; bigint and numeric string
    * values are serialised to strings before network submission to avoid
