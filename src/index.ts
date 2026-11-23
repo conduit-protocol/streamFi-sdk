@@ -7,6 +7,7 @@ export {
   getStreamStatus,
   isStreamCancellableByAccount,
   simulateWithdraw,
+  getRemainingVestingSeconds,
 } from "./streams.js";
 export type {
   SimulatedWithdraw,
@@ -472,6 +473,8 @@ export type {
   ReplayEventsOptions,
   ReplayEventsResult,
 } from "./events.js";
+export { EventSubscriber } from "./events.js";
+export type { EventSubscriberOptions } from "./events.js";
 export type {
   GovernorProposal,
   ExecuteProposalResult,

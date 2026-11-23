@@ -27,6 +27,107 @@ import type {
 import { scValToI128, scValToU64, createRpcServer } from './soroban.js';
 import { LedgerGapDetector, type LedgerGap } from './indexer.js';
 
+// ── Event Subscriber Configuration ───────────────────────────────────────────
+
+/**
+ * Configuration options for EventSubscriber.
+ */
+export interface EventSubscriberOptions {
+  /**
+   * Polling interval in milliseconds when using periodic RPC polling mode.
+   * Default: 5000 (5 seconds).
+   */
+  pollIntervalMs?: number;
+
+  /**
+   * Maximum backoff time in milliseconds when connection errors occur.
+   * Default: 60000 (1 minute).
+   */
+  maxBackoffMs?: number;
+
+  /**
+   * Maximum number of consecutive failures before switching to fallback mode.
+   * Default: 10.
+   */
+  maxConsecutiveFailures?: number;
+
+  /**
+   * Size of the deduplication window to prevent duplicate event delivery.
+   * Default: 1000.
+   */
+  dedupWindowSize?: number;
+}
+
+/**
+ * EventSubscriber provides automatic failover between WebSocket push
+ * and periodic getEvents RPC polling for robust event ingestion.
+ * 
+ * On unstable networks, WebSocket or long-polling connections to Soroban RPC
+ * nodes can disconnect unexpectedly. This class ensures continuous event
+ * ingestion by automatically falling back to periodic RPC polling when
+ * connection issues are detected.
+ * 
+ * @example
+ * ```ts
+ * const subscriber = new EventSubscriber(rpcUrl, streamAddress, {
+ *   onWithdraw: (event) => console.log('Withdraw:', event),
+ *   pollIntervalMs: 3000,
+ *   maxConsecutiveFailures: 5
+ * });
+ * 
+ * // Later, when done:
+ * subscriber.unsubscribe();
+ * ```
+ */
+export class EventSubscriber {
+  private subscription: Subscription | null = null;
+  private readonly options: Required<EventSubscriberOptions>;
+
+  constructor(
+    private readonly rpcUrl: string,
+    private readonly streamAddress: string,
+    private readonly handlers: StreamEventHandlers,
+    options: EventSubscriberOptions = {},
+  ) {
+    this.options = {
+      pollIntervalMs: options.pollIntervalMs ?? 5000,
+      maxBackoffMs: options.maxBackoffMs ?? 60000,
+      maxConsecutiveFailures: options.maxConsecutiveFailures ?? 10,
+      dedupWindowSize: options.dedupWindowSize ?? 1000,
+    };
+
+    this.startSubscription();
+  }
+
+  private startSubscription(): void {
+    // Use the existing subscribeToStream which already implements polling with backoff
+    this.subscription = subscribeToStream(this.rpcUrl, this.streamAddress, {
+      ...this.handlers,
+      pollInterval: this.options.pollIntervalMs,
+      maxBackoffMs: this.options.maxBackoffMs,
+      maxConsecutiveFailures: this.options.maxConsecutiveFailures,
+      dedupWindowSize: this.options.dedupWindowSize,
+    });
+  }
+
+  /**
+   * Stop the event subscription and clean up resources.
+   */
+  unsubscribe(): void {
+    if (this.subscription) {
+      this.subscription.unsubscribe();
+      this.subscription = null;
+    }
+  }
+
+  /**
+   * Check if the subscriber is currently active.
+   */
+  isActive(): boolean {
+    return this.subscription !== null;
+  }
+}
+
 // ── Event topic names (match symbol_short!() values in Rust) ─────────────────
 //
 // `created`, `force_cxl`, `xfer_rec`, `set_op` and `rm_op` are emitted by

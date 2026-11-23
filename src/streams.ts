@@ -458,6 +458,48 @@ export function getStreamStatus(
 }
 
 /**
+ * Calculate the remaining vesting time in seconds for an active stream.
+ * 
+ * This helper standardizes countdown logic across web, mobile, and CLI client
+ * applications by providing the exact remaining duration until 100% of tokens
+ * are vested.
+ * 
+ * For bounded streams (with a defined endTime), returns the number of seconds
+ * remaining until the stream completes. For open-ended streams (endTime === 0),
+ * returns 0 since there is no defined end.
+ * 
+ * @param stream - The stream snapshot (StreamInfo)
+ * @param currentLedgerTimestamp - Unix timestamp (seconds) for the current time
+ * @returns Number of seconds remaining until the stream is fully vested (0 for open-ended streams)
+ * 
+ * @example
+ * ```ts
+ * const stream = await conduit.streams.get(streamId);
+ * const now = Math.floor(Date.now() / 1000);
+ * const remainingSeconds = getRemainingVestingSeconds(stream, now);
+ * console.log(`Stream completes in ${remainingSeconds} seconds`);
+ * ```
+ */
+export function getRemainingVestingSeconds(
+  stream: StreamInfo,
+  currentLedgerTimestamp: number,
+): number {
+  // Open-ended streams have no defined end time
+  if (stream.endTime === 0) {
+    return 0;
+  }
+
+  // Cancelled streams have no remaining vesting time
+  if (stream.cancelled) {
+    return 0;
+  }
+
+  // Calculate remaining seconds, ensuring non-negative result
+  const remaining = stream.endTime - currentLedgerTimestamp;
+  return Math.max(0, remaining);
+}
+
+/**
  * Pure helper to check whether `walletAddress` can cancel `stream` right
  * now, for conditionally rendering/disabling a "Cancel Stream" button
  * without an RPC round-trip.
