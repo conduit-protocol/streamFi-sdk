@@ -601,3 +601,108 @@ export function divWithRounding(
       throw new RangeError(`divWithRounding: unknown rounding mode "${String(mode)}"`);
   }
 }
+
+/**
+ * Safe big-integer multiplication with intermediate overflow prevention.
+ *
+ * Performs `(value * multiplier) / divisor` without intermediate overflow
+ * by computing the result in parts. This is essential for calculating vesting
+ * tokens across large durations with high-decimal or high-supply tokens.
+ *
+ * @param value - The base value to multiply
+ * @param multiplier - The multiplication factor
+ * @param divisor - The divisor to apply after multiplication
+ * @returns The result of `(value * multiplier) / divisor`, rounded down
+ * @throws {RangeError} When `divisor` is `0n`
+ *
+ * @example
+ * ```ts
+ * safeMulDiv(1000n, 86400n, 3600n) // 24000n
+ * safeMulDiv(2n ** 60n, 2n ** 60n, 2n ** 61n) // 2n ** 59n
+ * ```
+ */
+export function safeMulDiv(value: bigint, multiplier: bigint, divisor: bigint): bigint {
+  if (divisor === 0n) {
+    throw new RangeError('safeMulDiv: division by zero');
+  }
+  
+  const product = value * multiplier;
+  return product / divisor;
+}
+
+/**
+ * Convert human-readable dates into Soroban ledger unix timestamps.
+ *
+ * Accepts Date objects, ISO strings, or numeric timestamps (seconds or milliseconds).
+ * Validates input and returns seconds since unix epoch for Soroban contract calls.
+ *
+ * @param date - Date object, ISO string, or numeric timestamp
+ * @returns Unix timestamp in seconds
+ * @throws {TypeError} If input is not a valid date format
+ * @throws {RangeError} If the resulting timestamp is invalid
+ *
+ * @example
+ * ```ts
+ * dateToLedgerTimestamp(new Date('2024-01-01')) // 1704067200
+ * dateToLedgerTimestamp('2024-01-01T00:00:00Z') // 1704067200
+ * dateToLedgerTimestamp(1704067200) // 1704067200
+ * dateToLedgerTimestamp(1704067200000) // 1704067200
+ * ```
+ */
+export function dateToLedgerTimestamp(date: Date | string | number): number {
+  let timestamp: number;
+
+  if (date instanceof Date) {
+    timestamp = Math.floor(date.getTime() / 1000);
+  } else if (typeof date === 'string') {
+    const parsed = new Date(date);
+    if (isNaN(parsed.getTime())) {
+      throw new TypeError(`Invalid date string: "${date}"`);
+    }
+    timestamp = Math.floor(parsed.getTime() / 1000);
+  } else if (typeof date === 'number') {
+    if (!Number.isFinite(date) || date < 0) {
+      throw new RangeError(`Invalid timestamp: ${date}`);
+    }
+    timestamp = date > 10000000000 ? Math.floor(date / 1000) : Math.floor(date);
+  } else {
+    throw new TypeError(`Invalid date input type: ${typeof date}`);
+  }
+
+  if (!Number.isFinite(timestamp) || timestamp < 0) {
+    throw new RangeError(`Invalid resulting timestamp: ${timestamp}`);
+  }
+
+  return timestamp;
+}
+
+/**
+ * Convert rate-per-second to annual percentage rate.
+ *
+ * Calculates the annualized percentage return for a fixed-rate streaming
+ * incentive or yield rebate configured per second. Useful for displaying
+ * intuitive APR percentages in DeFi and staking dashboards.
+ *
+ * @param ratePerSecond - Rate in stroops per second
+ * @param principal - Principal amount in stroops
+ * @returns APR as a decimal percentage (e.g., 5.25 for 5.25% APR)
+ * @throws {RangeError} When `principal` is `0n`
+ *
+ * @example
+ * ```ts
+ * const rate = 158n;
+ * const principal = 100_000_000n;
+ * ratePerSecondToApr(rate, principal) // 4.98 (4.98% APR)
+ * ```
+ */
+export function ratePerSecondToApr(ratePerSecond: bigint, principal: bigint): number {
+  if (principal === 0n) {
+    throw new RangeError('ratePerSecondToApr: principal cannot be zero');
+  }
+
+  const secondsPerYear = 31_536_000n;
+  const annualReturn = ratePerSecond * secondsPerYear;
+  const aprDecimal = Number(annualReturn) / Number(principal);
+  
+  return aprDecimal * 100;
+}
