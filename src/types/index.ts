@@ -313,8 +313,7 @@ export function deriveStreamStatus(stream: StreamInfo, now: number): StreamStatu
   return StreamStatus.Active;
 }
 
-export interface StreamInfo {
-  id: bigint;
+export interface StreamData {
   /** DripStream contract address */
   address: string;
   sender: string;
@@ -334,6 +333,10 @@ export interface StreamInfo {
   pausedAt: number;
   cancelled: boolean;
   clawbackEnabled: boolean;
+}
+
+export interface StreamInfo extends StreamData {
+  id: bigint;
 }
 
 export interface CreateStreamParams {
