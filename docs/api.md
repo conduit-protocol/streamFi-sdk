@@ -501,6 +501,17 @@ only the cache-miss subset costs a network call. A resolution that *fails* (as o
 resolving to "not found") rejects the whole call and is never cached as a not-found result; ids
 that did resolve stay cached, so a retry re-fetches only the failures.
 
+### `getMultipleStreams(streamAddresses) → Promise<StreamData[]>`
+
+Reads stream state directly from each contract's instance-storage entry using
+`getLedgerEntries`, avoiding one simulation per stream. Results preserve the input order and
+repeated addresses. Requests are split into batches of at most 200 unique contracts; a missing
+or invalid stream address rejects the call.
+
+```typescript
+const streams = await client.factory.getMultipleStreams(addresses);
+```
+
 ### `protocolFeeBps() → Promise<number>`
 
 ---

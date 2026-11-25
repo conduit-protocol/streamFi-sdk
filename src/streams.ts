@@ -18,6 +18,7 @@ import type {
   ListStreamsParams,
   PaginatedStreams,
   StreamEventHandlers,
+  StreamData,
   StreamInfo,
   Subscription,
   BatchWithdrawPayload,
@@ -2301,6 +2302,20 @@ export function parseStreamInfo(
   address: string,
   val: xdr.ScVal,
 ): StreamInfo {
+  const info: StreamInfo = { id, ...parseStreamFields(address, val) };
+  (info as StreamInfo & { toJSON(): Record<string, unknown> }).toJSON = () =>
+    bigintSafeStringify(info as unknown as Record<string, unknown>);
+  return info;
+}
+
+export function parseStreamData(address: string, val: xdr.ScVal): StreamData {
+  const data = parseStreamFields(address, val);
+  (data as StreamData & { toJSON(): Record<string, unknown> }).toJSON = () =>
+    bigintSafeStringify(data as unknown as Record<string, unknown>);
+  return data;
+}
+
+function parseStreamFields(address: string, val: xdr.ScVal): StreamData {
   const entries = val.map() ?? [];
   const m: Record<string, xdr.ScVal> = {};
   for (const e of entries) {
@@ -2329,8 +2344,7 @@ export function parseStreamInfo(
     }
   }
 
-  const info: StreamInfo = {
-    id,
+  return {
     address,
     sender: m["sender"] ? Address.fromScVal(m["sender"]).toString() : "",
     recipient: m["recipient"]
@@ -2348,7 +2362,4 @@ export function parseStreamInfo(
     cancelled: (flags & STREAM_FLAG_CANCELLED) !== 0,
     clawbackEnabled: (flags & STREAM_FLAG_CLAWBACK_ENABLED) !== 0,
   };
-  (info as StreamInfo & { toJSON(): Record<string, unknown> }).toJSON = () =>
-    bigintSafeStringify(info as unknown as Record<string, unknown>);
-  return info;
 }

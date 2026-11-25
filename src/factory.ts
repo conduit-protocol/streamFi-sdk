@@ -3,7 +3,7 @@
  */
 
 import { nativeToScVal, xdr, Address, hash, StrKey } from '@stellar/stellar-sdk';
-import type { ConduitConfig, FactoryConfig } from './types/index.js';
+import type { ConduitConfig, FactoryConfig, StreamData } from './types/index.js';
 import type { WalletAdapter } from './adapters/types.js';
 import { KeypairWalletAdapter } from './adapters/keypair.js';
 import { ZERO_ADDR, DEFAULT_LIST_LIMIT, clampListLimit, clampOffset } from './constants.js';
@@ -12,10 +12,12 @@ import {
   simulateReadOnly,
   scValToU64,
   scValToU32,
+  createRpcServer,
   NETWORK_PASSPHRASE,
   DEFAULT_RPC,
   DEFAULT_HORIZON,
 } from './soroban.js';
+import { parseStreamData } from './streams.js';
 import { SUPPORTED_NETWORKS, UnsupportedChainError } from './errors.js';
 import { mapWithConcurrency, DEFAULT_LIST_CONCURRENCY } from './map-with-concurrency.js';
 import { coalesceAsync } from './coalesce-async.js';
@@ -39,6 +41,7 @@ const NEGATIVE_ADDRESS_CACHE_TTL_MS = 30_000;
  * to disable caching.
  */
 const FACTORY_CONFIG_CACHE_TTL_MS = 300_000;
+const MAX_LEDGER_KEYS_PER_REQUEST = 200;
 
 export interface FactoryStreamListResult {
   ids: bigint[];
@@ -410,6 +413,77 @@ export class FactoryModule {
       out.set(key, resolved[i] ?? null);
     });
     return out;
+  }
+
+  /**
+   * Fetch the stored state for multiple stream contracts in one ledger query.
+   *
+   * The returned values follow the input order, including repeated addresses.
+   * Soroban RPC accepts at most 200 ledger keys per request, so larger inputs
+   * are split into sequential requests.
+   */
+  async getMultipleStreams(streamAddresses: string[]): Promise<StreamData[]> {
+    if (streamAddresses.length === 0) return [];
+
+    const addressesByKey = new Map<string, string>();
+    const inputKeyIds: string[] = [];
+    const ledgerKeys: xdr.LedgerKey[] = [];
+
+    for (const address of streamAddresses) {
+      const contractAddress = new Address(address).toScAddress();
+      if (contractAddress.switch().name !== 'scAddressTypeContract') {
+        throw new Error(`getMultipleStreams: "${address}" is not a contract address`);
+      }
+
+      const key = xdr.LedgerKey.contractData(new xdr.LedgerKeyContractData({
+        contract: contractAddress,
+        key: xdr.ScVal.scvLedgerKeyContractInstance(),
+        durability: xdr.ContractDataDurability.persistent(),
+      }));
+      const keyId = key.toXDR('base64');
+      inputKeyIds.push(keyId);
+      if (!addressesByKey.has(keyId)) {
+        addressesByKey.set(keyId, address);
+        ledgerKeys.push(key);
+      }
+    }
+
+    const dataByKey = new Map<string, StreamData>();
+    const server = createRpcServer(this.rpcUrl);
+    for (let i = 0; i < ledgerKeys.length; i += MAX_LEDGER_KEYS_PER_REQUEST) {
+      const response = await server.getLedgerEntries(
+        ...ledgerKeys.slice(i, i + MAX_LEDGER_KEYS_PER_REQUEST),
+      );
+      for (const entry of response.entries) {
+        const keyId = entry.key.toXDR('base64');
+        const address = addressesByKey.get(keyId);
+        if (address === undefined) continue;
+
+        const value = entry.val.contractData().val();
+        if (value.switch().name !== 'scvContractInstance') {
+          throw new Error(`getMultipleStreams: invalid contract instance for "${address}"`);
+        }
+        const config = value.instance().storage()?.find((item) => {
+          const storageKey = item.key();
+          return storageKey.switch().name === 'scvSymbol' &&
+            storageKey.sym().toString('utf8') === 'Config';
+        });
+        if (!config) {
+          throw new Error(`getMultipleStreams: stream data not found for "${address}"`);
+        }
+
+        dataByKey.set(keyId, parseStreamData(address, config.val()));
+      }
+    }
+
+    return inputKeyIds.map((keyId) => {
+      const data = dataByKey.get(keyId);
+      if (!data) {
+        const address = addressesByKey.get(keyId);
+        throw new Error(`getMultipleStreams: stream data not found for "${address}"`);
+      }
+      return data;
+    });
   }
 
   /**

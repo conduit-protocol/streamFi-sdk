@@ -5,9 +5,10 @@ import { Networks } from '@stellar/stellar-sdk';
 
 // ── Hoist mocks so they can be referenced inside vi.mock() factories ──────────
 
-const { mockBuildTx, mockSimulate } = vi.hoisted(() => ({
+const { mockBuildTx, mockSimulate, mockGetLedgerEntries } = vi.hoisted(() => ({
   mockBuildTx:  vi.fn().mockResolvedValue({ _stub: 'tx' }),
   mockSimulate: vi.fn(),
+  mockGetLedgerEntries: vi.fn(),
 }));
 
 // ── Mock soroban helpers — avoids real RPC calls and address validation ────────
@@ -15,6 +16,7 @@ const { mockBuildTx, mockSimulate } = vi.hoisted(() => ({
 vi.mock('../soroban.js', () => ({
   buildContractCallTx: mockBuildTx,
   simulateReadOnly:    mockSimulate,
+  createRpcServer:     () => ({ getLedgerEntries: mockGetLedgerEntries }),
   resolveFee:          () => '100',
   scValToU64: (v: { u64: () => { toString: () => string } }) =>
     BigInt(v.u64().toString()),
@@ -99,11 +101,29 @@ function makeVoidScVal() {
   return _xdr.ScVal.scvVoid();
 }
 
+function makeLedgerEntry(key: _xdr.LedgerKey) {
+  const config = _xdr.ScVal.scvMap([]);
+  const instance = {
+    switch: () => ({ name: 'scvContractInstance' }),
+    instance: () => ({
+      storage: () => [{
+        key: () => _xdr.ScVal.scvSymbol('Config'),
+        val: () => config,
+      }],
+    }),
+  };
+  return {
+    key,
+    val: { contractData: () => ({ val: () => instance }) },
+  };
+}
+
 // ── Tests ─────────────────────────────────────────────────────────────────────
 
 beforeEach(() => {
   mockBuildTx.mockResolvedValue({ _stub: 'tx' });
   mockSimulate.mockReset();
+  mockGetLedgerEntries.mockReset();
 });
 
 describe('FactoryModule — construction', () => {
@@ -575,6 +595,38 @@ describe('FactoryModule — getStreamsBySenderPaginated()', () => {
       new FactoryModule(cfg()).getStreamsBySenderPaginated(SENDER_ADDR, 'not-a-valid-cursor'),
     ).rejects.toThrow(/invalid cursor/);
     expect(mockSimulate).not.toHaveBeenCalled();
+  });
+});
+
+describe('FactoryModule — getMultipleStreams()', () => {
+  it('fetches unique contract entries together and preserves input order', async () => {
+    const { FactoryModule } = await import('../factory.js');
+    mockGetLedgerEntries.mockImplementation(async (...keys) => ({
+      entries: keys.map((key) => makeLedgerEntry(key)),
+    }));
+
+    const addresses = ['CSTREAM0001', 'CSTREAM0002', 'CSTREAM0001'];
+    const streams = await new FactoryModule(cfg()).getMultipleStreams(addresses);
+
+    expect(mockGetLedgerEntries).toHaveBeenCalledTimes(1);
+    expect(mockGetLedgerEntries.mock.calls[0]).toHaveLength(2);
+    expect(streams.map((stream) => stream.address)).toEqual(addresses);
+  });
+
+  it('returns an empty result without making an RPC request', async () => {
+    const { FactoryModule } = await import('../factory.js');
+
+    await expect(new FactoryModule(cfg()).getMultipleStreams([])).resolves.toEqual([]);
+    expect(mockGetLedgerEntries).not.toHaveBeenCalled();
+  });
+
+  it('rejects when a requested contract entry is missing', async () => {
+    const { FactoryModule } = await import('../factory.js');
+    mockGetLedgerEntries.mockResolvedValue({ entries: [] });
+
+    await expect(
+      new FactoryModule(cfg()).getMultipleStreams(['CSTREAM0001']),
+    ).rejects.toThrow(/stream data not found/);
   });
 });
 
