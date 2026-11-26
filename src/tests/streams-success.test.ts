@@ -331,6 +331,26 @@ describe('StreamsModule.streamedTotal() — read-only wrapper', () => {
   });
 });
 
+describe('StreamsModule.clawback() — abort signal (#1172)', () => {
+  it('stops polling and rejects with AbortError when the signal aborts mid-confirmation', async () => {
+    mockStreamAddress.mockResolvedValue(STREAM_ADDR);
+    mockSimulate.mockResolvedValue(simSuccess(i128Scv(1n)));
+    mockGetTransaction.mockResolvedValue({ status: 'NOT_FOUND' });
+
+    const { StreamsModule } = await import('../streams.js');
+    const sdk = new StreamsModule(makeConfig());
+
+    const controller = new AbortController();
+    const promise = sdk.clawback(1n, controller.signal);
+    promise.catch(() => {});
+    // First poll interval elapses, then the caller navigates away.
+    await vi.advanceTimersByTimeAsync(1000);
+    controller.abort();
+
+    await expect(promise).rejects.toMatchObject({ name: 'AbortError' });
+  });
+});
+
 describe('StreamsModule.clawback() — success path', () => {
   it('reads the reclaimed amount from the confirmed transaction, not the simulation', async () => {
     mockStreamAddress.mockResolvedValue(STREAM_ADDR);

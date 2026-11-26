@@ -413,6 +413,54 @@ export function calculateVestedPercentage(
   return ratio > 1 ? 1 : ratio;
 }
 
+/**
+ * Calculate the amount vested (streamed) by a stream as of a given instant,
+ * in stroops, with millisecond resolution. Intended for live UI counters that
+ * animate between ledger ticks (#1173).
+ *
+ * Accrual is `ratePerSecond × elapsedMs / 1000`, so the result moves smoothly
+ * within a second. The fractional part is truncated (floored), never rounded
+ * up, so the counter never shows more than has accrued.
+ *
+ * On-chain accrual is recorded in whole seconds. At whole-second timestamps
+ * this matches {@link calculateWithdrawableAmount} plus `stream.withdrawn`
+ * exactly. Between seconds it is an off-chain estimate: the contract has not
+ * yet recorded the sub-second portion.
+ *
+ * Follows the same pause, end-time and cancellation rules as
+ * {@link calculateWithdrawableAmount}. Unlike that function, it does not
+ * subtract `withdrawn`, so it reports total vested rather than the amount
+ * currently withdrawable.
+ *
+ * @param stream - The stream snapshot (StreamInfo)
+ * @param currentTimestampMs - Unix time in milliseconds; defaults to now
+ * @returns The vested amount in stroops (bigint), floored to whole stroops
+ */
+export function calculateVestedAmount(
+  stream: StreamInfo,
+  currentTimestampMs: number = Date.now(),
+): bigint {
+  if (stream.cancelled) return 0n;
+
+  const startMs = stream.startTime * 1000;
+  const endMs = stream.endTime * 1000;
+  const nowMs = Math.floor(currentTimestampMs);
+
+  // Clamp to end time first, matching calculateWithdrawableAmount.
+  const endClampedMs = stream.endTime > 0 && nowMs > endMs ? endMs : nowMs;
+
+  // Freeze accrual at pausedAt while paused and not yet past the end.
+  const effectiveNowMs =
+    stream.paused && stream.pausedAt * 1000 < endClampedMs
+      ? stream.pausedAt * 1000
+      : endClampedMs;
+
+  const elapsedMs = effectiveNowMs - startMs;
+  if (elapsedMs <= 0) return 0n;
+
+  return (stream.ratePerSecond * BigInt(elapsedMs)) / 1000n;
+}
+
 export function getStreamProgress(
   stream: StreamInfo,
   currentTimestamp: number = Math.floor(Date.now() / 1000),
@@ -1156,6 +1204,64 @@ export class StreamsModule {
   }
 
   /**
+   * Dry-run simulation of a stream withdrawal transaction.
+   * 
+   * Estimates the exact claimable amount and transaction fee before submitting
+   * a live withdrawal. Prevents failed on-chain submissions due to zero balance
+   * or insufficient fee buffer.
+   * 
+   * @param streamId - The stream to simulate withdrawal from
+   * @param recipient - The recipient address (must match stream recipient)
+   * @returns Object containing claimableAmount and feeEstimate in stroops
+   * 
+   * @example
+   * ```ts
+   * const { claimableAmount, feeEstimate } = await client.streams.simulateWithdraw('123', 'G...');
+   * console.log(`Can claim ${claimableAmount} stroops with fee ${feeEstimate} stroops`);
+   * ```
+   */
+  async simulateWithdraw(
+    streamId: bigint | string,
+    recipient: string,
+  ): Promise<{ claimableAmount: bigint; feeEstimate: bigint }> {
+    const id = BigInt(streamId);
+    const addr = await this._resolveAddr(id);
+
+    // Get the current withdrawable amount (this is the claimable amount)
+    const claimableAmount = await this.withdrawable(id);
+
+    // Build a withdrawal transaction to simulate (but don't sign or submit)
+    const tx = await buildContractCallTx(
+      this.rpcUrl,
+      this.passphrase,
+      recipient,
+      addr,
+      "withdraw",
+      [nativeToScVal(claimableAmount, { type: "i128" })],
+      undefined,
+      undefined,
+      this._txOptions(),
+    );
+
+    const server = this._server();
+    const sim = await catchNetworkError(
+      "simulateTransaction (withdraw)",
+      server.simulateTransaction(tx),
+    );
+
+    if (SorobanRpc.Api.isSimulationError(sim)) {
+      throw ConduitError.fromSorobanMessage("stream", sim.error);
+    }
+
+    // Extract fee estimate from simulation
+    const resourceFee = BigInt(sim.minResourceFee || "0");
+    const baseFee = BigInt(this._fee || BASE_FEE);
+    const feeEstimate = resourceFee + baseFee;
+
+    return { claimableAmount, feeEstimate };
+  }
+
+  /**
    * Withdraw from multiple streams.
    *
    * Note: Soroban currently permits only one invoke_host_function
@@ -1579,7 +1685,7 @@ export class StreamsModule {
 
     const assembled = SorobanRpc.assembleTransaction(tx, sim).build();
     const signed = await this._signTx(assembled);
-    const { hash, returnValue } = await this._sendAndPoll(server, signed);
+    const { hash, returnValue } = await this._sendAndPoll(server, signed, signal);
 
     if (!returnValue) {
       throw new Error(`Transaction ${hash} succeeded but returned no value`);

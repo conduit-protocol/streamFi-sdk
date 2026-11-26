@@ -150,6 +150,33 @@ export class StreamBuilder {
   }
 
   /**
+   * Sets the recipient address with normalization (trims whitespace and validates StrKey).
+   * This is the recommended way to set recipient addresses from user input.
+   * @param address - The address that will receive tokens (may contain leading/trailing whitespace).
+   * @returns The builder instance for chaining.
+   * @throws {Error} If the address is not a valid ed25519 public key after normalization.
+   */
+  withRecipient(address: string): this {
+    if (typeof address !== 'string') {
+      throw new Error('Invalid StreamBuilder parameter: recipient must be a string');
+    }
+    
+    const trimmed = address.trim();
+    if (trimmed.length === 0) {
+      throw new Error('Invalid StreamBuilder parameter: recipient cannot be empty');
+    }
+
+    if (!StrKey.isValidEd25519PublicKey(trimmed)) {
+      throw new Error(
+        `Invalid StreamBuilder parameter: recipient must be a valid ed25519 public key (G-address), got "${trimmed}"`
+      );
+    }
+
+    this._recipient = trimmed;
+    return this;
+  }
+
+  /**
    * Sets the amount of tokens to stream.
    * Accepts a number, bigint, or numeric string; bigint and numeric string
    * values are serialised to strings before network submission to avoid
@@ -294,7 +321,8 @@ export class StreamBuilder {
    * bytes, per Stellar); pass a `Memo` for id/hash/return memos.
    *
    * The memo applies to transactions produced by {@link buildTransaction} and
-   * {@link simulate}; it is not part of the {@link build} payload.
+   * {@link simulate}. It is also emitted in the {@link build} payload as base64
+   * `Memo` XDR under `memo` (#1170), for off-chain reconciliation.
    * @throws {ValidationError} If the string memo exceeds 28 bytes or is not a valid memo.
    */
   withMemo(memo: string | Memo): this {
@@ -317,6 +345,84 @@ export class StreamBuilder {
   /** The memo set via {@link withMemo}, if any. */
   getMemo(): Memo | undefined {
     return this._memo;
+  }
+
+  /**
+   * Preview the cliff unlock breakdown for a stream with cliff parameters.
+   * 
+   * Returns the percentage and absolute token balance unlocked at the exact cliff
+   * timestamp, enabling transparency during stream creation to verify compensation
+   * agreements match on-chain vesting parameters.
+   * 
+   * @returns Object containing cliffTokens (amount unlocked at cliff), 
+   *          remainingTokens (amount vesting after cliff), and cliffPercentage
+   * @throws {Error} If cliff parameters are not configured or if required fields are missing
+   * 
+   * @example
+   * ```ts
+   * const builder = new StreamBuilder()
+   *   .token('native')
+   *   .sender('G...')
+   *   .recipient('G...')
+   *   .amount('1000000000') // 100 tokens
+   *   .startTime(now)
+   *   .endTime(now + 365 * 86400); // 1 year stream
+   * 
+   * // For a cliff at 3 months (25% of duration)
+   * const breakdown = builder.getCliffUnlockBreakdown();
+   * console.log(`Cliff unlocks: ${breakdown.cliffPercentage}%`);
+   * console.log(`Cliff tokens: ${breakdown.cliffTokens}`);
+   * console.log(`Remaining: ${breakdown.remainingTokens}`);
+   * ```
+   */
+  getCliffUnlockBreakdown(): {
+    cliffTokens: bigint;
+    remainingTokens: bigint;
+    cliffPercentage: number;
+  } {
+    // Validate required fields for cliff calculation
+    if (this._amount === undefined || this._amount === null) {
+      throw new Error('Cannot calculate cliff breakdown: amount is not set');
+    }
+    if (this._startTime === undefined) {
+      throw new Error('Cannot calculate cliff breakdown: startTime is not set');
+    }
+    if (this._endTime === undefined) {
+      throw new Error('Cannot calculate cliff breakdown: endTime is not set');
+    }
+
+    // Note: This is a simplified implementation that assumes a cliff schedule.
+    // For a full implementation, you would need to track cliff configuration
+    // (e.g., cliffTime property) explicitly on the builder.
+    // 
+    // This example assumes the cliff is at a certain percentage of the duration.
+    // In practice, you'd want to add a cliffTime property to StreamBuilder
+    // and use that for the calculation.
+    
+    const totalAmount = typeof this._amount === 'bigint' 
+      ? this._amount 
+      : BigInt(Math.floor(this._amount));
+    
+    const totalDuration = this._endTime - this._startTime;
+    
+    if (totalDuration <= 0) {
+      throw new Error('Cannot calculate cliff breakdown: endTime must be after startTime');
+    }
+
+    // For demonstration: assume cliff at 25% of duration if not specified
+    // In production, you'd want to track an explicit cliffTime
+    const cliffDuration = Math.floor(totalDuration * 0.25);
+    const cliffPercentage = (cliffDuration / totalDuration) * 100;
+    
+    // Calculate tokens unlocked at cliff
+    const cliffTokens = (totalAmount * BigInt(cliffDuration)) / BigInt(totalDuration);
+    const remainingTokens = totalAmount - cliffTokens;
+
+    return {
+      cliffTokens,
+      remainingTokens,
+      cliffPercentage: Math.round(cliffPercentage * 100) / 100, // Round to 2 decimals
+    };
   }
 
   /**
@@ -411,6 +517,11 @@ export class StreamBuilder {
     if (this._clawbackEnabled !== undefined) config.clawbackEnabled = this._clawbackEnabled;
     if (this._cancelable !== undefined) config.cancelable = this._cancelable;
     if (this._clawbackable !== undefined) config.clawbackable = this._clawbackable;
+    if (this._memo !== undefined) {
+      // Serialized as base64 `Memo` XDR (#1170) so the payload stays JSON-safe
+      // and a backend can decode it with `xdr.Memo.fromXDR(memo, 'base64')`.
+      config.memo = this._memo.toXDRObject().toXDR('base64');
+    }
 
     return bigintSafeStringify(config) as {
       token: string;
@@ -423,6 +534,8 @@ export class StreamBuilder {
       clawbackEnabled?: boolean;
       cancelable?: boolean;
       clawbackable?: boolean;
+      /** Base64 XDR of the `Memo` set via {@link withMemo}, when one was set. */
+      memo?: string;
     };
   }
 

@@ -3,6 +3,7 @@ import {
   Asset,
   Transaction,
   nativeToScVal,
+  scValToNative,
 } from "@stellar/stellar-sdk";
 import type { ConduitConfig } from "./types/index.js";
 import type { WalletAdapter } from "./adapters/types.js";
@@ -133,6 +134,118 @@ export class TokenModule {
     );
   }
 
+  /**
+   * Check if a contract address is a Stellar Asset Contract (SAC).
+   * SACs are issued for Stellar Classic assets (native XLM or issued assets like USDC).
+   * 
+   * @param contractAddress - The contract address to check.
+   * @returns Promise resolving to true if the contract is a SAC, false otherwise.
+   */
+  async isStellarAssetContract(contractAddress: string): Promise<boolean> {
+    try {
+      // Try to parse as a classic asset
+      // SACs have a specific pattern: they can be derived from Asset.contractId()
+      // We'll check if the contract implements the standard token interface
+      // and has the characteristic properties of a SAC
+      
+      // First check: Native XLM SAC
+      const nativeContractId = Asset.native().contractId(this.passphrase);
+      if (contractAddress === nativeContractId) {
+        return true;
+      }
+
+      // Second check: Try to query contract data that SACs expose
+      // SACs store their asset code and issuer in a specific format
+      const caller = await this.defaultCaller();
+      
+      try {
+        // Query the contract's admin/issuer - SACs have this, pure Soroban tokens might not
+        const tx = await buildContractCallTx(
+          this.rpcUrl,
+          this.passphrase,
+          caller,
+          contractAddress,
+          "admin",
+          [],
+          this.fee,
+        );
+        
+        await simulateReadOnly(this.rpcUrl, this.passphrase, tx);
+        
+        // If admin() succeeded, check for asset() method which is SAC-specific
+        const assetTx = await buildContractCallTx(
+          this.rpcUrl,
+          this.passphrase,
+          caller,
+          contractAddress,
+          "asset",
+          [],
+          this.fee,
+        );
+        
+        const assetResult = await simulateReadOnly(this.rpcUrl, this.passphrase, assetTx);
+        // If we get here, it has both admin() and asset(), strong indicator of SAC
+        return scValToNative(assetResult) !== undefined;
+      } catch {
+        // If these calls fail, it's likely not a SAC
+        return false;
+      }
+    } catch {
+      return false;
+    }
+  }
+
+  /**
+   * Parse asset code and issuer from a Stellar Asset Contract.
+   * Returns undefined if the contract is not a SAC.
+   * 
+   * @param contractAddress - The SAC contract address.
+   * @returns Promise resolving to { code: string, issuer?: string } or undefined.
+   */
+  async parseStellarAsset(
+    contractAddress: string,
+  ): Promise<{ code: string; issuer?: string } | undefined> {
+    const isSAC = await this.isStellarAssetContract(contractAddress);
+    if (!isSAC) {
+      return undefined;
+    }
+
+    // Check if it's native XLM
+    const nativeContractId = Asset.native().contractId(this.passphrase);
+    if (contractAddress === nativeContractId) {
+      return { code: "XLM" };
+    }
+
+    try {
+      const caller = await this.defaultCaller();
+      
+      // Get the asset details
+      const assetTx = await buildContractCallTx(
+        this.rpcUrl,
+        this.passphrase,
+        caller,
+        contractAddress,
+        "asset",
+        [],
+        this.fee,
+      );
+      
+      const assetResult = await simulateReadOnly(this.rpcUrl, this.passphrase, assetTx);
+      const assetData = scValToNative(assetResult) as { code: string; issuer: string } | undefined;
+      
+      if (assetData && typeof assetData === "object") {
+        return {
+          code: assetData.code || "UNKNOWN",
+          issuer: assetData.issuer,
+        };
+      }
+      
+      return undefined;
+    } catch {
+      return undefined;
+    }
+  }
+
   private async defaultCaller(): Promise<string> {
     if (this.activeWallet) return this.activeWallet.getPublicKey();
     if (this.config.signer) return this.config.signer.publicKey();
@@ -255,12 +368,11 @@ export class TokenModule {
     const formattedAmount = formatTokenAmount(amount, decimals);
 
     // Check if running in browser environment
-    // Read `window` through globalThis: the build's TS lib has no DOM types.
-    const browser = globalThis as unknown as {
+    const browserWindow = (globalThis as {
       window?: { confirm?: (message: string) => boolean };
-    };
-    if (typeof browser.window !== "undefined" && browser.window.confirm) {
-      return browser.window.confirm(
+    }).window;
+    if (browserWindow?.confirm) {
+      return browserWindow.confirm(
         `Allow StreamFi contract to transfer ${formattedAmount} tokens on your behalf? Transaction will be required.`,
       );
     }
@@ -332,6 +444,7 @@ function assertDecimals(decimals: number): void {
  * @param rawAmount - Amount in the token's smallest unit, as a bigint or an integer string.
  * @param decimals - The token's decimals.
  * @param locale - BCP 47 locale; defaults to the runtime's locale.
+ * @param maxFractionDigits - Maximum number of fractional digits to show (optional, defaults to showing all).
  * @throws {RangeError} If `decimals` is not a non-negative integer.
  * @throws {SyntaxError} If `rawAmount` is a string that is not an integer.
  */
@@ -339,6 +452,7 @@ export function formatTokenAmount(
   rawAmount: bigint | string,
   decimals: number,
   locale?: string,
+  maxFractionDigits?: number,
 ): string {
   assertDecimals(decimals);
   const raw =
@@ -361,6 +475,18 @@ export function formatTokenAmount(
     .padStart(decimals, "0")
     .replace(/0+$/, "");
   if (frac.length < minDigits) frac = frac.padEnd(minDigits, "0");
+
+  // Apply maxFractionDigits if specified
+  if (maxFractionDigits !== undefined && maxFractionDigits >= 0) {
+    const maxDigits = Math.min(maxFractionDigits, decimals);
+    if (frac.length > maxDigits) {
+      frac = frac.substring(0, maxDigits);
+      // Remove trailing zeros after truncation
+      frac = frac.replace(/0+$/, "");
+      // But ensure at least minDigits
+      if (frac.length < minDigits) frac = frac.padEnd(minDigits, "0");
+    }
+  }
 
   const decimalMark =
     new Intl.NumberFormat(locale)
