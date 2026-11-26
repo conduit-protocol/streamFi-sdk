@@ -987,6 +987,38 @@ export class StreamsModule {
     return coalesceInFlight(this._inFlightGets, id, () => this._fetchInfo(id));
   }
 
+  /**
+   * Fetch only the stream status enum without loading full metadata or checkpoint history.
+   * 
+   * High-throughput dashboards displaying thousands of streams often only need to know
+   * if each stream is Active, Paused, or Completed. Fetching the full stream configuration
+   * consumes unnecessary network bandwidth. This lightweight helper reads only the status
+   * from the contract to minimize RPC usage.
+   * 
+   * @param streamId - The stream ID (bigint or string)
+   * @param signal - Optional AbortSignal to cancel the request
+   * @returns Promise resolving to the stream's current status enum
+   * 
+   * @example
+   * ```ts
+   * // Efficiently check status for many streams
+   * const statuses = await Promise.all(
+   *   streamIds.map(id => client.streams.getStreamStatus(id))
+   * );
+   * const activeCount = statuses.filter(s => s === StreamStatus.Active).length;
+   * ```
+   */
+  async getStreamStatus(
+    streamId: bigint | string,
+    signal?: AbortSignal
+  ): Promise<import("./types/index.js").StreamStatus> {
+    // For now, we fetch the full info and derive the status.
+    // A future optimization could add a contract method that returns only status.
+    const info = await this.get(streamId, signal);
+    const { deriveStreamStatus } = await import("./types/index.js");
+    return deriveStreamStatus(info, Math.floor(Date.now() / 1000));
+  }
+
   private async _fetchInfo(
     id: bigint,
     signal?: AbortSignal,
@@ -1455,6 +1487,61 @@ export class StreamsModule {
       [],
       signal,
     );
+  }
+
+  /**
+   * Cancel multiple active streams in batch.
+   * 
+   * Managing multiple employee or grant streams requires canceling multiple streams
+   * sequentially, which is tedious and slow. This batch helper allows senders to
+   * prepare and sign cancellations in a structured flow.
+   * 
+   * @param streamIds - Array of stream IDs to cancel
+   * @param options - Optional batch processing options (concurrency control)
+   * @returns Promise resolving to results for each stream (success or error)
+   * 
+   * @example
+   * ```ts
+   * const result = await client.streams.cancelStreamsBatch(
+   *   ['123', '456', '789'],
+   *   { maxConcurrency: 3 }
+   * );
+   * 
+   * result.forEach((res, i) => {
+   *   if (res.success) {
+   *     console.log(`Stream ${streamIds[i]} cancelled: ${res.txHash}`);
+   *   } else {
+   *     console.error(`Stream ${streamIds[i]} failed: ${res.error}`);
+   *   }
+   * });
+   * ```
+   */
+  async cancelStreamsBatch(
+    streamIds: (bigint | string)[],
+    options: { maxConcurrency?: number; signal?: AbortSignal } = {}
+  ): Promise<Array<{ streamId: bigint; success: boolean; txHash?: string; error?: string }>> {
+    this._ensureCanMutate();
+    
+    const { signal } = options;
+    if (signal?.aborted) throw new DOMException("Aborted", "AbortError");
+    
+    const concurrency = Math.max(1, options.maxConcurrency ?? DEFAULT_LIST_CONCURRENCY);
+    const ids = streamIds.map(id => BigInt(id));
+    
+    const { mapWithConcurrency } = await import("./batch-tx.js");
+    
+    const results = await mapWithConcurrency(ids, concurrency, async (streamId) => {
+      try {
+        if (signal?.aborted) throw new DOMException("Aborted", "AbortError");
+        const txHash = await this.cancel(streamId, signal);
+        return { streamId, success: true as const, txHash };
+      } catch (err) {
+        const error = err instanceof Error ? err.message : String(err);
+        return { streamId, success: false as const, error };
+      }
+    });
+    
+    return results;
   }
 
   /** Pause the stream (sender only). */

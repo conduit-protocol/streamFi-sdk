@@ -494,3 +494,55 @@ export function formatTokenAmount(
       .find((p) => p.type === "decimal")?.value ?? ".";
   return `${sign}${whole}${decimalMark}${frac}`;
 }
+
+/**
+ * Stellar base reserve per ledger entry, in stroops (0.5 XLM as of current protocol).
+ * Each trustline or subentry requires this reserve to be maintained in the account.
+ */
+const BASE_RESERVE_STROOPS = 5_000_000n; // 0.5 XLM in stroops
+
+/**
+ * Calculate the minimum XLM balance required for establishing a new token trustline.
+ * 
+ * On Stellar, each account must maintain a minimum balance based on base reserve
+ * requirements. Creating new trustlines for streamed assets requires satisfying these
+ * ledger entry reserves. This helper warns users if their available XLM balance is
+ * insufficient.
+ * 
+ * @param accountDetails - Horizon AccountResponse containing balances and subentry count
+ * @returns The minimum additional XLM (in stroops) needed to safely add one trustline
+ * 
+ * @example
+ * ```ts
+ * import { Horizon } from '@stellar/stellar-sdk';
+ * const server = new Horizon.Server('https://horizon-testnet.stellar.org');
+ * const account = await server.loadAccount(userAddress);
+ * const reserveNeeded = getTrustlineReserveRequirement(account);
+ * 
+ * // Check if user has sufficient XLM
+ * const xlmBalance = account.balances.find(b => b.asset_type === 'native');
+ * const availableStroops = BigInt(parseFloat(xlmBalance.balance) * 10_000_000);
+ * if (availableStroops < reserveNeeded) {
+ *   console.warn(`Need ${reserveNeeded / 10_000_000n} more XLM for trustline`);
+ * }
+ * ```
+ */
+export function getTrustlineReserveRequirement(
+  accountDetails: { subentry_count: number; num_sponsoring: number; num_sponsored: number }
+): bigint {
+  // Base reserve calculation: (2 + subentries + sponsoring - sponsored) * base_reserve
+  // For adding one trustline, we need: current_minimum + base_reserve
+  const currentSubentries = BigInt(accountDetails.subentry_count);
+  const sponsoring = BigInt(accountDetails.num_sponsoring);
+  const sponsored = BigInt(accountDetails.num_sponsored);
+  
+  // Current minimum: (2 + subentries + sponsoring - sponsored) * base_reserve
+  const currentMinimum = (2n + currentSubentries + sponsoring - sponsored) * BASE_RESERVE_STROOPS;
+  
+  // Adding one trustline increases subentries by 1
+  const newMinimum = (2n + currentSubentries + 1n + sponsoring - sponsored) * BASE_RESERVE_STROOPS;
+  
+  // Return the additional reserve needed
+  return newMinimum - currentMinimum;
+}
+
