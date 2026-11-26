@@ -8,6 +8,7 @@ export {
   getStreamStatus,
   isStreamCancellableByAccount,
   simulateWithdraw,
+  getRemainingVestingSeconds,
 } from "./streams.js";
 export type {
   SimulatedWithdraw,

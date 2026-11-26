@@ -23,9 +23,33 @@ import {
   scValToString,
   simulateReadOnly,
 } from "./soroban.js";
+import { LruMemoCache } from "./lru-memo-cache.js";
 
 /** Stellar Asset Contracts (native XLM, classic assets like USDC) always use 7 decimals. */
 const STELLAR_ASSET_DECIMALS = 7;
+
+/**
+ * Default capacity for the token metadata cache (decimals, symbol, name).
+ * 
+ * Caches immutable token metadata by contract address to prevent redundant RPC calls.
+ * This speeds up UI rendering and respects RPC rate limits by keeping frequently-accessed
+ * token data in memory.
+ */
+export const DEFAULT_TOKEN_METADATA_CACHE_SIZE = 100;
+
+/**
+ * Configuration options for TokenModule.
+ */
+export interface TokenModuleOptions {
+  /**
+   * Maximum number of token metadata entries (decimals, symbol, name) to cache.
+   * Defaults to {@link DEFAULT_TOKEN_METADATA_CACHE_SIZE}.
+   * 
+   * Token metadata is immutable, so caching significantly reduces RPC load for
+   * applications that repeatedly format balances for the same tokens.
+   */
+  metadataCacheSize?: number;
+}
 
 /** SEP-41 token allowance queries and approvals. */
 export class TokenModule {
@@ -250,6 +274,45 @@ export class TokenModule {
     if (this.activeWallet) return this.activeWallet.getPublicKey();
     if (this.config.signer) return this.config.signer.publicKey();
     return ZERO_ADDR;
+  }
+
+  /**
+   * Generic metadata loader with LRU caching and in-flight de-duplication.
+   * 
+   * Checks the LRU cache first, then in-flight requests, and finally invokes
+   * the loader function if needed. This ensures concurrent lookups share a single
+   * RPC simulation and results are cached for future calls.
+   */
+  private async loadMetadata<T>(
+    cache: LruMemoCache<string, T>,
+    inFlight: Map<string, Promise<T>>,
+    tokenAddress: string,
+    loader: (caller: string) => Promise<T>,
+    callerAddress?: string,
+  ): Promise<T> {
+    // Check cache first
+    const cached = cache.get(tokenAddress);
+    if (cached !== undefined) return cached;
+
+    // Check if already in flight
+    const pending = inFlight.get(tokenAddress);
+    if (pending) return pending;
+
+    // Load from RPC
+    const caller = callerAddress ?? await this.defaultCaller();
+    const promise = loader(caller)
+      .then((value) => {
+        cache.set(tokenAddress, value);
+        inFlight.delete(tokenAddress);
+        return value;
+      })
+      .catch((error) => {
+        inFlight.delete(tokenAddress);
+        throw error;
+      });
+
+    inFlight.set(tokenAddress, promise);
+    return promise;
   }
 
   /** Replace the wallet used to sign future token approvals. */
