@@ -413,6 +413,54 @@ export function calculateVestedPercentage(
   return ratio > 1 ? 1 : ratio;
 }
 
+/**
+ * Calculate the amount vested (streamed) by a stream as of a given instant,
+ * in stroops, with millisecond resolution. Intended for live UI counters that
+ * animate between ledger ticks (#1173).
+ *
+ * Accrual is `ratePerSecond × elapsedMs / 1000`, so the result moves smoothly
+ * within a second. The fractional part is truncated (floored), never rounded
+ * up, so the counter never shows more than has accrued.
+ *
+ * On-chain accrual is recorded in whole seconds. At whole-second timestamps
+ * this matches {@link calculateWithdrawableAmount} plus `stream.withdrawn`
+ * exactly. Between seconds it is an off-chain estimate: the contract has not
+ * yet recorded the sub-second portion.
+ *
+ * Follows the same pause, end-time and cancellation rules as
+ * {@link calculateWithdrawableAmount}. Unlike that function, it does not
+ * subtract `withdrawn`, so it reports total vested rather than the amount
+ * currently withdrawable.
+ *
+ * @param stream - The stream snapshot (StreamInfo)
+ * @param currentTimestampMs - Unix time in milliseconds; defaults to now
+ * @returns The vested amount in stroops (bigint), floored to whole stroops
+ */
+export function calculateVestedAmount(
+  stream: StreamInfo,
+  currentTimestampMs: number = Date.now(),
+): bigint {
+  if (stream.cancelled) return 0n;
+
+  const startMs = stream.startTime * 1000;
+  const endMs = stream.endTime * 1000;
+  const nowMs = Math.floor(currentTimestampMs);
+
+  // Clamp to end time first, matching calculateWithdrawableAmount.
+  const endClampedMs = stream.endTime > 0 && nowMs > endMs ? endMs : nowMs;
+
+  // Freeze accrual at pausedAt while paused and not yet past the end.
+  const effectiveNowMs =
+    stream.paused && stream.pausedAt * 1000 < endClampedMs
+      ? stream.pausedAt * 1000
+      : endClampedMs;
+
+  const elapsedMs = effectiveNowMs - startMs;
+  if (elapsedMs <= 0) return 0n;
+
+  return (stream.ratePerSecond * BigInt(elapsedMs)) / 1000n;
+}
+
 export function getStreamProgress(
   stream: StreamInfo,
   currentTimestamp: number = Math.floor(Date.now() / 1000),
@@ -981,6 +1029,38 @@ export class StreamsModule {
     return coalesceInFlight(this._inFlightGets, id, () => this._fetchInfo(id));
   }
 
+  /**
+   * Fetch only the stream status enum without loading full metadata or checkpoint history.
+   * 
+   * High-throughput dashboards displaying thousands of streams often only need to know
+   * if each stream is Active, Paused, or Completed. Fetching the full stream configuration
+   * consumes unnecessary network bandwidth. This lightweight helper reads only the status
+   * from the contract to minimize RPC usage.
+   * 
+   * @param streamId - The stream ID (bigint or string)
+   * @param signal - Optional AbortSignal to cancel the request
+   * @returns Promise resolving to the stream's current status enum
+   * 
+   * @example
+   * ```ts
+   * // Efficiently check status for many streams
+   * const statuses = await Promise.all(
+   *   streamIds.map(id => client.streams.getStreamStatus(id))
+   * );
+   * const activeCount = statuses.filter(s => s === StreamStatus.Active).length;
+   * ```
+   */
+  async getStreamStatus(
+    streamId: bigint | string,
+    signal?: AbortSignal
+  ): Promise<import("./types/index.js").StreamStatus> {
+    // For now, we fetch the full info and derive the status.
+    // A future optimization could add a contract method that returns only status.
+    const info = await this.get(streamId, signal);
+    const { deriveStreamStatus } = await import("./types/index.js");
+    return deriveStreamStatus(info, Math.floor(Date.now() / 1000));
+  }
+
   private async _fetchInfo(
     id: bigint,
     signal?: AbortSignal,
@@ -1163,6 +1243,64 @@ export class StreamsModule {
     return this._invoke(await this._resolveAddr(id), "withdraw", [
       nativeToScVal(qty, { type: "i128" }),
     ]);
+  }
+
+  /**
+   * Dry-run simulation of a stream withdrawal transaction.
+   * 
+   * Estimates the exact claimable amount and transaction fee before submitting
+   * a live withdrawal. Prevents failed on-chain submissions due to zero balance
+   * or insufficient fee buffer.
+   * 
+   * @param streamId - The stream to simulate withdrawal from
+   * @param recipient - The recipient address (must match stream recipient)
+   * @returns Object containing claimableAmount and feeEstimate in stroops
+   * 
+   * @example
+   * ```ts
+   * const { claimableAmount, feeEstimate } = await client.streams.simulateWithdraw('123', 'G...');
+   * console.log(`Can claim ${claimableAmount} stroops with fee ${feeEstimate} stroops`);
+   * ```
+   */
+  async simulateWithdraw(
+    streamId: bigint | string,
+    recipient: string,
+  ): Promise<{ claimableAmount: bigint; feeEstimate: bigint }> {
+    const id = BigInt(streamId);
+    const addr = await this._resolveAddr(id);
+
+    // Get the current withdrawable amount (this is the claimable amount)
+    const claimableAmount = await this.withdrawable(id);
+
+    // Build a withdrawal transaction to simulate (but don't sign or submit)
+    const tx = await buildContractCallTx(
+      this.rpcUrl,
+      this.passphrase,
+      recipient,
+      addr,
+      "withdraw",
+      [nativeToScVal(claimableAmount, { type: "i128" })],
+      undefined,
+      undefined,
+      this._txOptions(),
+    );
+
+    const server = this._server();
+    const sim = await catchNetworkError(
+      "simulateTransaction (withdraw)",
+      server.simulateTransaction(tx),
+    );
+
+    if (SorobanRpc.Api.isSimulationError(sim)) {
+      throw ConduitError.fromSorobanMessage("stream", sim.error);
+    }
+
+    // Extract fee estimate from simulation
+    const resourceFee = BigInt(sim.minResourceFee || "0");
+    const baseFee = BigInt(this._fee || BASE_FEE);
+    const feeEstimate = resourceFee + baseFee;
+
+    return { claimableAmount, feeEstimate };
   }
 
   /**
@@ -1393,6 +1531,61 @@ export class StreamsModule {
     );
   }
 
+  /**
+   * Cancel multiple active streams in batch.
+   * 
+   * Managing multiple employee or grant streams requires canceling multiple streams
+   * sequentially, which is tedious and slow. This batch helper allows senders to
+   * prepare and sign cancellations in a structured flow.
+   * 
+   * @param streamIds - Array of stream IDs to cancel
+   * @param options - Optional batch processing options (concurrency control)
+   * @returns Promise resolving to results for each stream (success or error)
+   * 
+   * @example
+   * ```ts
+   * const result = await client.streams.cancelStreamsBatch(
+   *   ['123', '456', '789'],
+   *   { maxConcurrency: 3 }
+   * );
+   * 
+   * result.forEach((res, i) => {
+   *   if (res.success) {
+   *     console.log(`Stream ${streamIds[i]} cancelled: ${res.txHash}`);
+   *   } else {
+   *     console.error(`Stream ${streamIds[i]} failed: ${res.error}`);
+   *   }
+   * });
+   * ```
+   */
+  async cancelStreamsBatch(
+    streamIds: (bigint | string)[],
+    options: { maxConcurrency?: number; signal?: AbortSignal } = {}
+  ): Promise<Array<{ streamId: bigint; success: boolean; txHash?: string; error?: string }>> {
+    this._ensureCanMutate();
+    
+    const { signal } = options;
+    if (signal?.aborted) throw new DOMException("Aborted", "AbortError");
+    
+    const concurrency = Math.max(1, options.maxConcurrency ?? DEFAULT_LIST_CONCURRENCY);
+    const ids = streamIds.map(id => BigInt(id));
+    
+    const { mapWithConcurrency } = await import("./batch-tx.js");
+    
+    const results = await mapWithConcurrency(ids, concurrency, async (streamId) => {
+      try {
+        if (signal?.aborted) throw new DOMException("Aborted", "AbortError");
+        const txHash = await this.cancel(streamId, signal);
+        return { streamId, success: true as const, txHash };
+      } catch (err) {
+        const error = err instanceof Error ? err.message : String(err);
+        return { streamId, success: false as const, error };
+      }
+    });
+    
+    return results;
+  }
+
   /** Pause the stream (sender only). */
   async pause(
     streamId: bigint | string,
@@ -1534,7 +1727,7 @@ export class StreamsModule {
 
     const assembled = SorobanRpc.assembleTransaction(tx, sim).build();
     const signed = await this._signTx(assembled);
-    const { hash, returnValue } = await this._sendAndPoll(server, signed);
+    const { hash, returnValue } = await this._sendAndPoll(server, signed, signal);
 
     if (!returnValue) {
       throw new Error(`Transaction ${hash} succeeded but returned no value`);

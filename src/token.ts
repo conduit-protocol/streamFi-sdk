@@ -3,6 +3,7 @@ import {
   Asset,
   Transaction,
   nativeToScVal,
+  scValToNative,
 } from "@stellar/stellar-sdk";
 import type { ConduitConfig } from "./types/index.js";
 import type { WalletAdapter } from "./adapters/types.js";
@@ -155,6 +156,118 @@ export class TokenModule {
       await this.decimals(tokenAddress),
       locale,
     );
+  }
+
+  /**
+   * Check if a contract address is a Stellar Asset Contract (SAC).
+   * SACs are issued for Stellar Classic assets (native XLM or issued assets like USDC).
+   * 
+   * @param contractAddress - The contract address to check.
+   * @returns Promise resolving to true if the contract is a SAC, false otherwise.
+   */
+  async isStellarAssetContract(contractAddress: string): Promise<boolean> {
+    try {
+      // Try to parse as a classic asset
+      // SACs have a specific pattern: they can be derived from Asset.contractId()
+      // We'll check if the contract implements the standard token interface
+      // and has the characteristic properties of a SAC
+      
+      // First check: Native XLM SAC
+      const nativeContractId = Asset.native().contractId(this.passphrase);
+      if (contractAddress === nativeContractId) {
+        return true;
+      }
+
+      // Second check: Try to query contract data that SACs expose
+      // SACs store their asset code and issuer in a specific format
+      const caller = await this.defaultCaller();
+      
+      try {
+        // Query the contract's admin/issuer - SACs have this, pure Soroban tokens might not
+        const tx = await buildContractCallTx(
+          this.rpcUrl,
+          this.passphrase,
+          caller,
+          contractAddress,
+          "admin",
+          [],
+          this.fee,
+        );
+        
+        await simulateReadOnly(this.rpcUrl, this.passphrase, tx);
+        
+        // If admin() succeeded, check for asset() method which is SAC-specific
+        const assetTx = await buildContractCallTx(
+          this.rpcUrl,
+          this.passphrase,
+          caller,
+          contractAddress,
+          "asset",
+          [],
+          this.fee,
+        );
+        
+        const assetResult = await simulateReadOnly(this.rpcUrl, this.passphrase, assetTx);
+        // If we get here, it has both admin() and asset(), strong indicator of SAC
+        return scValToNative(assetResult) !== undefined;
+      } catch {
+        // If these calls fail, it's likely not a SAC
+        return false;
+      }
+    } catch {
+      return false;
+    }
+  }
+
+  /**
+   * Parse asset code and issuer from a Stellar Asset Contract.
+   * Returns undefined if the contract is not a SAC.
+   * 
+   * @param contractAddress - The SAC contract address.
+   * @returns Promise resolving to { code: string, issuer?: string } or undefined.
+   */
+  async parseStellarAsset(
+    contractAddress: string,
+  ): Promise<{ code: string; issuer?: string } | undefined> {
+    const isSAC = await this.isStellarAssetContract(contractAddress);
+    if (!isSAC) {
+      return undefined;
+    }
+
+    // Check if it's native XLM
+    const nativeContractId = Asset.native().contractId(this.passphrase);
+    if (contractAddress === nativeContractId) {
+      return { code: "XLM" };
+    }
+
+    try {
+      const caller = await this.defaultCaller();
+      
+      // Get the asset details
+      const assetTx = await buildContractCallTx(
+        this.rpcUrl,
+        this.passphrase,
+        caller,
+        contractAddress,
+        "asset",
+        [],
+        this.fee,
+      );
+      
+      const assetResult = await simulateReadOnly(this.rpcUrl, this.passphrase, assetTx);
+      const assetData = scValToNative(assetResult) as { code: string; issuer: string } | undefined;
+      
+      if (assetData && typeof assetData === "object") {
+        return {
+          code: assetData.code || "UNKNOWN",
+          issuer: assetData.issuer,
+        };
+      }
+      
+      return undefined;
+    } catch {
+      return undefined;
+    }
   }
 
   private async defaultCaller(): Promise<string> {
@@ -318,12 +431,11 @@ export class TokenModule {
     const formattedAmount = formatTokenAmount(amount, decimals);
 
     // Check if running in browser environment
-    // Read `window` through globalThis: the build's TS lib has no DOM types.
-    const browser = globalThis as unknown as {
+    const browserWindow = (globalThis as {
       window?: { confirm?: (message: string) => boolean };
-    };
-    if (typeof browser.window !== "undefined" && browser.window.confirm) {
-      return browser.window.confirm(
+    }).window;
+    if (browserWindow?.confirm) {
+      return browserWindow.confirm(
         `Allow StreamFi contract to transfer ${formattedAmount} tokens on your behalf? Transaction will be required.`,
       );
     }
@@ -395,6 +507,7 @@ function assertDecimals(decimals: number): void {
  * @param rawAmount - Amount in the token's smallest unit, as a bigint or an integer string.
  * @param decimals - The token's decimals.
  * @param locale - BCP 47 locale; defaults to the runtime's locale.
+ * @param maxFractionDigits - Maximum number of fractional digits to show (optional, defaults to showing all).
  * @throws {RangeError} If `decimals` is not a non-negative integer.
  * @throws {SyntaxError} If `rawAmount` is a string that is not an integer.
  */
@@ -402,6 +515,7 @@ export function formatTokenAmount(
   rawAmount: bigint | string,
   decimals: number,
   locale?: string,
+  maxFractionDigits?: number,
 ): string {
   assertDecimals(decimals);
   const raw =
@@ -425,9 +539,73 @@ export function formatTokenAmount(
     .replace(/0+$/, "");
   if (frac.length < minDigits) frac = frac.padEnd(minDigits, "0");
 
+  // Apply maxFractionDigits if specified
+  if (maxFractionDigits !== undefined && maxFractionDigits >= 0) {
+    const maxDigits = Math.min(maxFractionDigits, decimals);
+    if (frac.length > maxDigits) {
+      frac = frac.substring(0, maxDigits);
+      // Remove trailing zeros after truncation
+      frac = frac.replace(/0+$/, "");
+      // But ensure at least minDigits
+      if (frac.length < minDigits) frac = frac.padEnd(minDigits, "0");
+    }
+  }
+
   const decimalMark =
     new Intl.NumberFormat(locale)
       .formatToParts(1.5)
       .find((p) => p.type === "decimal")?.value ?? ".";
   return `${sign}${whole}${decimalMark}${frac}`;
 }
+
+/**
+ * Stellar base reserve per ledger entry, in stroops (0.5 XLM as of current protocol).
+ * Each trustline or subentry requires this reserve to be maintained in the account.
+ */
+const BASE_RESERVE_STROOPS = 5_000_000n; // 0.5 XLM in stroops
+
+/**
+ * Calculate the minimum XLM balance required for establishing a new token trustline.
+ * 
+ * On Stellar, each account must maintain a minimum balance based on base reserve
+ * requirements. Creating new trustlines for streamed assets requires satisfying these
+ * ledger entry reserves. This helper warns users if their available XLM balance is
+ * insufficient.
+ * 
+ * @param accountDetails - Horizon AccountResponse containing balances and subentry count
+ * @returns The minimum additional XLM (in stroops) needed to safely add one trustline
+ * 
+ * @example
+ * ```ts
+ * import { Horizon } from '@stellar/stellar-sdk';
+ * const server = new Horizon.Server('https://horizon-testnet.stellar.org');
+ * const account = await server.loadAccount(userAddress);
+ * const reserveNeeded = getTrustlineReserveRequirement(account);
+ * 
+ * // Check if user has sufficient XLM
+ * const xlmBalance = account.balances.find(b => b.asset_type === 'native');
+ * const availableStroops = BigInt(parseFloat(xlmBalance.balance) * 10_000_000);
+ * if (availableStroops < reserveNeeded) {
+ *   console.warn(`Need ${reserveNeeded / 10_000_000n} more XLM for trustline`);
+ * }
+ * ```
+ */
+export function getTrustlineReserveRequirement(
+  accountDetails: { subentry_count: number; num_sponsoring: number; num_sponsored: number }
+): bigint {
+  // Base reserve calculation: (2 + subentries + sponsoring - sponsored) * base_reserve
+  // For adding one trustline, we need: current_minimum + base_reserve
+  const currentSubentries = BigInt(accountDetails.subentry_count);
+  const sponsoring = BigInt(accountDetails.num_sponsoring);
+  const sponsored = BigInt(accountDetails.num_sponsored);
+  
+  // Current minimum: (2 + subentries + sponsoring - sponsored) * base_reserve
+  const currentMinimum = (2n + currentSubentries + sponsoring - sponsored) * BASE_RESERVE_STROOPS;
+  
+  // Adding one trustline increases subentries by 1
+  const newMinimum = (2n + currentSubentries + 1n + sponsoring - sponsored) * BASE_RESERVE_STROOPS;
+  
+  // Return the additional reserve needed
+  return newMinimum - currentMinimum;
+}
+

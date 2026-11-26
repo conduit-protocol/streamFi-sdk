@@ -410,6 +410,14 @@ export interface ListStreamsParams {
   cursor?: string;
 }
 
+export interface StreamFilterOptions {
+  token?: string;
+  sender?: string;
+  recipient?: string;
+  createdAfter?: number;
+  activeOnly?: boolean;
+}
+
 export interface PaginatedStreams {
   /** The stream info results for this page */
   streams: StreamInfo[];
@@ -497,53 +505,100 @@ export interface FactoryConfig {
 
 // ── Events ──────────────────────────────────────────────────────────────────
 
+/**
+ * Published when a recipient withdraws from a stream (`withdrawn` topic).
+ * Strictly typed event payload structure parsed from RPC topics.
+ */
 export interface WithdrawEvent {
+  /** Amount withdrawn in this transaction (stroops). */
   amount: bigint;
+  /** The recipient who withdrew (topics[1] actor). */
   recipient: string;
+  /** Cumulative amount withdrawn from this stream since creation (stroops). */
   totalWithdrawn: bigint;
+  /** Remaining unstreamed balance after this withdrawal (stroops). */
   remaining: bigint;
-  sequence?: bigint;
-}
-export interface CancelEvent {
-  refundAmount: bigint;
-  withdrawnSoFar: bigint;
-  sender: string;
-  sequence?: bigint;
-}
-export interface PauseEvent {
-  pausedAt: number;
-  withdrawable: bigint;
-  sender: string;
-  sequence?: bigint;
-}
-export interface ResumeEvent {
-  resumedAt: number;
-  sender: string;
-  sequence?: bigint;
-}
-/** Published when the sender tops up a stream (`topped_up` topic). */
-export interface StreamTopUpEvent {
-  /** Amount added to the stream's deposit. */
-  amount: bigint;
-  /** Stream balance after the top-up. */
-  newBalance: bigint;
-  /** The address that funded the top-up (topics[1] actor). */
-  sender: string;
+  /** Per-contract event sequence number (topics[2]), for gap detection. */
   sequence?: bigint;
 }
 
-/** Published when a stream's recipient first withdraws after its cliff. */
+/**
+ * Published when the sender cancels a stream (`cancelled` topic).
+ * Strictly typed event payload structure parsed from RPC topics.
+ */
+export interface CancelEvent {
+  /** Unstreamed amount refunded to the sender (stroops). */
+  refundAmount: bigint;
+  /** Amount already withdrawn by the recipient before cancellation (stroops). */
+  withdrawnSoFar: bigint;
+  /** The sender who cancelled (topics[1] actor). */
+  sender: string;
+  /** Per-contract event sequence number (topics[2]), for gap detection. */
+  sequence?: bigint;
+}
+
+/**
+ * Published when the sender pauses a stream (`paused` topic).
+ * Strictly typed event payload structure parsed from RPC topics.
+ */
+export interface PauseEvent {
+  /** Unix timestamp (seconds) when the stream was paused. */
+  pausedAt: number;
+  /** Amount withdrawable at the moment of pausing (stroops). */
+  withdrawable: bigint;
+  /** The sender who paused (topics[1] actor). */
+  sender: string;
+  /** Per-contract event sequence number (topics[2]), for gap detection. */
+  sequence?: bigint;
+}
+
+/**
+ * Published when the sender resumes a paused stream (`resumed` topic).
+ * Strictly typed event payload structure parsed from RPC topics.
+ */
+export interface ResumeEvent {
+  /** Unix timestamp (seconds) when the stream was resumed. */
+  resumedAt: number;
+  /** The sender who resumed (topics[1] actor). */
+  sender: string;
+  /** Per-contract event sequence number (topics[2]), for gap detection. */
+  sequence?: bigint;
+}
+
+/**
+ * Published when the sender tops up a stream (`topped_up` topic).
+ * Strictly typed event payload structure parsed from RPC topics.
+ */
+export interface StreamTopUpEvent {
+  /** Amount added to the stream's deposit (stroops). */
+  amount: bigint;
+  /** Stream balance after the top-up (stroops). */
+  newBalance: bigint;
+  /** The address that funded the top-up (topics[1] actor). */
+  sender: string;
+  /** Per-contract event sequence number (topics[2]), for gap detection. */
+  sequence?: bigint;
+}
+
+/**
+ * Published when a stream's recipient first withdraws after its cliff.
+ * Strictly typed event payload structure parsed from RPC topics.
+ */
 export interface StreamCliffReachedEvent {
   /** Recipient whose withdrawal crossed the cliff. */
   recipient: string;
   /** Unix timestamp (seconds) at which the cliff was reached. */
   timestamp: number;
-  /** Amount made withdrawable by the cliff. */
+  /** Amount made withdrawable by the cliff (stroops). */
   unlockAmount: bigint;
+  /** Per-contract event sequence number (topics[2]), for gap detection. */
   sequence?: bigint;
 }
 
-/** Published when a top-up extends a stream's end time. */
+/**
+ * Published when a top-up extends a stream's end time.
+ * Strictly typed event payload structure parsed from RPC topics.
+ */
 export interface StreamTopUpExtendedEvent {
   /** The address that funded the top-up (topics[1] actor). */
   sender: string;
@@ -551,19 +606,24 @@ export interface StreamTopUpExtendedEvent {
   oldEndTime: number;
   /** Extended stream end time, in Unix seconds. */
   newEndTime: number;
-  /** Amount added to the stream's deposit. */
+  /** Amount added to the stream's deposit (stroops). */
   addedAmount: bigint;
-  /** Total stream deposit after the top-up. */
+  /** Total stream deposit after the top-up (stroops). */
   newTotalDeposit: bigint;
+  /** Per-contract event sequence number (topics[2]), for gap detection. */
   sequence?: bigint;
 }
 
-/** Published when the sender claws back unstreamed funds (`clawback` topic). */
+/**
+ * Published when the sender claws back unstreamed funds (`clawback` topic).
+ * Strictly typed event payload structure parsed from RPC topics.
+ */
 export interface StreamClawbackedEvent {
-  /** Amount clawed back to the sender. */
+  /** Amount clawed back to the sender (stroops). */
   amount: bigint;
   /** The address that initiated the clawback (topics[1] actor). */
   sender: string;
+  /** Per-contract event sequence number (topics[2]), for gap detection. */
   sequence?: bigint;
 }
 
@@ -572,16 +632,26 @@ export type TopUpEvent = StreamTopUpEvent;
 /** @deprecated Use {@link StreamClawbackedEvent}. */
 export type ClawbackEvent = StreamClawbackedEvent;
 
-/** Published once when the factory deploys a new DripStream (`created` topic). */
+/**
+ * Published once when the factory deploys a new DripStream (`created` topic).
+ * Strictly typed event payload structure parsed from RPC topics.
+ */
 export interface CreatedEvent {
   /** The stream's sender (topics[1] actor). */
   sender: string;
+  /** The stream's recipient. */
   recipient: string;
+  /** Token contract address or 'native'. */
   token: string;
+  /** Initial deposit amount (stroops). */
   depositAmount: bigint;
+  /** Tokens released per second (stroops). */
   ratePerSecond: bigint;
+  /** Stream start time (Unix timestamp, seconds). */
   startTime: number;
+  /** Stream end time (Unix timestamp, seconds); 0 = open-ended. */
   endTime: number;
+  /** Per-contract event sequence number (topics[2]), for gap detection. */
   sequence?: bigint;
 }
 
@@ -589,38 +659,55 @@ export interface CreatedEvent {
  * Published when the recipient force-cancels a paused stream after the
  * pause threshold has elapsed (`force_cxl` topic). Settles atomically like
  * `cancelled`, but is recipient-initiated rather than sender-initiated.
+ * Strictly typed event payload structure parsed from RPC topics.
  */
 export interface ForceCancelEvent {
   /** The recipient who force-cancelled (topics[1] actor). */
   recipient: string;
-  /** Earned-but-unwithdrawn amount paid out to the recipient. */
+  /** Earned-but-unwithdrawn amount paid out to the recipient (stroops). */
   payoutAmount: bigint;
-  /** Unstreamed remainder refunded to the sender. */
+  /** Unstreamed remainder refunded to the sender (stroops). */
   refundAmount: bigint;
+  /** Per-contract event sequence number (topics[2]), for gap detection. */
   sequence?: bigint;
 }
 
-/** Published when the recipient role is transferred to a new address (`xfer_rec` topic). */
+/**
+ * Published when the recipient role is transferred to a new address (`xfer_rec` topic).
+ * Strictly typed event payload structure parsed from RPC topics.
+ */
 export interface RecipientTransferEvent {
   /** The outgoing recipient who initiated the transfer (topics[1] actor). */
   previousRecipient: string;
+  /** The new recipient who will receive the stream. */
   newRecipient: string;
+  /** Per-contract event sequence number (topics[2]), for gap detection. */
   sequence?: bigint;
 }
 
-/** Published when an operator is delegated on the stream (`set_op` topic). */
+/**
+ * Published when an operator is delegated on the stream (`set_op` topic).
+ * Strictly typed event payload structure parsed from RPC topics.
+ */
 export interface OperatorSetEvent {
   /** The address that granted the operator role (topics[1] actor). */
   sender: string;
+  /** The operator address being delegated. */
   operator: string;
+  /** Per-contract event sequence number (topics[2]), for gap detection. */
   sequence?: bigint;
 }
 
-/** Published when a previously-delegated operator is revoked (`rm_op` topic). */
+/**
+ * Published when a previously-delegated operator is revoked (`rm_op` topic).
+ * Strictly typed event payload structure parsed from RPC topics.
+ */
 export interface OperatorRevokedEvent {
   /** The address that revoked the operator role (topics[1] actor). */
   sender: string;
+  /** The operator address being revoked. */
   operator: string;
+  /** Per-contract event sequence number (topics[2]), for gap detection. */
   sequence?: bigint;
 }
 
@@ -855,6 +942,35 @@ export interface DurationBreakdown {
   minutes: number;
   seconds: number;
   totalSeconds: number;
+}
+
+/**
+ * Standardized metric object for protocol dashboards and analytics providers.
+ * Represents aggregate statistics across streams, enabling consistent integration
+ * with graphing libraries and analytics systems.
+ *
+ * @example
+ * ```ts
+ * const metrics: StreamMetrics = {
+ *   totalVolume: 1000000000000n, // Total volume streamed (stroops)
+ *   activeCount: 42,              // Number of active streams
+ *   totalClaimed: 500000000000n,  // Total amount claimed by recipients
+ *   tokenBreakdown: {
+ *     'native': 600000000000n,
+ *     'USDC': 400000000000n,
+ *   },
+ * };
+ * ```
+ */
+export interface StreamMetrics {
+  /** Total volume streamed across all streams (stroops). */
+  totalVolume: bigint;
+  /** Number of currently active streams. */
+  activeCount: number;
+  /** Total amount claimed/withdrawn by recipients (stroops). */
+  totalClaimed: bigint;
+  /** Volume breakdown by token type (token address/identifier -> amount in stroops). */
+  tokenBreakdown: Record<string, bigint>;
 }
 
 // ── Contract error codes (#1096) ──────────────────────────────────────────────

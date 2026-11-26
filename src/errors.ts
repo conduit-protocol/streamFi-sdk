@@ -831,11 +831,13 @@ export class RateLimitError extends StreamFiError {
         retryAfterMs,
       );
     }
-    if (response?.status === 503) {
+    // 502 (bad gateway) means a proxy in front of the node could not reach it,
+    // so it is treated like 503: fail over rather than retry the same endpoint (#1171).
+    if (response?.status === 502 || response?.status === 503) {
       const retryAfterHeader = response.headers?.['retry-after'];
       const retryAfterMs = RateLimitError.parseRetryAfterMs(retryAfterHeader);
       return new RpcServiceUnavailableError(
-        `RPC node service unavailable (503). The endpoint may be down; consider failing over to a different RPC URL.`,
+        `RPC node service unavailable (${response.status}). The endpoint may be down; consider failing over to a different RPC URL.`,
         retryAfterMs,
       );
     }

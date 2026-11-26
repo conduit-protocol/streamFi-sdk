@@ -399,7 +399,6 @@ export class LedgerSigner implements Signer {
   private readonly appName: string;
   private readonly path: string;
   private readonly device: LedgerDevice | undefined;
-  private readonly timeoutMs: number;
   private cachedPublicKey: string | undefined;
   private readonly hardwareSignTimeoutMs: number;
 
@@ -407,7 +406,6 @@ export class LedgerSigner implements Signer {
     this.appName = options?.appName ?? 'Stellar';
     this.path = options?.path ?? "44'/148'/0'/0/0";
     this.device = options?.device;
-    this.timeoutMs = options?.timeoutMs ?? DEFAULT_SIGNATURE_TIMEOUT_MS;
     this.cachedPublicKey = options?.publicKey;
     this.hardwareSignTimeoutMs = options?.hardwareSignTimeoutMs ?? DEFAULT_HARDWARE_SIGN_TIMEOUT_MS;
   }
@@ -583,7 +581,8 @@ export interface WebAuthnSignerOptions {
   contractAddress: string;
   /** The passkey credential enrolled for `contractAddress` by that wallet contract's own registration flow. */
   credential: WebAuthnCredentialDescriptor;
-  /** Injected `navigator.credentials`-like container. Defaults to `globalThis.navigator.credentials`. */
+  /** Injected 
+avigator.credentials`-like container. Defaults to `globalThis.navigator.credentials`. */
   credentials?: WebAuthnCredentialsContainer;
   /** Relying party ID passed to `credentials.get()`. Omit to let the platform default to the current origin. */
   rpId?: string;
