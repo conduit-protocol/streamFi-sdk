@@ -368,7 +368,7 @@ export async function pollForConfirmation(
   const { pollIntervalMs, maxAttempts, signal } = options;
   for (let i = 0; i < maxAttempts; i++) {
     if (signal?.aborted) throw new DOMException("Aborted", "AbortError");
-    await sleep(pollIntervalMs);
+    await sleepOrAbort(pollIntervalMs, signal);
     if (signal?.aborted) throw new DOMException("Aborted", "AbortError");
 
     let status;
@@ -1305,6 +1305,31 @@ export function boolToScVal(val: boolean): xdr.ScVal {
 
 function sleep(ms: number): Promise<void> {
   return new Promise((r) => setTimeout(r, ms));
+}
+
+/**
+ * Like {@link sleep}, but rejects with an `AbortError` as soon as `signal`
+ * aborts, instead of waiting out the full interval (#1172). Without this, a
+ * cancelled confirmation wait would keep the caller pending for up to one
+ * poll interval.
+ */
+function sleepOrAbort(ms: number, signal?: AbortSignal | undefined): Promise<void> {
+  if (!signal) return sleep(ms);
+  return new Promise((resolve, reject) => {
+    if (signal.aborted) {
+      reject(new DOMException("Aborted", "AbortError"));
+      return;
+    }
+    const onAbort = (): void => {
+      clearTimeout(timer);
+      reject(new DOMException("Aborted", "AbortError"));
+    };
+    const timer = setTimeout(() => {
+      signal.removeEventListener("abort", onAbort);
+      resolve();
+    }, ms);
+    signal.addEventListener("abort", onAbort, { once: true });
+  });
 }
 
 // ── Network error helpers ─────────────────────────────────────────────────────

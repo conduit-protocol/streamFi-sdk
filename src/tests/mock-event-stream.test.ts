@@ -19,7 +19,8 @@ describe('createMockEventStream (#965)', () => {
 
   it('assigns strictly increasing sequence numbers', () => {
     const entries = createMockEventStream();
-    const sequences = entries.map((e) => (e.event as { sequence?: bigint }).sequence);
+    // Not every event kind carries `sequence` (e.g. cliff-reached), so narrow here.
+    const sequences = entries.map((e) => (e.event as { sequence: bigint }).sequence);
     expect(sequences).toEqual([1n, 2n, 3n, 4n, 5n, 6n, 7n]);
   });
 

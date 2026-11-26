@@ -321,7 +321,8 @@ export class StreamBuilder {
    * bytes, per Stellar); pass a `Memo` for id/hash/return memos.
    *
    * The memo applies to transactions produced by {@link buildTransaction} and
-   * {@link simulate}; it is not part of the {@link build} payload.
+   * {@link simulate}. It is also emitted in the {@link build} payload as base64
+   * `Memo` XDR under `memo` (#1170), for off-chain reconciliation.
    * @throws {ValidationError} If the string memo exceeds 28 bytes or is not a valid memo.
    */
   withMemo(memo: string | Memo): this {
@@ -438,6 +439,11 @@ export class StreamBuilder {
     if (this._clawbackEnabled !== undefined) config.clawbackEnabled = this._clawbackEnabled;
     if (this._cancelable !== undefined) config.cancelable = this._cancelable;
     if (this._clawbackable !== undefined) config.clawbackable = this._clawbackable;
+    if (this._memo !== undefined) {
+      // Serialized as base64 `Memo` XDR (#1170) so the payload stays JSON-safe
+      // and a backend can decode it with `xdr.Memo.fromXDR(memo, 'base64')`.
+      config.memo = this._memo.toXDRObject().toXDR('base64');
+    }
 
     return bigintSafeStringify(config) as {
       token: string;
@@ -450,6 +456,8 @@ export class StreamBuilder {
       clawbackEnabled?: boolean;
       cancelable?: boolean;
       clawbackable?: boolean;
+      /** Base64 XDR of the `Memo` set via {@link withMemo}, when one was set. */
+      memo?: string;
     };
   }
 
