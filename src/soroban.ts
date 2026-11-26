@@ -949,6 +949,92 @@ export function decodeDiagnosticEvents(
   return lines;
 }
 
+/** Structured diagnostic report for Soroban InvokeHostFunction errors */
+export interface SorobanDiagnosticReport {
+  /** True if the simulation failed */
+  failed: boolean;
+  /** RPC error message, if any */
+  error?: string;
+  /** Decoded diagnostic events with contract source, topics, and data */
+  events: Array<{
+    source: string;
+    topics: string[];
+    data: string;
+    inFailedCall: boolean;
+  }>;
+  /** Human-readable summary lines (same as decodeDiagnosticEvents output) */
+  summary: string[];
+}
+
+/**
+ * Parse Soroban InvokeHostFunction simulation errors into a structured diagnostic report.
+ * 
+ * Raw Soroban RPC transaction simulation errors contain nested ScVal structures that are
+ * difficult to interpret. This function decodes diagnostic events and returns a structured
+ * report with parsed contract events, topics, and data values.
+ * 
+ * @param simulationResponse - The simulation response from Soroban RPC
+ * @returns A structured diagnostic report with decoded events and error information
+ * 
+ * @example
+ * ```ts
+ * const sim = await server.simulateTransaction(tx);
+ * const report = parseDiagnosticEvents(sim);
+ * 
+ * if (report.failed) {
+ *   console.error(`Simulation failed: ${report.error}`);
+ *   report.events.forEach(event => {
+ *     console.log(`${event.source}: [${event.topics.join(', ')}] ${event.data}`);
+ *   });
+ * }
+ * ```
+ */
+export function parseDiagnosticEvents(
+  simulationResponse: SorobanRpc.Api.SimulateTransactionResponse,
+): SorobanDiagnosticReport {
+  const failed = SorobanRpc.Api.isSimulationError(simulationResponse);
+  const error = failed && simulationResponse.error ? simulationResponse.error : undefined;
+  
+  const events: SorobanDiagnosticReport["events"] = [];
+  const rawEvents =
+    (simulationResponse as unknown as { events?: Array<xdr.DiagnosticEvent | string> })
+      .events ?? [];
+  
+  for (const entry of rawEvents) {
+    try {
+      const event =
+        typeof entry === "string" ? xdr.DiagnosticEvent.fromXDR(entry, "base64") : entry;
+      
+      const contractEvent = event.event();
+      const contractId = contractEvent.contractId();
+      const source = contractId ? StrKey.encodeContract(contractId) : "host";
+      const v0 = contractEvent.body().v0();
+      const topics = v0.topics().map(renderScVal);
+      const data = renderScVal(v0.data());
+      const inFailedCall = !event.inSuccessfulContractCall();
+      
+      events.push({
+        source,
+        topics,
+        data,
+        inFailedCall,
+      });
+    } catch {
+      // Skip undecodable events - they won't appear in the structured output
+      // but will be in the summary as "<undecodable diagnostic event>"
+    }
+  }
+  
+  const summary = decodeDiagnosticEvents(simulationResponse);
+  
+  return {
+    failed,
+    error,
+    events,
+    summary,
+  };
+}
+
 // ── Pre-signed transaction submission (#1099) ────────────────────────────────
 
 /** Lifecycle of a pre-signed transaction submitted with {@link submitSignedTransaction}. */
@@ -1057,14 +1143,22 @@ let _tokenDecimalsHits = 0;
 let _tokenDecimalsMisses = 0;
 
 /**
+ * How long a settled token `decimals()` result is reused before it is
+ * re-queried and evicted (#1167). Entries expire on their own, so the cache
+ * cannot retain a token's metadata indefinitely or grow without bound for
+ * long-running processes that touch many tokens.
+ */
+const TOKEN_DECIMALS_CACHE_TTL_MS = 60 * 60 * 1000;
+
+/**
  * Query a token contract's `decimals()` — part of the standard Stellar
  * Asset / SEP-41 token interface every `CreateStreamParams.token` must
  * implement. Callers must not assume 7 decimals (the native XLM/Stellar
  * Asset Contract default) for arbitrary token addresses.
  *
- * Results are cached per `rpcUrl:tokenId` for the lifetime of the process,
- * since a token's decimals cannot change after deployment. Use
- * `clearTokenDecimalsCache()` to reset (e.g. in tests or when a fresh
+ * Results are cached per `rpcUrl:tokenId` for one hour (#1167), after which
+ * the entry is evicted and the next call re-simulates `decimals()`. Use
+ * `clearTokenDecimalsCache()` to reset early (e.g. in tests or when a fresh
  * simulation is required).
  */
 export async function getTokenDecimals(
@@ -1083,19 +1177,24 @@ export async function getTokenDecimals(
 
   // Request coalescing extracted into coalesceAsync (#798): concurrent
   // callers share one in-flight simulation, and failures are evicted so a
-  // later call can retry.
-  return coalesceAsync(_tokenDecimalsCache, cacheKey, async () => {
-    const tx = await buildContractCallTx(
-      rpcUrl,
-      passphrase,
-      callerAddr,
-      tokenId,
-      "decimals",
-      [],
-    );
-    const val = await simulateReadOnly(rpcUrl, passphrase, tx);
-    return scValToU32(val);
-  });
+  // later call can retry. The TTL window (#1167) evicts settled entries.
+  return coalesceAsync(
+    _tokenDecimalsCache,
+    cacheKey,
+    async () => {
+      const tx = await buildContractCallTx(
+        rpcUrl,
+        passphrase,
+        callerAddr,
+        tokenId,
+        "decimals",
+        [],
+      );
+      const val = await simulateReadOnly(rpcUrl, passphrase, tx);
+      return scValToU32(val);
+    },
+    TOKEN_DECIMALS_CACHE_TTL_MS,
+  );
 }
 
 /**
@@ -1161,6 +1260,21 @@ export function scValToU32(val: xdr.ScVal): number {
     );
   }
   return val.u32();
+}
+
+/**
+ * Convert an ScVal string/symbol to a JS string.
+ *
+ * SEP-41 metadata getters use different shapes across implementations:
+ * `symbol()` commonly returns an `scvSymbol`, while `name()` returns an
+ * `scvString`. Accept both so token metadata lookups don't fail on an
+ * XDR union-shape mismatch.
+ */
+export function scValToString(val: xdr.ScVal): string {
+  const kind = val.switch().name;
+  if (kind === 'scvString') return val.str().toString('utf8');
+  if (kind === 'scvSymbol') return val.sym().toString('utf8');
+  throw new Error(`Expected a string or symbol ScVal, got "${kind}" instead.`);
 }
 
 /**

@@ -410,6 +410,14 @@ export interface ListStreamsParams {
   cursor?: string;
 }
 
+export interface StreamFilterOptions {
+  token?: string;
+  sender?: string;
+  recipient?: string;
+  createdAfter?: number;
+  activeOnly?: boolean;
+}
+
 export interface PaginatedStreams {
   /** The stream info results for this page */
   streams: StreamInfo[];
@@ -445,6 +453,34 @@ export interface GetStreamInfosFailure {
 export interface GetStreamInfosResult {
   results: StreamInfo[];
   failures: GetStreamInfosFailure[];
+}
+
+/** Options for `TokenModule.checkTrustline()`. */
+export interface TrustlineCheckOptions {
+  signal?: AbortSignal | undefined;
+  /**
+   * When true, a missing trustline throws `MissingTrustlineError` instead of
+   * resolving with `hasTrustline: false`. Defaults to false.
+   */
+  throwOnMissing?: boolean;
+}
+
+/** Result of a `TokenModule.checkTrustline()` pre-flight check. */
+export interface TrustlineCheckResult {
+  /** Whether `account` can receive the token without adding a trustline. */
+  hasTrustline: boolean;
+  /** The account that was checked. */
+  account: string;
+  /** The token identifier that was checked (`native`, `USDC`, or a contract ID). */
+  token: string;
+  /** Resolved classic asset code, when the token maps to a classic asset. */
+  assetCode?: string | undefined;
+  /** Resolved classic asset issuer, when the token maps to a classic asset. */
+  assetIssuer?: string | undefined;
+  /** The Stellar Asset Contract ID used for the comparison, when resolved. */
+  contractId?: string | undefined;
+  /** Human-readable explanation suitable for UI error/success messages. */
+  message: string;
 }
 
 export interface GovernorConfig {
@@ -512,6 +548,7 @@ export interface StreamCliffReachedEvent {
   timestamp: number;
   /** Amount made withdrawable by the cliff. */
   unlockAmount: bigint;
+  sequence?: bigint;
 }
 
 /** Published when a top-up extends a stream's end time. */

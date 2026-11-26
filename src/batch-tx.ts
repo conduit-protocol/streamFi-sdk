@@ -45,6 +45,134 @@ import type { Network } from './types/index.js';
 
 export const DEFAULT_BATCH_TIMEOUT_SECONDS = 30;
 
+// ── Deduplicated footprint builder ────────────────────────────────────────────
+
+/** Anything that can yield ledger keys for a merged batch footprint. */
+export type FootprintSource =
+  | xdr.LedgerFootprint
+  | xdr.LedgerKey[]
+  | {
+      readOnly?: xdr.LedgerKey[];
+      readWrite?: xdr.LedgerKey[];
+      footprint?: FootprintSource;
+      transactionData?: { footprint?: FootprintSource };
+    }
+  | null
+  | undefined;
+
+interface KeySets {
+  readOnly: xdr.LedgerKey[];
+  readWrite: xdr.LedgerKey[];
+}
+
+function isLedgerKey(value: unknown): value is xdr.LedgerKey {
+  return value instanceof xdr.LedgerKey;
+}
+
+function uniqueKeyId(key: xdr.LedgerKey): string {
+  return key.toXDR('base64');
+}
+
+function normalizeFootprintSource(source: FootprintSource): KeySets | undefined {
+  if (!source) return undefined;
+  if (typeof source !== 'object' && typeof source !== 'function') {
+    throw new BatchBuildError('footprint sources must be xdr.LedgerFootprint values, xdr.LedgerKey arrays, or simulation responses');
+  }
+  if (Array.isArray(source)) {
+    for (const key of source) {
+      if (!isLedgerKey(key)) {
+        throw new BatchBuildError('footprint arrays must contain only xdr.LedgerKey values');
+      }
+    }
+    return { readOnly: [], readWrite: source };
+  }
+  const record = source as Record<string, unknown>;
+  if (typeof record.footprint === 'object' || typeof record.footprint === 'function') {
+    return normalizeFootprintSource(record.footprint as FootprintSource);
+  }
+  const txData = record.transactionData as { footprint?: FootprintSource } | undefined;
+  if (txData && typeof txData === 'object' && txData.footprint) {
+    return normalizeFootprintSource(txData.footprint);
+  }
+  // Real `xdr.LedgerFootprint` instances expose accessor methods rather than
+  // plain arrays; duck-type them so a second copy of the SDK still works.
+  if (typeof record.readOnly === 'function' && typeof record.readWrite === 'function') {
+    const readOnly = (record.readOnly as () => xdr.LedgerKey[])();
+    const readWrite = (record.readWrite as () => xdr.LedgerKey[])();
+    return { readOnly, readWrite };
+  }
+  const readOnly = Array.isArray(record.readOnly) ? record.readOnly : [];
+  const readWrite = Array.isArray(record.readWrite) ? record.readWrite : [];
+  for (const key of [...readOnly, ...readWrite]) {
+    if (!isLedgerKey(key)) {
+      throw new BatchBuildError('footprint arrays must contain only xdr.LedgerKey values');
+    }
+  }
+  return { readOnly, readWrite };
+}
+
+/**
+ * Merge several footprints (or arrays of ledger keys, or Soroban simulation
+ * responses) into one {@link xdr.LedgerFootprint} with every ledger key
+ * appearing at most once.
+ *
+ * Batch payloads combine operations that often touch the same ledger entries
+ * (source account, token balances, stream contracts). Sending a footprint with
+ * duplicate keys — or with a key only in `readOnly` when another operation
+ * needs it as `readWrite` — makes the network reject the whole batch. This
+ * builder unions the sets and promotes any key seen as writable to `readWrite`.
+ *
+ * The first occurrence of each key wins the ordering, and the input footprints
+ * are never mutated.
+ *
+ * @param sources Footprints/keys to merge, passed as an array or as arguments.
+ */
+export function mergeFootprints(
+  ...sources: Array<FootprintSource | FootprintSource[]>
+): xdr.LedgerFootprint {
+  const flat: FootprintSource[] = sources.flat() as FootprintSource[];
+  const readOnly = new Map<string, xdr.LedgerKey>();
+  const readWrite = new Map<string, xdr.LedgerKey>();
+
+  for (const source of flat) {
+    const keys = normalizeFootprintSource(source);
+    if (!keys) continue;
+    for (const key of keys.readOnly) {
+      const id = uniqueKeyId(key);
+      if (!readWrite.has(id) && !readOnly.has(id)) readOnly.set(id, key);
+    }
+    for (const key of keys.readWrite) {
+      const id = uniqueKeyId(key);
+      readOnly.delete(id);
+      if (!readWrite.has(id)) readWrite.set(id, key);
+    }
+  }
+
+  return new xdr.LedgerFootprint({
+    readOnly: Array.from(readOnly.values()),
+    readWrite: Array.from(readWrite.values()),
+  });
+}
+
+/** Remove duplicate ledger keys from a single footprint, promoting writable keys. */
+export function deduplicateFootprint(footprint: FootprintSource): xdr.LedgerFootprint {
+  return mergeFootprints(footprint);
+}
+
+/** Alias of {@link mergeFootprints}. */
+export const buildDeduplicatedFootprint = mergeFootprints;
+/** Alias of {@link mergeFootprints}. */
+export const buildMergedFootprint = mergeFootprints;
+/** Alias of {@link mergeFootprints} for batch-specific call sites. */
+export const mergeBatchFootprints = mergeFootprints;
+
+/** Merge the footprints attached to a list of Soroban simulation responses. */
+export function mergeSimulationFootprints(
+  simulations: SorobanRpc.Api.SimulateTransactionResponse[],
+): xdr.LedgerFootprint {
+  return mergeFootprints(simulations as unknown as FootprintSource[]);
+}
+
 /**
  * Split a flat list of batch operations into chunks small enough to fit
  * Soroban's per-transaction instruction / footprint limits.
@@ -1100,3 +1228,164 @@ export async function submitBatchLenient(
   };
 }
 
+/**
+ * Chunked batch transaction processing with progress reporting.
+ *
+ * Large payroll batches are split into smaller transaction chunks so that a
+ * UI can render progress bars / stage indicators while the batch is being
+ * submitted. Each chunk is processed in order and an `onProgress` callback
+ * is invoked once the chunk completes.
+ */
+
+export interface BatchProgress {
+  /** Zero-based index of the chunk that was just completed. */
+  chunkIndex: number;
+  /** Total number of chunks the batch was split into. */
+  totalChunks: number;
+  /** Cumulative number of items processed (including failures). */
+  completedItems: number;
+  /** Total number of items in the batch. */
+  totalItems: number;
+  /** Number of items that belonged to the just-completed chunk. */
+  itemsInChunk: number;
+  /** Completion percentage in the range 0-100. */
+  percent: number;
+}
+
+export interface BatchItemError {
+  /** Index of the item in the original input array. */
+  index: number;
+  /** The error thrown while processing that item. */
+  error: unknown;
+}
+
+export interface BatchTxResult<R> {
+  /** Successful handler results, in input order. */
+  results: R[];
+  /** Per-item failures; their presence does not abort the batch. */
+  errors: BatchItemError[];
+  completedItems: number;
+  failedItems: number;
+  totalItems: number;
+  chunksProcessed: number;
+  aborted: boolean;
+}
+
+export interface BatchTxOptions {
+  /** Maximum number of items per transaction chunk. Default: 50. */
+  chunkSize?: number;
+  /** Invoked once after every completed chunk. */
+  onProgress?: (progress: BatchProgress) => void;
+  /** Allows a caller to stop processing between chunks. */
+  signal?: AbortSignal;
+}
+
+export const DEFAULT_CHUNK_SIZE = 50;
+
+/** Split an array into consecutive chunks of at most `chunkSize` items. */
+export function chunkItems<T>(items: readonly T[], chunkSize: number = DEFAULT_CHUNK_SIZE): T[][] {
+  if (!Number.isInteger(chunkSize) || chunkSize <= 0) {
+    throw new RangeError('chunkSize must be a positive integer');
+  }
+
+  const chunks: T[][] = [];
+  for (let i = 0; i < items.length; i += chunkSize) {
+    chunks.push(items.slice(i, i + chunkSize));
+  }
+  return chunks;
+}
+
+/**
+ * Process a batch in chunks, reporting progress after each chunk.
+ *
+ * The handler runs sequentially so progress reflects work that has actually
+ * completed. A failing item is recorded in `errors` and processing continues
+ * with the next item, ensuring one bad transaction cannot stall a payroll
+ * run. If the abort signal fires, processing stops at the next safe boundary
+ * and the partial result is returned with `aborted: true`.
+ */
+export async function processBatch<T, R>(
+  items: readonly T[],
+  handler: (item: T, index: number) => R | Promise<R>,
+  options: BatchTxOptions = {},
+): Promise<BatchTxResult<R>> {
+  const chunkSize = options.chunkSize ?? DEFAULT_CHUNK_SIZE;
+  if (!Number.isInteger(chunkSize) || chunkSize <= 0) {
+    throw new RangeError('chunkSize must be a positive integer');
+  }
+
+  const onProgress = options.onProgress;
+  const signal = options.signal;
+  const chunks = chunkItems(items, chunkSize);
+  const results: R[] = [];
+  const errors: BatchItemError[] = [];
+  let completedItems = 0;
+  let chunksProcessed = 0;
+
+  for (let chunkIndex = 0; chunkIndex < chunks.length; chunkIndex++) {
+    if (signal?.aborted) break;
+
+    const chunk = chunks[chunkIndex]!;
+    const startIndex = chunkIndex * chunkSize;
+
+    for (let i = 0; i < chunk.length; i++) {
+      if (signal?.aborted) break;
+
+      const index = startIndex + i;
+      try {
+        results.push(await handler(chunk[i]!, index));
+      } catch (error) {
+        errors.push({ index, error });
+      }
+      completedItems++;
+    }
+
+    chunksProcessed++;
+    if (onProgress) {
+      onProgress({
+        chunkIndex,
+        totalChunks: chunks.length,
+        completedItems,
+        totalItems: items.length,
+        itemsInChunk: chunk.length,
+        percent: items.length === 0 ? 100 : Math.round((completedItems / items.length) * 100),
+      });
+    }
+  }
+
+  return {
+    results,
+    errors,
+    completedItems,
+    failedItems: errors.length,
+    totalItems: items.length,
+    chunksProcessed,
+    aborted: signal?.aborted === true,
+  };
+}
+
+/** Reusable batch processor that holds default options (e.g. a shared onProgress callback). */
+export class BatchTx {
+  private readonly defaults: BatchTxOptions;
+
+  constructor(defaults: BatchTxOptions = {}) {
+    this.defaults = defaults;
+  }
+
+  run<T, R>(
+    items: readonly T[],
+    handler: (item: T, index: number) => R | Promise<R>,
+    overrides: BatchTxOptions = {},
+  ): Promise<BatchTxResult<R>> {
+    const chunkSize = overrides.chunkSize ?? this.defaults.chunkSize;
+    const onProgress = overrides.onProgress ?? this.defaults.onProgress;
+    const signal = overrides.signal ?? this.defaults.signal;
+
+    const options: BatchTxOptions = {};
+    if (chunkSize !== undefined) options.chunkSize = chunkSize;
+    if (onProgress !== undefined) options.onProgress = onProgress;
+    if (signal !== undefined) options.signal = signal;
+
+    return processBatch(items, handler, options);
+  }
+}

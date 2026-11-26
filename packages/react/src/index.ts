@@ -92,6 +92,33 @@ export type {
   UseConduitBatcherResult,
   BatcherExecuteFn,
   BatcherExecuteAsyncFn,
+} from './hooks/useConduitBatcher.js';
+export { useCreateBatchStreams } from './hooks/useCreateBatchStreams.js';
+export type { UseCreateBatchStreamsState, UseCreateBatchStreamsResult, CreateBatchStreamsFn } from './hooks/useCreateBatchStreams.js';
+export { useEstimateStreamFee } from './hooks/useEstimateStreamFee.js';
+export type { UseEstimateStreamFeeResult } from './hooks/useEstimateStreamFee.js';
+export { useWithdrawableAmount } from './hooks/useWithdrawableAmount.js';
+export type { UseWithdrawableAmountResult } from './hooks/useWithdrawableAmount.js';
+export { useStreamedTotal } from './hooks/useStreamedTotal.js';
+export type { UseStreamedTotalResult } from './hooks/useStreamedTotal.js';
+export { useFactoryStreamCount } from './hooks/useFactoryStreamCount.js';
+export type { UseFactoryStreamCountResult } from './hooks/useFactoryStreamCount.js';
+export { useProtocolFeeBps } from './hooks/useProtocolFeeBps.js';
+export type { UseProtocolFeeBpsResult } from './hooks/useProtocolFeeBps.js';
+export { useStreamsBySender } from './hooks/useStreamsBySender.js';
+export type { UseStreamsBySenderResult } from './hooks/useStreamsBySender.js';
+export { useStreamsByRecipient } from './hooks/useStreamsByRecipient.js';
+export type { UseStreamsByRecipientResult } from './hooks/useStreamsByRecipient.js';
+export { useGovernorConfig } from './hooks/useGovernorConfig.js';
+export type { UseGovernorConfigResult, GovernorConfig } from './hooks/useGovernorConfig.js';
+export { useGovernorProposals } from './hooks/useGovernorProposals.js';
+export type { UseGovernorProposalsResult, GovernorProposal } from './hooks/useGovernorProposals.js';
+export { useTransactionHistory } from './hooks/useTransactionHistory.js';
+export type { UseTransactionHistoryResult, UseTransactionHistoryOptions } from './hooks/useTransactionHistory.js';
+export { useCircuitState } from './hooks/useCircuitState.js';
+export type { UseCircuitStateResult } from './hooks/useCircuitState.js';
+export { useStreamMetrics } from './hooks/useStreamMetrics.js';
+export type { StreamMetrics, UseStreamMetricsOptions, UseStreamMetricsResult } from './hooks/useStreamMetrics.js';
 } from "./hooks/useConduitBatcher.js";
 export { useCreateBatchStreams } from "./hooks/useCreateBatchStreams.js";
 export type {

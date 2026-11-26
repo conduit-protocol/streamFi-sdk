@@ -214,6 +214,63 @@ export interface LedgerFeeStats {
   p95: bigint;
 }
 
+/** A snapshot of operation-count pressure from a recent ledger. */
+export interface LedgerUtilizationStats {
+  /** Number of operations included in the ledger. */
+  operations: number;
+  /** Optional ledger sequence number, useful when tracking history. */
+  ledger?: number;
+  /** Optional observed base fee (in stroops) for that ledger. */
+  baseFee?: number;
+}
+
+export interface CongestionOptions {
+  /** Maximum operations a single ledger can hold. Default: 1000. */
+  ledgerCapacity?: number;
+  /** Utilization at which congestion pricing begins (0-1). Default: 0.5. */
+  congestionThreshold?: number;
+  /** Upper bound applied to the congestion multiplier. Default: 3. */
+  maxMultiplier?: number;
+  /** Number of recent ledgers averaged into the multiplier. Default: 5. */
+  historySize?: number;
+}
+
+interface ResolvedCongestionOptions {
+  ledgerCapacity: number;
+  congestionThreshold: number;
+  maxMultiplier: number;
+  historySize: number;
+}
+
+const DEFAULT_CONGESTION_OPTIONS: ResolvedCongestionOptions = {
+  ledgerCapacity: 1000,
+  congestionThreshold: 0.5,
+  maxMultiplier: 3,
+  historySize: 5,
+};
+
+function resolveCongestionOptions(options: CongestionOptions): ResolvedCongestionOptions {
+  const ledgerCapacity = options.ledgerCapacity ?? DEFAULT_CONGESTION_OPTIONS.ledgerCapacity;
+  const congestionThreshold = options.congestionThreshold ?? DEFAULT_CONGESTION_OPTIONS.congestionThreshold;
+  const maxMultiplier = options.maxMultiplier ?? DEFAULT_CONGESTION_OPTIONS.maxMultiplier;
+  const historySize = options.historySize ?? DEFAULT_CONGESTION_OPTIONS.historySize;
+
+  if (!Number.isFinite(ledgerCapacity) || ledgerCapacity <= 0) {
+    throw new RangeError('ledgerCapacity must be a positive number');
+  }
+  if (!Number.isFinite(congestionThreshold) || congestionThreshold < 0 || congestionThreshold >= 1) {
+    throw new RangeError('congestionThreshold must be in the range [0, 1)');
+  }
+  if (!Number.isFinite(maxMultiplier) || maxMultiplier < 1) {
+    throw new RangeError('maxMultiplier must be greater than or equal to 1');
+  }
+  if (!Number.isInteger(historySize) || historySize <= 0) {
+    throw new RangeError('historySize must be a positive integer');
+  }
+
+  return { ledgerCapacity, congestionThreshold, maxMultiplier, historySize };
+}
+
 export interface FeeEstimatorOptions {
   /** Horizon base URL queried for `/fee_stats`. Defaults to Stellar mainnet Horizon. */
   horizonUrl?: string;
@@ -241,6 +298,8 @@ export interface FeeEstimatorOptions {
    * de-duplicated). Must be a finite number `>= 0`.
    */
   cacheTtlMs?: number;
+  /** Configuration for the ledger-utilization congestion multiplier. */
+  congestion?: CongestionOptions;
 }
 
 /**
@@ -248,6 +307,8 @@ export interface FeeEstimatorOptions {
  */
 
 export interface FeeEstimateOptions {
+  /** Multiply the returned fee by the current congestion multiplier. Default: false. */
+  applyCongestion?: boolean;
   onError?: (error: Error) => void;
   /** Stable operation key. Entries with the same key share a short-lived estimate. */
   cacheKey?: string;
@@ -277,6 +338,8 @@ export class FeeEstimator {
   private readonly feeMultiplier: number;
   private ledgerFeeStatsCache: { value: LedgerFeeStats; fetchedAt: number } | null = null;
   private ledgerFeeStatsPromise: Promise<LedgerFeeStats> | null = null;
+  private readonly congestion: ResolvedCongestionOptions;
+  private ledgerUtilizationStats: LedgerUtilizationStats[] = [];
 
   /**
    * Creates a new FeeEstimator instance.
@@ -300,6 +363,7 @@ export class FeeEstimator {
       throw new Error(`Invalid cacheTtlMs: must be a finite number >= 0, got ${String(cacheTtlMs)}`);
     }
     this.cacheTtlMs = cacheTtlMs;
+    this.congestion = resolveCongestionOptions(options?.congestion ?? {});
   }
 
   /**
@@ -469,15 +533,16 @@ export class FeeEstimator {
         this.baseFee = rawFee;
         this.lastSuccessfulFetchAtValue = Date.now();
         this.lastErrorValue = null;
-        if (cacheKey) this.cache.set(cacheKey, { fee: rawFee, fetchedAt: this.lastSuccessfulFetchAtValue });
-        return this.baseFee;
+        const fee = options.applyCongestion ? this.getEffectiveFee() : this.baseFee;
+        if (cacheKey) this.cache.set(cacheKey, { fee, fetchedAt: this.lastSuccessfulFetchAtValue });
+        return fee;
       } catch (error) {
         const normalizedError = error instanceof Error ? error : new Error(String(error));
         this.lastErrorValue = normalizedError;
         options.onError?.(normalizedError);
 
-        // Fallback sequence: return the last known base fee
-        return this.baseFee;
+        // Fallback sequence: return the last known base fee (congestion-adjusted on request)
+        return options.applyCongestion ? this.getEffectiveFee() : this.baseFee;
       } finally {
         this.isEstimating = false;
         this.currentPromises.delete(promiseKey);
@@ -500,6 +565,71 @@ export class FeeEstimator {
    */
   getBaseFee(): bigint {
     return this.baseFee;
+  }
+
+  /** Record the operation count (and optionally the fee) of a recent ledger. */
+  recordLedgerStats(stats: LedgerUtilizationStats): void {
+    if (!stats || typeof stats.operations !== 'number'
+        || !Number.isFinite(stats.operations) || stats.operations < 0) {
+      throw new RangeError('stats.operations must be a finite, non-negative number');
+    }
+    if (stats.ledger !== undefined
+        && (!Number.isFinite(stats.ledger) || stats.ledger < 0)) {
+      throw new RangeError('stats.ledger must be a non-negative number');
+    }
+    if (stats.baseFee !== undefined
+        && (!Number.isFinite(stats.baseFee) || stats.baseFee < 0)) {
+      throw new RangeError('stats.baseFee must be a non-negative number');
+    }
+
+    this.ledgerUtilizationStats.push({ ...stats });
+    if (this.ledgerUtilizationStats.length > this.congestion.historySize) {
+      this.ledgerUtilizationStats.splice(
+        0,
+        this.ledgerUtilizationStats.length - this.congestion.historySize,
+      );
+    }
+  }
+
+  /** Average ledger utilization (0-1) across the retained history. */
+  getUtilization(): number {
+    if (this.ledgerUtilizationStats.length === 0) return 0;
+
+    const total = this.ledgerUtilizationStats.reduce((sum, stats) => {
+      const ratio = stats.operations / this.congestion.ledgerCapacity;
+      return sum + Math.max(0, Math.min(1, ratio));
+    }, 0);
+    return total / this.ledgerUtilizationStats.length;
+  }
+
+  /**
+   * Congestion multiplier derived from recent ledger utilization. Ramps
+   * linearly from 1x at the configured threshold to `maxMultiplier` at full
+   * utilization, so busy ledgers push fees high enough for streaming
+   * transactions to confirm during peak network traffic.
+   */
+  getCongestionMultiplier(): number {
+    const { congestionThreshold, maxMultiplier } = this.congestion;
+    const utilization = this.getUtilization();
+    if (utilization <= congestionThreshold) return 1;
+
+    const excess = (utilization - congestionThreshold) / (1 - congestionThreshold);
+    return Math.min(maxMultiplier, 1 + excess * (maxMultiplier - 1));
+  }
+
+  /** Base fee adjusted by the current congestion multiplier, in stroops. */
+  getEffectiveFee(): bigint {
+    const scaled = BigInt(Math.round(this.getCongestionMultiplier() * 1_000_000));
+    return (this.baseFee * scaled + 500_000n) / 1_000_000n;
+  }
+
+  getCongestionConfig(): Readonly<ResolvedCongestionOptions> {
+    return { ...this.congestion };
+  }
+
+  /** Forget recorded ledger utilization statistics. */
+  clearLedgerStats(): void {
+    this.ledgerUtilizationStats = [];
   }
 
   get lastSuccessfulFetchAt(): number | null {

@@ -3,6 +3,7 @@ import {
   Asset,
   Transaction,
   nativeToScVal,
+  scValToNative,
 } from "@stellar/stellar-sdk";
 import type { ConduitConfig } from "./types/index.js";
 import type { WalletAdapter } from "./adapters/types.js";
@@ -11,12 +12,15 @@ import { KeypairWalletAdapter } from "./adapters/keypair.js";
 import { USDC_ISSUER, ZERO_ADDR } from "./constants.js";
 import {
   buildContractCallTx,
+  clearTokenDecimalsCache,
   DEFAULT_RPC,
+  getServer,
   getTokenDecimals,
   invokeContract,
   NETWORK_PASSPHRASE,
   resolveFee,
   scValToI128,
+  scValToString,
   simulateReadOnly,
 } from "./soroban.js";
 
@@ -36,10 +40,30 @@ export class TokenModule {
    */
   private readonly knownDecimals = new Map<string, number>();
 
-  constructor(private readonly config: ConduitConfig) {
+  /**
+   * Immutable SEP-41 metadata (`decimals()` / `symbol()`) is queried far more
+   * often than it changes. Bounded LRU caches keep repeat lookups off the
+   * network without letting a large portfolio grow the cache without limit.
+   */
+  private readonly decimalsCache: LruMemoCache<string, number>;
+  private readonly symbolCache: LruMemoCache<string, string>;
+
+  /**
+   * In-flight de-duplication: concurrent lookups for the same token share a
+   * single simulation. Entries are removed on settlement (success or failure)
+   * so a failed simulation is retried on the next call.
+   */
+  private readonly decimalsInFlight = new Map<string, Promise<number>>();
+  private readonly symbolInFlight = new Map<string, Promise<string>>();
+
+  constructor(private readonly config: ConduitConfig, options: TokenModuleOptions = {}) {
     this.rpcUrl = config.rpcUrl ?? DEFAULT_RPC[config.network];
     this.passphrase = NETWORK_PASSPHRASE[config.network];
     this.fee = resolveFee(config);
+
+    const cacheSize = Math.max(1, Math.floor(options.metadataCacheSize ?? DEFAULT_TOKEN_METADATA_CACHE_SIZE));
+    this.decimalsCache = new LruMemoCache<string, number>(cacheSize);
+    this.symbolCache = new LruMemoCache<string, string>(cacheSize);
 
     if (config.wallet) {
       this.activeWallet = config.wallet;
@@ -65,8 +89,9 @@ export class TokenModule {
    *
    * Native XLM, the network's USDC, and anything passed to
    * {@link registerDecimals} resolve with no RPC call. Any other token is
-   * queried once via its `decimals()` and then served from the process-wide
-   * cache in `soroban.ts`, so repeated balance formatting never re-queries it.
+   * queried once via its `decimals()` and then served from this module's
+   * bounded LRU metadata cache, so repeated balance formatting never
+   * re-queries it. Concurrent lookups coalesce onto one in-flight simulation.
    *
    * @param callerAddress - Source account for the read-only simulation.
    *   Defaults to the connected wallet / signer, or a zero address.
@@ -77,8 +102,13 @@ export class TokenModule {
   ): Promise<number> {
     const known = this.knownDecimals.get(tokenAddress);
     if (known !== undefined) return known;
-    const caller = callerAddress ?? (await this.defaultCaller());
-    return getTokenDecimals(this.rpcUrl, this.passphrase, caller, tokenAddress);
+    return this.loadMetadata(
+      this.decimalsCache,
+      this.decimalsInFlight,
+      tokenAddress,
+      (caller) => getTokenDecimals(this.rpcUrl, this.passphrase, caller, tokenAddress),
+      callerAddress,
+    );
   }
 
   /** Record `decimals` for `tokenAddress` so {@link decimals} never queries the RPC for it. */
@@ -102,6 +132,118 @@ export class TokenModule {
       await this.decimals(tokenAddress),
       locale,
     );
+  }
+
+  /**
+   * Check if a contract address is a Stellar Asset Contract (SAC).
+   * SACs are issued for Stellar Classic assets (native XLM or issued assets like USDC).
+   * 
+   * @param contractAddress - The contract address to check.
+   * @returns Promise resolving to true if the contract is a SAC, false otherwise.
+   */
+  async isStellarAssetContract(contractAddress: string): Promise<boolean> {
+    try {
+      // Try to parse as a classic asset
+      // SACs have a specific pattern: they can be derived from Asset.contractId()
+      // We'll check if the contract implements the standard token interface
+      // and has the characteristic properties of a SAC
+      
+      // First check: Native XLM SAC
+      const nativeContractId = Asset.native().contractId(this.passphrase);
+      if (contractAddress === nativeContractId) {
+        return true;
+      }
+
+      // Second check: Try to query contract data that SACs expose
+      // SACs store their asset code and issuer in a specific format
+      const caller = await this.defaultCaller();
+      
+      try {
+        // Query the contract's admin/issuer - SACs have this, pure Soroban tokens might not
+        const tx = await buildContractCallTx(
+          this.rpcUrl,
+          this.passphrase,
+          caller,
+          contractAddress,
+          "admin",
+          [],
+          this.fee,
+        );
+        
+        await simulateReadOnly(this.rpcUrl, this.passphrase, tx);
+        
+        // If admin() succeeded, check for asset() method which is SAC-specific
+        const assetTx = await buildContractCallTx(
+          this.rpcUrl,
+          this.passphrase,
+          caller,
+          contractAddress,
+          "asset",
+          [],
+          this.fee,
+        );
+        
+        const assetResult = await simulateReadOnly(this.rpcUrl, this.passphrase, assetTx);
+        // If we get here, it has both admin() and asset(), strong indicator of SAC
+        return scValToNative(assetResult) !== undefined;
+      } catch {
+        // If these calls fail, it's likely not a SAC
+        return false;
+      }
+    } catch {
+      return false;
+    }
+  }
+
+  /**
+   * Parse asset code and issuer from a Stellar Asset Contract.
+   * Returns undefined if the contract is not a SAC.
+   * 
+   * @param contractAddress - The SAC contract address.
+   * @returns Promise resolving to { code: string, issuer?: string } or undefined.
+   */
+  async parseStellarAsset(
+    contractAddress: string,
+  ): Promise<{ code: string; issuer?: string } | undefined> {
+    const isSAC = await this.isStellarAssetContract(contractAddress);
+    if (!isSAC) {
+      return undefined;
+    }
+
+    // Check if it's native XLM
+    const nativeContractId = Asset.native().contractId(this.passphrase);
+    if (contractAddress === nativeContractId) {
+      return { code: "XLM" };
+    }
+
+    try {
+      const caller = await this.defaultCaller();
+      
+      // Get the asset details
+      const assetTx = await buildContractCallTx(
+        this.rpcUrl,
+        this.passphrase,
+        caller,
+        contractAddress,
+        "asset",
+        [],
+        this.fee,
+      );
+      
+      const assetResult = await simulateReadOnly(this.rpcUrl, this.passphrase, assetTx);
+      const assetData = scValToNative(assetResult) as { code: string; issuer: string } | undefined;
+      
+      if (assetData && typeof assetData === "object") {
+        return {
+          code: assetData.code || "UNKNOWN",
+          issuer: assetData.issuer,
+        };
+      }
+      
+      return undefined;
+    } catch {
+      return undefined;
+    }
   }
 
   private async defaultCaller(): Promise<string> {
@@ -302,6 +444,7 @@ function assertDecimals(decimals: number): void {
  * @param rawAmount - Amount in the token's smallest unit, as a bigint or an integer string.
  * @param decimals - The token's decimals.
  * @param locale - BCP 47 locale; defaults to the runtime's locale.
+ * @param maxFractionDigits - Maximum number of fractional digits to show (optional, defaults to showing all).
  * @throws {RangeError} If `decimals` is not a non-negative integer.
  * @throws {SyntaxError} If `rawAmount` is a string that is not an integer.
  */
@@ -309,6 +452,7 @@ export function formatTokenAmount(
   rawAmount: bigint | string,
   decimals: number,
   locale?: string,
+  maxFractionDigits?: number,
 ): string {
   assertDecimals(decimals);
   const raw =
@@ -331,6 +475,18 @@ export function formatTokenAmount(
     .padStart(decimals, "0")
     .replace(/0+$/, "");
   if (frac.length < minDigits) frac = frac.padEnd(minDigits, "0");
+
+  // Apply maxFractionDigits if specified
+  if (maxFractionDigits !== undefined && maxFractionDigits >= 0) {
+    const maxDigits = Math.min(maxFractionDigits, decimals);
+    if (frac.length > maxDigits) {
+      frac = frac.substring(0, maxDigits);
+      // Remove trailing zeros after truncation
+      frac = frac.replace(/0+$/, "");
+      // But ensure at least minDigits
+      if (frac.length < minDigits) frac = frac.padEnd(minDigits, "0");
+    }
+  }
 
   const decimalMark =
     new Intl.NumberFormat(locale)

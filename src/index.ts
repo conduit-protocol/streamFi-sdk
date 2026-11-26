@@ -32,6 +32,12 @@ export {
   BatchBuildError,
   BatchPartiallySubmittedError,
   submitBatch,
+  mergeFootprints,
+  deduplicateFootprint,
+  buildDeduplicatedFootprint,
+  buildMergedFootprint,
+  mergeBatchFootprints,
+  mergeSimulationFootprints,
 } from "./batch-tx.js";
 export type {
   BatchTransactionContext,
@@ -43,6 +49,7 @@ export type {
   BatchTxStatus,
   BatchSubmitOptions,
   BatchSimulationResult,
+  FootprintSource,
   BuildableOperation,
   BatchPayload,
   BatchSimulationSummary,
@@ -53,6 +60,11 @@ export {
   DEFAULT_INDEXER_MAX_PAGES,
   DEFAULT_SUBSCRIPTION_POLLING_INTERVAL_MS,
   LedgerGapDetector,
+  replayEventsFrom,
+  DEFAULT_REPLAY_LEDGER_OFFSET,
+  DEFAULT_REPLAY_EVENTS_PAGE_SIZE,
+  DEFAULT_REPLAY_EVENTS_MAX_PAGES,
+  REPLAY_EVENTS_FROM_QUERY,
 } from "./indexer.js";
 export {
   MockGraphQLIndexer,
@@ -79,6 +91,8 @@ export type {
   FetchStreamsBySenderOptions,
   StreamsByRecipientOptions,
   StreamStatusFilter,
+  ReplayEventsFromOptions,
+  ReplayEventsFromResult,
 } from "./indexer.js";
 export {
   withSignatureTimeout,
@@ -89,18 +103,36 @@ export {
   LedgerHardwareError,
   normalizeLedgerError,
   classifyLedgerError,
+  isDeviceTimeoutError,
+  wrapLedgerError,
+  wrapDeviceTimeoutError,
+  withDeviceDiagnosticHints,
+  withDeviceTimeout,
+  LEDGER_DEVICE_TIMEOUT_HINT,
+  LEDGER_DEVICE_DIAGNOSTIC_HINT,
+  PreflightSimulationError,
+  PreflightSigner,
+  preflightSimulate,
+  preflightBeforeSign,
+  preflightCheck,
+  withPreflightSimulation,
+  withSimulationPreflight,
   WebAuthnSigner,
   derToRawSignature,
+  checkFreighterConnection,
 } from "./signer.js";
 export type {
   Signer,
   SignerOptions,
+  PreflightSimulationServer,
+  PreflightSimulationOptions,
   WebAuthnCredentialDescriptor,
   WebAuthnAssertionResponse,
   WebAuthnAssertionCredential,
   WebAuthnCredentialsContainer,
   WebAuthnCredentialScValKeys,
   WebAuthnSignerOptions,
+  FreighterApi,
 } from "./signer.js";
 export {
   SorobanRpcError,
@@ -134,6 +166,7 @@ export {
   isRecoverableError,
   StreamFiError,
   IndexerMaxPagesExceededError,
+  MissingTrustlineError,
   isConduitError,
   SUPPORTED_NETWORKS,
   CAIP2_TO_NETWORK,
@@ -179,9 +212,28 @@ export type {
   BatchFootprintOptions,
   ResourceEstimate,
 } from "./fee-estimator.js";
-export { coalesceAsync, coalesceInFlight, CoalesceQueueFullError } from "./coalesce-async.js";
+export {
+  coalesceAsync,
+  coalesceInFlight,
+  CoalesceQueueFullError,
+  AsyncCoalescer,
+  createAsyncCoalescer,
+} from "./coalesce-async.js";
 export type { CoalesceOptions } from "./coalesce-async.js";
-export { WebSocketRelayer } from "./relayer/WebSocketRelayer.js";
+export {
+  WebSocketRelayer,
+  packMessage,
+  unpackMessage,
+} from "./relayer/WebSocketRelayer.js";
+export type {
+  WebSocketMessage,
+  MessageHandler,
+  StateChangeHandler,
+  RelayerState,
+  RelayerStateTransition,
+  QueuedMessage,
+  WebSocketRelayerOptions,
+} from "./relayer/WebSocketRelayer.js";
 export {
   ErrorMapper,
   DEFAULT_ERROR_MESSAGE_TYPE_MAP,
@@ -197,6 +249,25 @@ export type {
 
 // Utils are exported via the /utils subpath export, but also available here
 export {
+   toStroops,
+   fromStroops,
+   calculateRate,
+   calculateYield,
+   streamProgress,
+   remainingTime,
+   estimatedCompletionDate,
+   normalizeProgress,
+   withdrawableLocal,
+   sumWithdrawable,
+   bigintSafeStringify,
+   timeoutSignal,
+   streamStatus,
+   formatDuration,
+   parseDuration,
+   validateAndNormalizeAddress,
+   isValidAddress,
+   sanitizeStellarAddress,
+ } from './utils.js';
   toStroops,
   fromStroops,
   calculateRate,
@@ -237,7 +308,12 @@ export type {
   ContractRole,
 } from "./constants.js";
 
-export { TokenModule, formatTokenAmount as formatLocalizedTokenAmount } from "./token.js";
+export {
+  TokenModule,
+  DEFAULT_TOKEN_METADATA_CACHE_SIZE,
+  formatTokenAmount as formatLocalizedTokenAmount,
+} from "./token.js";
+export type { TokenModuleOptions } from "./token.js";
 
 export {
   getEndpointHealth,
@@ -278,6 +354,7 @@ export {
   clearTokenDecimalsCache,
   getTokenDecimalsCacheMetrics,
   resetTokenDecimalsCacheMetrics,
+  scValToString,
 } from "./soroban.js";
 export { getLatestLedgerInfo, clearLedgerInfoCache } from "./soroban.js";
 export type { LedgerInfo } from "./soroban.js";
@@ -402,3 +479,35 @@ export type {
   ExecuteProposalsOptions,
   ProposalDetails,
 } from "./governor.js";
+
+// Progress reporting, latency percentiles and bounded memoization (additive helpers)
+export {
+  BatchTx,
+  processBatch,
+  chunkItems,
+  DEFAULT_CHUNK_SIZE,
+} from "./batch-tx.js";
+export type {
+  BatchProgress,
+  BatchItemError,
+  BatchTxResult,
+  BatchTxOptions,
+} from "./batch-tx.js";
+export { ConnectionHealthMonitor, percentile } from "./connection-health.js";
+export type {
+  LatencyPercentiles,
+  ConnectionHealthOptions,
+} from "./connection-health.js";
+export type {
+  LedgerFeeStats,
+  LedgerUtilizationStats,
+  CongestionOptions,
+} from "./fee-estimator.js";
+export { LruMemoCache, serializeCache, hydrateCache } from "./lru-memo-cache.js";
+export type {
+  LruMemoCacheOptions,
+  CacheStats,
+  MemoCacheMetrics,
+  SerializedCache,
+  SerializedCacheEntry,
+} from "./lru-memo-cache.js";

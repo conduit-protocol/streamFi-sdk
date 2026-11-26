@@ -33,6 +33,8 @@ import type {
   DurationBreakdown,
   StreamProgress,
   StreamSimulationResult,
+  BatchGetStreamsOptions,
+  GetStreamInfosResult,
 } from "./types/index.js";
 import type { WalletAdapter } from "./adapters/types.js";
 import type { Signer } from "./signer.js";
@@ -1039,6 +1041,47 @@ export class StreamsModule {
         .filter((o) => !o.ok)
         .map((o) => ({ id: o.id, error: o.error })),
     };
+  }
+
+  /**
+   * Fetch full state for many streams while staying under RPC rate limits.
+   *
+   * This is the primary entry point for portfolio screens that need to render
+   * 50+ streams: instead of issuing one unthrottled fan-out, duplicate IDs are
+   * collapsed, the remainder is split into sequential chunks of `chunkSize`
+   * (default 20), and each chunk is read with bounded concurrency via
+   * {@link getStreamInfos}. `chunkDelayMs` optionally pauses between chunks.
+   * A single missing or broken stream is reported in `failures` rather than
+   * rejecting the whole batch, and the order within `results`/`failures`
+   * follows the (deduplicated) input order.
+   *
+   * @param streamIds - Stream IDs to read; strings and bigints may be mixed.
+   * @param options - Chunking, pacing and per-chunk concurrency controls.
+   */
+  async getStreamsBatch(
+    streamIds: (bigint | string)[],
+    options: BatchGetStreamsOptions = {},
+  ): Promise<GetStreamInfosResult> {
+    const chunkSize = Math.max(1, Math.floor(options.chunkSize ?? 20) || 20);
+    const chunkDelayMs = Math.max(0, options.chunkDelayMs ?? 0);
+    const unique = [...new Set(streamIds.map((id) => BigInt(id)))];
+
+    const results: GetStreamInfosResult['results'] = [];
+    const failures: GetStreamInfosResult['failures'] = [];
+
+    for (let i = 0; i < unique.length; i += chunkSize) {
+      if (i > 0 && chunkDelayMs > 0) {
+        await new Promise((resolve) => setTimeout(resolve, chunkDelayMs));
+      }
+      const chunk = await this.getStreamInfos(
+        unique.slice(i, i + chunkSize),
+        options.maxConcurrency === undefined ? {} : { maxConcurrency: options.maxConcurrency },
+      );
+      results.push(...chunk.results);
+      failures.push(...chunk.failures);
+    }
+
+    return { results, failures };
   }
 
   /** Get withdrawable balance - read-only, no transaction. */

@@ -16,6 +16,7 @@ import {
   validateContext,
 } from './batch-tx.js';
 import { OperationAbortedError, ValidationError } from './errors.js';
+import { MIN_STREAM_DURATION_SECONDS } from './constants.js';
 import type { BatchTransactionContext, BuiltBatchTransaction, ScValType } from './batch-tx.js';
 import type { CreateStreamParams, Network } from './types/index.js';
 
@@ -145,6 +146,33 @@ export class StreamBuilder {
    */
   recipient(address: string): this {
     this._recipient = StreamBuilder._validateAddress(address, 'recipient');
+    return this;
+  }
+
+  /**
+   * Sets the recipient address with normalization (trims whitespace and validates StrKey).
+   * This is the recommended way to set recipient addresses from user input.
+   * @param address - The address that will receive tokens (may contain leading/trailing whitespace).
+   * @returns The builder instance for chaining.
+   * @throws {Error} If the address is not a valid ed25519 public key after normalization.
+   */
+  withRecipient(address: string): this {
+    if (typeof address !== 'string') {
+      throw new Error('Invalid StreamBuilder parameter: recipient must be a string');
+    }
+    
+    const trimmed = address.trim();
+    if (trimmed.length === 0) {
+      throw new Error('Invalid StreamBuilder parameter: recipient cannot be empty');
+    }
+
+    if (!StrKey.isValidEd25519PublicKey(trimmed)) {
+      throw new Error(
+        `Invalid StreamBuilder parameter: recipient must be a valid ed25519 public key (G-address), got "${trimmed}"`
+      );
+    }
+
+    this._recipient = trimmed;
     return this;
   }
 
@@ -357,6 +385,20 @@ export class StreamBuilder {
       const now = Math.floor(Date.now() / 1000);
       if (this._startTime < now - MAX_RETROACTIVE_START_AGE_SECONDS) {
         issues.push('startTime cannot be more than 30 days in the past');
+      }
+    }
+
+    // #1169: a stream whose endTime does not strictly exceed its start by the
+    // protocol minimum is rejected on-chain, so reject it here instead. When
+    // no startTime is set, the contract starts the stream at "now".
+    if (this._endTime !== undefined) {
+      const effectiveStart = this._startTime ?? Math.floor(Date.now() / 1000);
+      const duration = this._endTime - effectiveStart;
+      if (duration <= MIN_STREAM_DURATION_SECONDS) {
+        issues.push(
+          `stream duration must be greater than ${MIN_STREAM_DURATION_SECONDS} seconds ` +
+            `(endTime must exceed startTime by more than the protocol minimum); got ${duration} seconds`,
+        );
       }
     }
 

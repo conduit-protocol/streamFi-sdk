@@ -9,11 +9,12 @@ import type {
   BatchStreamCreationPayload,
   BatchCreateStreamResult,
 } from '../types/index.js';
-import type { StreamEvent } from '../events.js';
+import type { StreamEvent, StreamHistoryEntry } from '../events.js';
 import type { WalletAdapter } from '../adapters/types.js';
-import { streamedTotalLocal } from '../utils.js';
+import { streamedTotalLocal, withdrawableLocal } from '../utils.js';
 import { calculateVestedPercentage } from '../streams.js';
 import { useConduitClient } from './context.js';
+import { streamStatus, withdrawableLocal } from '../utils.js';
 
 export interface HookOptions {
   client?: ConduitClient;
@@ -86,12 +87,7 @@ export function useFeeEstimate(
   const [isLoading, setIsLoading] = useState(false);
   const [error, setError] = useState<Error | null>(null);
 
-  const opKey = useMemo(() => {
-    if (operation == null) return null;
-    return typeof operation === 'string'
-      ? operation
-      : JSON.stringify(operation, (_, v) => (typeof v === 'bigint' ? v.toString() : v));
-  }, [operation]);
+  const opKey = useMemo(() => stableOperationKey(operation), [operation]);
 
   useEffect(() => {
     if (!enabled || opKey == null || operation == null) {
@@ -232,6 +228,173 @@ export function useStreamBalance(
   return { withdrawable, isLoading, error };
 }
 
+// ── 5. useStreamMetrics ──────────────────────────────────────────────────────
+
+export interface StreamMetrics {
+  /** Aggregate protocol total value locked (unwithdrawn deposits in stroops) */
+  tvl: bigint;
+  /** Total count of streams tracked */
+  totalStreams: number;
+  /** Total count of active streams */
+  activeStreams: number;
+  /** Total count of paused streams */
+  pausedStreams: number;
+  /** Total count of completed streams */
+  completedStreams: number;
+  /** Total count of cancelled streams */
+  cancelledStreams: number;
+  /** Alias for tvl (total locked liquidity) */
+  totalLocked: bigint;
+  /** Total amount streamed across all streams */
+  totalStreamed: bigint;
+  /** Total amount withdrawn across all streams */
+  totalWithdrawn: bigint;
+}
+
+export interface UseStreamMetricsOptions extends HookOptions {
+  /** Polling refresh interval in milliseconds (defaults to 15000ms) */
+  refreshIntervalMs?: number;
+  /** Whether the polling query is enabled (defaults to true) */
+  enabled?: boolean;
+}
+
+export interface UseStreamMetricsResult {
+  metrics: StreamMetrics | null;
+  loading: boolean;
+  isLoading: boolean;
+  error: Error | null;
+  refetch: () => Promise<void>;
+}
+
+/**
+ * React hook to retrieve aggregate protocol TVL and stream metrics with automatic polling.
+ *
+ * Encapsulates polling and aggregation logic across protocol streams,
+ * returning loading states, error states, and aggregated metrics.
+ */
+export function useStreamMetrics(options?: UseStreamMetricsOptions): UseStreamMetricsResult {
+  const client = useConduitClient(options?.client);
+  const enabled = options?.enabled ?? true;
+  const refreshIntervalMs = options?.refreshIntervalMs ?? 15000;
+
+  const [metrics, setMetrics] = useState<StreamMetrics | null>(null);
+  const [isLoading, setIsLoading] = useState<boolean>(enabled);
+  const [error, setError] = useState<Error | null>(null);
+
+  const fetchMetrics = useCallback(async () => {
+    if (!client || !enabled) return;
+    try {
+      setIsLoading(true);
+      setError(null);
+
+      let streams: StreamInfo[] = [];
+      let totalCount: bigint | undefined;
+
+      if (client.streams && typeof client.streams.list === 'function') {
+        const res = await client.streams.list({});
+        streams = res.streams ?? [];
+        totalCount = res.totalCount;
+      } else if (typeof (client as any).listStreams === 'function') {
+        const res = await (client as any).listStreams({});
+        streams = res.streams ?? [];
+        totalCount = res.totalCount;
+      }
+
+      if (totalCount === undefined && client.factory && typeof client.factory.streamCount === 'function') {
+        try {
+          totalCount = await client.factory.streamCount();
+        } catch {
+          // fallback to streams length
+        }
+      }
+
+      const nowSec = Math.floor(Date.now() / 1000);
+      let activeStreams = 0;
+      let pausedStreams = 0;
+      let completedStreams = 0;
+      let cancelledStreams = 0;
+      let tvl = 0n;
+      let totalWithdrawn = 0n;
+      let totalStreamed = 0n;
+
+      for (const stream of streams) {
+        const status = streamStatus(stream, nowSec);
+        if (status === 'active') activeStreams++;
+        else if (status === 'paused') pausedStreams++;
+        else if (status === 'completed') completedStreams++;
+        else if (status === 'cancelled') cancelledStreams++;
+
+        const withdrawn = stream.withdrawn ?? 0n;
+        totalWithdrawn += withdrawn;
+        totalStreamed += withdrawn + withdrawableLocal(stream, nowSec);
+
+        if (!stream.cancelled) {
+          if (stream.endTime && stream.endTime > stream.startTime) {
+            const deposit = stream.ratePerSecond * BigInt(stream.endTime - stream.startTime);
+            const remaining = deposit > withdrawn ? deposit - withdrawn : 0n;
+            tvl += remaining;
+          } else {
+            const withdrawable = withdrawableLocal(stream, nowSec);
+            tvl += withdrawable;
+          }
+        }
+      }
+
+      const count = totalCount !== undefined ? Number(totalCount) : streams.length;
+
+      setMetrics({
+        tvl,
+        totalStreams: count,
+        activeStreams,
+        pausedStreams,
+        completedStreams,
+        cancelledStreams,
+        totalLocked: tvl,
+        totalStreamed,
+        totalWithdrawn,
+      });
+      setError(null);
+    } catch (err) {
+      setError(err instanceof Error ? err : new Error(String(err)));
+    } finally {
+      setIsLoading(false);
+    }
+  }, [client, enabled]);
+
+  useEffect(() => {
+    if (!enabled) {
+      setMetrics(null);
+      setIsLoading(false);
+      setError(null);
+      return;
+    }
+
+    let isMounted = true;
+    fetchMetrics();
+
+    let intervalId: ReturnType<typeof setInterval> | undefined;
+    if (refreshIntervalMs > 0) {
+      intervalId = setInterval(() => {
+        if (isMounted) {
+          fetchMetrics();
+        }
+      }, refreshIntervalMs);
+    }
+
+    return () => {
+      isMounted = false;
+      if (intervalId) clearInterval(intervalId);
+    };
+  }, [fetchMetrics, enabled, refreshIntervalMs]);
+
+  return {
+    metrics,
+    loading: isLoading,
+    isLoading,
+    error,
+    refetch: fetchMetrics,
+  };
+}
 // ── useStream (#1091) ────────────────────────────────────────────────────────
 
 export interface UseStreamOptions extends HookOptions {
@@ -636,4 +799,395 @@ export function useBatchStreams(options?: HookOptions): UseBatchStreamsResult {
     withdrawResults,
     reset,
   };
+}
+
+// ── useStreamHistory ─────────────────────────────────────────────────────────
+
+/** Categories of stream activity exposed by {@link useStreamHistory}. */
+export type StreamHistoryType = 'deposit' | 'withdrawal' | 'cancellation';
+
+const DEFAULT_STREAM_HISTORY_TYPES: readonly StreamHistoryType[] = [
+  'deposit',
+  'withdrawal',
+  'cancellation',
+];
+
+/** Underlying RPC event kinds that make up each history category. */
+const HISTORY_KINDS: Record<StreamHistoryType, ReadonlyArray<StreamHistoryEntry['kind']>> = {
+  deposit: ['created', 'top_up'],
+  withdrawal: ['withdraw'],
+  cancellation: ['cancel'],
+};
+
+function matchesHistoryType(entry: StreamHistoryEntry, type: StreamHistoryType): boolean {
+  return HISTORY_KINDS[type].includes(entry.kind);
+}
+
+export interface UseStreamHistoryOptions extends HookOptions {
+  enabled?: boolean;
+  /**
+   * Background revalidation interval in milliseconds. Defaults to 30,000.
+   * Set to `0` to disable interval-based revalidation.
+   */
+  refreshIntervalMs?: number;
+  /** Revalidate when the tab regains focus/visibility. Defaults to `true`. */
+  revalidateOnFocus?: boolean;
+  /** Page size passed to `client.streams.getHistory` (1-200). Default 50. */
+  limit?: number;
+  /** Categories included in `entries`. Defaults to all three. */
+  types?: StreamHistoryType[];
+}
+
+export interface UseStreamHistoryResult {
+  /** The selected activity, oldest first. Stale data is kept while revalidating. */
+  entries: StreamHistoryEntry[];
+  deposits: StreamHistoryEntry[];
+  withdrawals: StreamHistoryEntry[];
+  cancellations: StreamHistoryEntry[];
+  /** True only for the initial load, while no data has been shown yet. */
+  isLoading: boolean;
+  /** True while any (including background) revalidation is in flight. */
+  isValidating: boolean;
+  error: Error | null;
+  /** Revalidate immediately, keeping previously fetched data on screen (SWR-style). */
+  refresh: () => Promise<void>;
+}
+
+type FocusTarget = {
+  addEventListener(type: string, listener: () => void): void;
+  removeEventListener(type: string, listener: () => void): void;
+};
+
+/**
+ * Fetches a stream's past deposits (creations + top-ups), withdrawals and
+ * cancellations. A successful fetch is served from state on subsequent
+ * revalidations — `refresh()`, the interval, and window focus all revalidate
+ * in the background instead of clearing the table.
+ */
+export function useStreamHistory(
+  streamId?: bigint | string | null,
+  options?: UseStreamHistoryOptions,
+): UseStreamHistoryResult {
+  const client = useConduitClient(options?.client);
+  const enabled = options?.enabled ?? true;
+  const refreshIntervalMs = options?.refreshIntervalMs ?? 30_000;
+  const revalidateOnFocus = options?.revalidateOnFocus ?? true;
+  const limit = options?.limit ?? 50;
+  const types = options?.types;
+  const typesKey = types && types.length > 0 ? [...types].sort().join(',') : 'all';
+  const active = streamId != null && enabled;
+
+  const [allEntries, setAllEntries] = useState<StreamHistoryEntry[]>([]);
+  const [isLoading, setIsLoading] = useState<boolean>(active);
+  const [isValidating, setIsValidating] = useState<boolean>(false);
+  const [error, setError] = useState<Error | null>(null);
+  const mounted = useRef(true);
+  const requestId = useRef(0);
+
+  useEffect(() => {
+    mounted.current = true;
+    return () => {
+      mounted.current = false;
+      requestId.current++;
+    };
+  }, []);
+
+  const refresh = useCallback(async (): Promise<void> => {
+    if (streamId == null) return;
+    const id = ++requestId.current;
+    setIsValidating(true);
+    try {
+      const page = await client.streams.getHistory(streamId, { limit });
+      if (mounted.current && id === requestId.current) {
+        setAllEntries(page.entries);
+        setError(null);
+      }
+    } catch (err) {
+      if (mounted.current && id === requestId.current) {
+        setError(err instanceof Error ? err : new Error(String(err)));
+      }
+    } finally {
+      if (mounted.current && id === requestId.current) {
+        setIsValidating(false);
+        setIsLoading(false);
+      }
+    }
+  }, [client, streamId, limit]);
+
+  useEffect(() => {
+    if (!active) {
+      requestId.current++;
+      setAllEntries([]);
+      setIsLoading(false);
+      setIsValidating(false);
+      setError(null);
+      return;
+    }
+    setAllEntries([]);
+    setIsLoading(true);
+    void refresh();
+    if (refreshIntervalMs <= 0) return;
+    const intervalId = setInterval(() => void refresh(), refreshIntervalMs);
+    return () => clearInterval(intervalId);
+  }, [active, refresh, refreshIntervalMs]);
+
+  useEffect(() => {
+    if (!active || !revalidateOnFocus) return;
+    const global = globalThis as typeof globalThis & {
+      window?: FocusTarget;
+      document?: FocusTarget & { visibilityState?: string };
+    };
+    const win = global.window;
+    const doc = global.document;
+    if (!win && !doc) return;
+
+    const onFocus = (): void => {
+      void refresh();
+    };
+    const onVisibility = (): void => {
+      if (doc?.visibilityState === 'visible') onFocus();
+    };
+    win?.addEventListener('focus', onFocus);
+    doc?.addEventListener('visibilitychange', onVisibility);
+    return () => {
+      win?.removeEventListener('focus', onFocus);
+      doc?.removeEventListener('visibilitychange', onVisibility);
+    };
+  }, [active, revalidateOnFocus, refresh]);
+
+  const deposits = useMemo(
+    () => allEntries.filter((entry) => matchesHistoryType(entry, 'deposit')),
+    [allEntries],
+  );
+  const withdrawals = useMemo(
+    () => allEntries.filter((entry) => matchesHistoryType(entry, 'withdrawal')),
+    [allEntries],
+  );
+  const cancellations = useMemo(
+    () => allEntries.filter((entry) => matchesHistoryType(entry, 'cancellation')),
+    [allEntries],
+  );
+  const entries = useMemo(() => {
+    const selected = new Set<StreamHistoryType>(
+      types && types.length > 0 ? types : DEFAULT_STREAM_HISTORY_TYPES,
+    );
+    return allEntries.filter((entry) =>
+      [...selected].some((type) => matchesHistoryType(entry, type)),
+    );
+  }, [allEntries, typesKey]);
+
+  return {
+    entries,
+    deposits,
+    withdrawals,
+    cancellations,
+    isLoading,
+    isValidating,
+    error,
+    refresh,
+  };
+}
+
+// ── useEstimatedFee ──────────────────────────────────────────────────────────
+
+/** Stable, bigint-safe cache key for a stream operation. */
+function stableOperationKey(operation?: StreamOperation | null): string | null {
+  if (operation == null) return null;
+  return typeof operation === 'string'
+    ? operation
+    : JSON.stringify(operation, (_, value) =>
+        typeof value === 'bigint' ? value.toString() : value,
+      );
+}
+
+export interface UseEstimatedFeeOptions extends HookOptions {
+  enabled?: boolean;
+  /** Delay in milliseconds after the last input change. Defaults to 300. */
+  debounceMs?: number;
+}
+
+export interface UseEstimatedFeeResult {
+  estimate: FeeEstimate | null;
+  isLoading: boolean;
+  error: Error | null;
+  /** Recompute now, bypassing the debounce timer. */
+  refresh: () => Promise<void>;
+  /** Alias of {@link UseEstimatedFeeResult.refresh}. */
+  refetch: () => Promise<void>;
+}
+
+/**
+ * Estimates the network fee for a form's current operation, debounced so that
+ * typing in a form triggers at most one estimate after the user stops changing
+ * inputs. Stale responses from superseded requests are discarded.
+ */
+export function useEstimatedFee(
+  operation?: StreamOperation | null,
+  options?: UseEstimatedFeeOptions,
+): UseEstimatedFeeResult {
+  const client = useConduitClient(options?.client);
+  const enabled = options?.enabled ?? true;
+  const debounceMs = Math.max(0, options?.debounceMs ?? 300);
+  const opKey = stableOperationKey(operation);
+  const operationRef = useRef(operation);
+  operationRef.current = operation;
+
+  const [estimate, setEstimate] = useState<FeeEstimate | null>(null);
+  const [isLoading, setIsLoading] = useState(false);
+  const [error, setError] = useState<Error | null>(null);
+  const mounted = useRef(true);
+  const requestId = useRef(0);
+
+  useEffect(() => {
+    mounted.current = true;
+    return () => {
+      mounted.current = false;
+      requestId.current++;
+    };
+  }, []);
+
+  const runEstimate = useCallback(async (): Promise<void> => {
+    const currentOperation = operationRef.current;
+    if (currentOperation == null) return;
+    const id = ++requestId.current;
+    setIsLoading(true);
+    try {
+      const fee = await client.streams.estimateFee(currentOperation);
+      if (mounted.current && id === requestId.current) {
+        setEstimate(fee);
+        setError(null);
+      }
+    } catch (err) {
+      if (mounted.current && id === requestId.current) {
+        setError(err instanceof Error ? err : new Error(String(err)));
+      }
+    } finally {
+      if (mounted.current && id === requestId.current) {
+        setIsLoading(false);
+      }
+    }
+  }, [client]);
+
+  useEffect(() => {
+    if (!enabled || opKey == null) {
+      requestId.current++;
+      setEstimate(null);
+      setIsLoading(false);
+      setError(null);
+      return;
+    }
+    setIsLoading(true);
+    const timer = setTimeout(() => void runEstimate(), debounceMs);
+    return () => clearTimeout(timer);
+  }, [enabled, opKey, debounceMs, runEstimate]);
+
+  return { estimate, isLoading, error, refresh: runEstimate, refetch: runEstimate };
+}
+
+// ── useClaimableBalance (#1160) ───────────────────────────────────────────────
+
+export interface UseClaimableBalanceOptions {
+  /**
+   * How often (ms) the hook syncs the base withdrawable amount from the
+   * stream's on-chain state. Defaults to 10_000. Set to 0 to disable
+   * interval-based syncing.
+   */
+  syncIntervalMs?: number;
+}
+
+export interface UseClaimableBalanceResult {
+  /**
+   * The smoothly interpolated claimable balance in stroops, updated every
+   * animation frame. `null` while the stream is undefined or not yet synced.
+   */
+  balance: bigint | null;
+}
+
+/**
+ * Returns a continuously ticking claimable balance for `stream`, updated
+ * every animation frame via `requestAnimationFrame` so the counter increments
+ * smoothly in real time without an RPC call per frame.
+ *
+ * The base withdrawable amount is computed locally from `stream` using
+ * `withdrawableLocal`, then extrapolated forward by `stream.ratePerSecond`
+ * for each sub-second tick. When the stream is paused or cancelled the
+ * balance is frozen at its last computed value.
+ *
+ * @example
+ * ```tsx
+ * function BalanceDisplay({ stream }: { stream: StreamInfo }) {
+ *   const { balance } = useClaimableBalance(stream);
+ *   return <span>{balance?.toString() ?? '…'}</span>;
+ * }
+ * ```
+ */
+export function useClaimableBalance(
+  stream: StreamInfo | undefined,
+  options?: UseClaimableBalanceOptions,
+): UseClaimableBalanceResult {
+  const syncIntervalMs = options?.syncIntervalMs ?? 10_000;
+  const [balance, setBalance] = useState<bigint | null>(null);
+
+  // Stable ref so the rAF callback always reads the latest stream without
+  // being recreated (which would cancel and restart the animation loop).
+  const streamRef = useRef<StreamInfo | undefined>(stream);
+  streamRef.current = stream;
+
+  const rafRef = useRef<number | null>(null);
+
+  useEffect(() => {
+    if (!stream) {
+      setBalance(null);
+      return;
+    }
+
+    // Seed the base amount once synchronously so the first render shows a
+    // value instead of null.
+    const computeBalance = (s: StreamInfo): bigint => {
+      if (s.cancelled || s.paused) {
+        return withdrawableLocal(s);
+      }
+      const nowSec = Date.now() / 1000;
+      return withdrawableLocal(s, nowSec);
+    };
+
+    setBalance(computeBalance(stream));
+
+    // rAF loop — extrapolates balance every frame using sub-second precision.
+    const tick = (): void => {
+      const s = streamRef.current;
+      if (!s) return;
+      setBalance(computeBalance(s));
+      rafRef.current = requestAnimationFrame(tick);
+    };
+
+    rafRef.current = requestAnimationFrame(tick);
+
+    return () => {
+      if (rafRef.current !== null) {
+        cancelAnimationFrame(rafRef.current);
+        rafRef.current = null;
+      }
+    };
+  // Re-run only when the stream identity changes (new id or goes undefined).
+  // The rAF loop always reads the latest value via streamRef.
+  // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [stream?.id]);
+
+  // Optionally re-seed from local state on an interval so the base value
+  // stays accurate if the caller doesn't pass a live-updated StreamInfo.
+  useEffect(() => {
+    if (!stream || syncIntervalMs <= 0) return;
+
+    const id = setInterval(() => {
+      const s = streamRef.current;
+      if (!s) return;
+      setBalance(withdrawableLocal(s));
+    }, syncIntervalMs);
+
+    return () => clearInterval(id);
+  // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [stream?.id, syncIntervalMs]);
+
+  return { balance };
 }

@@ -1,5 +1,12 @@
-import { Address, Keypair, Transaction, hash, nativeToScVal, xdr } from '@stellar/stellar-sdk';
-import { SignatureTimeoutError, UserCancelledError } from './errors.js';
+import { Address, Keypair, SorobanRpc, Transaction, hash, nativeToScVal, xdr } from '@stellar/stellar-sdk';
+import {
+  SignatureTimeoutError,
+  UserCancelledError,
+  WalletTimeoutError,
+  parseContractError,
+  type ConduitContract,
+} from './errors.js';
+import { createRpcServer } from './soroban.js';
 
 /** Default time (ms) to wait for a wallet/signer to return a signature. */
 export const DEFAULT_SIGNATURE_TIMEOUT_MS = 120_000;
@@ -43,6 +50,173 @@ export interface Signer {
   publicKey(): string;
 }
 
+// ── Pre-flight simulation (before a wallet popup) ─────────────────────────────
+
+/** Minimal server surface needed for a pre-flight simulation. */
+export interface PreflightSimulationServer {
+  simulateTransaction(tx: Transaction): Promise<SorobanRpc.Api.SimulateTransactionResponse>;
+}
+
+export interface PreflightSimulationOptions {
+  /** Injected simulator (usually `createRpcServer(rpcUrl)`). */
+  server?: PreflightSimulationServer;
+  /** RPC endpoint used to construct a simulator when `server` is not supplied. */
+  rpcUrl?: string;
+  /** Disable the check entirely. Default false. */
+  disabled?: boolean;
+  /**
+   * What to do when no simulator can be resolved (neither `server` nor
+   * `rpcUrl`). Default `'skip'` so offline signers keep working; set
+   * `'throw'` to require simulation.
+   */
+  onUnavailable?: 'skip' | 'throw';
+  /** Contract catalogue used to decode a `Error(Contract, #n)` revert. Default `'stream'`. */
+  contract?: ConduitContract;
+  /** Called with the raw simulation result on success. */
+  onSimulated?: (result: SorobanRpc.Api.SimulateTransactionResponse) => void;
+}
+
+/**
+ * Raised when a pre-flight simulation reports that the transaction would
+ * revert. Carries the raw revert reason, any diagnostic messages the host
+ * returned, and the decoded contract error code when one was present.
+ */
+export class PreflightSimulationError extends Error {
+  readonly revertReason: string;
+  readonly diagnostics: string[];
+  readonly code: number | undefined;
+  readonly simulation: SorobanRpc.Api.SimulateTransactionResponse | undefined;
+
+  constructor(
+    message: string,
+    revertReason: string,
+    diagnostics: string[] = [],
+    code?: number,
+    simulation?: SorobanRpc.Api.SimulateTransactionResponse,
+  ) {
+    super(message);
+    this.name = 'PreflightSimulationError';
+    this.revertReason = revertReason;
+    this.diagnostics = diagnostics;
+    if (code !== undefined) this.code = code;
+    if (simulation !== undefined) this.simulation = simulation;
+    Object.setPrototypeOf(this, new.target.prototype);
+  }
+}
+
+/** Pull every human-readable diagnostic message out of a simulation response. */
+function simulationDiagnostics(simulation: unknown): string[] {
+  const messages: string[] = [];
+  const seen = new Set<string>();
+  const visit = (value: unknown, depth: number): void => {
+    if (depth > 5 || value == null || typeof value !== 'object') return;
+    if (Array.isArray(value)) {
+      for (const item of value) visit(item, depth + 1);
+      return;
+    }
+    const record = value as Record<string, unknown>;
+    for (const key of ['message', 'error', 'reason']) {
+      const candidate = record[key];
+      if (typeof candidate === 'string' && candidate.length > 0 && !seen.has(candidate)) {
+        seen.add(candidate);
+        messages.push(candidate);
+      }
+    }
+    for (const nested of Object.values(record)) visit(nested, depth + 1);
+  };
+  visit(simulation, 0);
+  return messages;
+}
+
+/**
+ * Simulate `tx` before it is handed to a wallet so a guaranteed revert is
+ * reported before the user is asked to sign anything.
+ *
+ * Returns `undefined` when no simulator is available (the default behaviour
+ * keeps offline/unconfigured signers working). A simulation error throws
+ * {@link PreflightSimulationError} with the decoded revert reason and any
+ * host diagnostics attached.
+ */
+export async function preflightSimulate(
+  tx: Transaction,
+  options: PreflightSimulationOptions = {},
+): Promise<SorobanRpc.Api.SimulateTransactionResponse | undefined> {
+  if (options.disabled) return undefined;
+
+  const server = options.server ?? (options.rpcUrl ? createRpcServer(options.rpcUrl) : undefined);
+  if (!server) {
+    if (options.onUnavailable === 'throw') {
+      throw new PreflightSimulationError(
+        'Pre-flight simulation requires a server or rpcUrl',
+        'simulator unavailable',
+      );
+    }
+    return undefined;
+  }
+
+  const simulation = await server.simulateTransaction(tx);
+  if (SorobanRpc.Api.isSimulationError(simulation)) {
+    const rawReason = typeof simulation.error === 'string' && simulation.error.length > 0
+      ? simulation.error
+      : 'Transaction simulation failed';
+    const decoded = parseContractError(new Error(rawReason), options.contract ?? 'stream');
+    const decodedMessage = decoded instanceof Error && decoded.message !== rawReason
+      ? ` (${decoded.message})`
+      : '';
+    const diagnostics = simulationDiagnostics(simulation);
+    const code = (decoded as { code?: unknown }).code;
+    throw new PreflightSimulationError(
+      `Pre-flight simulation failed: ${rawReason}${decodedMessage}` +
+        (diagnostics.length > 0 ? ` — ${diagnostics.join('; ')}` : '') +
+        '. No wallet signature was requested.',
+      rawReason,
+      diagnostics,
+      typeof code === 'number' ? code : undefined,
+      simulation,
+    );
+  }
+
+  options.onSimulated?.(simulation);
+  return simulation;
+}
+
+/** Alias of {@link preflightSimulate}. */
+export const preflightBeforeSign = preflightSimulate;
+/** Alias of {@link preflightSimulate}. */
+export const preflightCheck = preflightSimulate;
+
+/**
+ * Wrap a signer so every `sign()` call is simulated first. A revert aborts
+ * before the wrapped (wallet) signer is invoked, so no popup is shown for a
+ * transaction that cannot succeed.
+ */
+export class PreflightSigner implements Signer {
+  constructor(
+    private readonly signer: Signer,
+    private readonly options: PreflightSimulationOptions = {},
+  ) {}
+
+  publicKey(): string {
+    return this.signer.publicKey();
+  }
+
+  async sign(tx: Transaction): Promise<Transaction | void> {
+    await preflightSimulate(tx, this.options);
+    return this.signer.sign(tx);
+  }
+}
+
+/** Functional form of {@link PreflightSigner}. */
+export function withPreflightSimulation(
+  signer: Signer,
+  options: PreflightSimulationOptions = {},
+): Signer {
+  return new PreflightSigner(signer, options);
+}
+
+/** Alias of {@link withPreflightSimulation}. */
+export const withSimulationPreflight = withPreflightSimulation;
+
 export class KeypairSigner implements Signer {
   constructor(private readonly keypair: Keypair) {}
   sign(tx: Transaction): void {
@@ -68,9 +242,28 @@ export enum LedgerErrorType {
   TransportError = 'TRANSPORT_ERROR',
   /** The Ledger returned an invalid response or malformed data. */
   InvalidResponse = 'INVALID_RESPONSE',
+  /**
+   * The device did not answer before the deadline — typically the user is
+   * still reviewing/approving on the device, the device is locked, or the
+   * transport stalled.
+   */
+  DeviceTimeout = 'DEVICE_TIMEOUT',
   /** An unknown Ledger error code was received. */
   Unknown = 'UNKNOWN',
 }
+
+/**
+ * Diagnostic prompt attached to device failures so a generic "signing failed"
+ * message becomes an actionable instruction for the user.
+ */
+export const LEDGER_DEVICE_TIMEOUT_HINT =
+  'The hardware device did not respond in time. Please unlock the device, open the Stellar app, ' +
+  'check the USB/Bluetooth connection, and approve the request on the device before retrying.';
+
+/** General-purpose prompt for non-timeout device errors. */
+export const LEDGER_DEVICE_DIAGNOSTIC_HINT =
+  'Please check that the hardware device is unlocked, the Stellar app is open, and it is connected, ' +
+  'then confirm the request on the device.';
 
 /** Map of Ledger status words to human-readable error types and messages. */
 const LEDGER_ERROR_MAP: Record<number, { type: LedgerErrorType; message: string }> = {
@@ -104,10 +297,89 @@ ull` when the error is not a Ledger error.
  */
 export function classifyLedgerError(error: unknown): { type: LedgerErrorType; message: string } | null {
   if (!(error instanceof Error)) return null;
+  if (isDeviceTimeoutError(error)) {
+    return { type: LedgerErrorType.DeviceTimeout, message: LEDGER_DEVICE_TIMEOUT_HINT };
+  }
   const match = error.message.match(/Ledger status word: 0x([0-9A-Fa-f]{4})/);
   if (!match?.[1]) return null;
   const statusCode = parseInt(match[1], 16);
   return normalizeLedgerError(statusCode);
+}
+
+const DEVICE_TIMEOUT_PATTERN = /\b(timeout|timed\s*out|time[\s-]?out|ETIMEDOUT|device.*unresponsive|unresponsive.*device|took too long)\b/i;
+
+/** True when `error` represents a hardware-device (or wallet) signing timeout. */
+export function isDeviceTimeoutError(error: unknown): boolean {
+  if (error instanceof SignatureTimeoutError || error instanceof WalletTimeoutError) return true;
+  if (error instanceof LedgerHardwareError) return error.type === LedgerErrorType.DeviceTimeout;
+  if (!(error instanceof Error)) return false;
+  if (DEVICE_TIMEOUT_PATTERN.test(error.message)) return true;
+  const name = (error as { name?: unknown }).name;
+  return typeof name === 'string' && DEVICE_TIMEOUT_PATTERN.test(name);
+}
+
+/**
+ * Wrap any device/signing error in an actionable {@link LedgerHardwareError}.
+ *
+ * Timeout errors (including a {@link SignatureTimeoutError} raised while the
+ * user is still verifying on the device) become `DeviceTimeout` with a prompt
+ * to unlock/check the device; other failures keep their classified type but
+ * gain the same diagnostic hint. Values that are already a
+ * `LedgerHardwareError` are returned with the hint appended (never duplicated).
+ */
+export function wrapLedgerError(error: unknown, operation = 'signing'): LedgerHardwareError {
+  const originalMessage = error instanceof Error ? error.message : String(error);
+  const existing = error instanceof LedgerHardwareError ? error : undefined;
+  const classified = existing ? undefined : classifyLedgerError(error);
+  const type = existing?.type ?? classified?.type ??
+    (isDeviceTimeoutError(error) ? LedgerErrorType.DeviceTimeout : LedgerErrorType.TransportError);
+  const timeout = type === LedgerErrorType.DeviceTimeout || isDeviceTimeoutError(error);
+  const hint = timeout ? LEDGER_DEVICE_TIMEOUT_HINT : LEDGER_DEVICE_DIAGNOSTIC_HINT;
+
+  let message: string;
+  if (existing) {
+    message = existing.message.includes(hint)
+      ? existing.message
+      : `${existing.message} ${hint}`;
+  } else {
+    message = `Ledger ${operation} failed: ${originalMessage} ${hint}`;
+  }
+  const wrapped = new LedgerHardwareError(type, message);
+  if (error instanceof Error && !error.cause) {
+    try {
+      Object.defineProperty(wrapped, 'cause', { value: error, enumerable: false });
+    } catch {
+      // Cause is diagnostic only — never let it break error construction.
+    }
+  }
+  return wrapped;
+}
+
+/** Alias of {@link wrapLedgerError} emphasising the timeout-diagnostic use case. */
+export const wrapDeviceTimeoutError = wrapLedgerError;
+/** Alias of {@link wrapLedgerError}. */
+export const withDeviceDiagnosticHints = wrapLedgerError;
+
+/**
+ * Race a device operation against a deadline and, on expiry, reject with the
+ * descriptive {@link LedgerErrorType.DeviceTimeout} error produced by
+ * {@link wrapLedgerError}.
+ */
+export function withDeviceTimeout<T>(
+  pending: Promise<T> | T,
+  timeoutMs: number,
+  operation = 'device operation',
+): Promise<T> {
+  if (!Number.isFinite(timeoutMs) || timeoutMs <= 0) return Promise.resolve(pending);
+  return new Promise<T>((resolve, reject) => {
+    const timer = setTimeout(() => {
+      reject(wrapLedgerError(new Error(`no response within ${timeoutMs}ms`), operation));
+    }, timeoutMs);
+    Promise.resolve(pending).then(
+      (value) => { clearTimeout(timer); resolve(value); },
+      (error) => { clearTimeout(timer); reject(wrapLedgerError(error, operation)); },
+    );
+  });
 }
 
 /**
@@ -158,12 +430,21 @@ export class LedgerSigner implements Signer {
   async getPublicKey(): Promise<string> {
     if (this.cachedPublicKey) return this.cachedPublicKey;
     const device = await this.resolveDevice();
-    const { publicKey } = await device.getPublicKey(this.path);
+    const { publicKey } = await withDeviceTimeout(
+      device.getPublicKey(this.path),
+      this.timeoutMs,
+      'public key request',
+    );
     this.cachedPublicKey = publicKey;
     return publicKey;
   }
 
-  /** Sign `tx` on the device and return the reconstructed transaction. */
+  /**
+   * Sign `tx` on the device and return the reconstructed transaction.
+   *
+   * Device timeouts are caught and rethrown with an actionable prompt to
+   * unlock/check the device rather than a generic signing failure.
+   */
   async sign(tx: Transaction): Promise<Transaction> {
     const device = await this.resolveDevice();
     const { signedTxXdr } = await withSignatureTimeout(device.signTransaction(this.path, tx.toXDR()), this.hardwareSignTimeoutMs);
@@ -561,5 +842,81 @@ export class WebAuthnSigner implements Signer {
       );
     }
     return assertion;
+  }
+}
+
+// ── Freighter session recovery (#1161) ───────────────────────────────────────
+
+/**
+ * Duck-typed subset of the Freighter browser-extension API that
+ * `checkFreighterConnection` reads. Declared locally so the SDK does not
+ * carry a hard runtime dependency on `@stellar/freighter-api`.
+ */
+export interface FreighterApi {
+  /** Returns true when the user has already authorized the dApp. */
+  isConnected(): Promise<boolean>;
+  /** Returns the active account public key when authorized, or an empty string otherwise. */
+  getPublicKey(): Promise<string>;
+}
+
+/**
+ * Minimal shape of `globalThis` we probe for an injected Freighter API
+ * object. Present when the Freighter browser extension is installed and the
+ * page has been authorized at least once.
+ */
+interface GlobalWithFreighter {
+  freighter?: FreighterApi;
+  freighterApi?: FreighterApi;
+}
+
+/**
+ * Attempts to restore an existing Freighter wallet session without opening a
+ * pop-up or prompting the user. Returns the connected public key when a live
+ * session is detected, or `null` when:
+ *
+ * - the Freighter extension is not installed,
+ * - the user has not yet authorized the current origin,
+ * - `isConnected()` returns `false`, or
+ * - the returned public key is empty.
+ *
+ * Call this during application startup (e.g. in a `useEffect` or server-side
+ * hydration step) to silently re-attach a Freighter session after a page
+ * reload or tab switch — without forcing the user to click "Connect" again.
+ *
+ * An optional `api` parameter lets callers inject their own Freighter API
+ * object (e.g. from `@stellar/freighter-api`) instead of relying on the
+ * global `window.freighter` or `window.freighterApi` injected by the
+ * extension.
+ *
+ * @example
+ * ```ts
+ * // With the global extension object:
+ * const pubkey = await checkFreighterConnection();
+ *
+ * // With an explicit import:
+ * import * as freighterApi from '@stellar/freighter-api';
+ * const pubkey = await checkFreighterConnection(freighterApi);
+ * ```
+ */
+export async function checkFreighterConnection(
+  api?: FreighterApi,
+): Promise<string | null> {
+  try {
+    const resolved: FreighterApi | undefined =
+      api ??
+      (globalThis as unknown as GlobalWithFreighter).freighter ??
+      (globalThis as unknown as GlobalWithFreighter).freighterApi;
+
+    if (!resolved) return null;
+
+    const connected = await resolved.isConnected();
+    if (!connected) return null;
+
+    const pubkey = await resolved.getPublicKey();
+    return pubkey && pubkey.length > 0 ? pubkey : null;
+  } catch {
+    // Any error (extension unavailable, permission denied, context destroyed)
+    // is treated as "no session" so callers never need to handle it.
+    return null;
   }
 }

@@ -1082,3 +1082,10 @@ export async function replayEvents(
 
   return { dispatched, lastLedger };
 }
+
+
+/** Creates a case-insensitive predicate for events carrying a recipient address. */
+export function createRecipientEventFilter(recipientAddress: string): (event: { recipient?: string; recipientAddress?: string }) => boolean {
+  const expected = recipientAddress.trim();
+  return event => event.recipient === expected || event.recipientAddress === expected;
+}

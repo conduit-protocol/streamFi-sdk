@@ -4,6 +4,7 @@ import {
   useCallback,
   useMemo,
   useEffect,
+  useRef,
   type ReactNode,
 } from "react";
 import {
@@ -17,12 +18,21 @@ import type { ConduitConfig, Network } from "@conduit-protocol/sdk";
 // QueryClient is an optional peer dep — import type only to avoid hard runtime dep.
 import type { QueryClient } from "@tanstack/react-query";
 
+export interface RpcStatus {
+  url: string;
+  latencyMs: number;
+  isHealthy: boolean;
+}
+
 export interface StreamFiContextValue {
   client: ConduitClient | null;
   isReady: boolean;
   error: Error | null;
+  rpcStatus: RpcStatus;
   connect: (config: ConduitConfig) => void;
   disconnect: () => void;
+  registerStreamListener?: (unsubscribe: () => void) => () => void;
+  unsubscribeAll?: () => void;
   network: Network | null;
   setNetwork: (network: Network) => void;
   isSupportedNetwork: (network: string) => network is Network;
@@ -30,6 +40,8 @@ export interface StreamFiContextValue {
   /** The QueryClient passed via props, if any (#944). Hooks can read this to share the app's cache. */
   queryClient: QueryClient | undefined;
 }
+
+export type StreamFiContextState = StreamFiContextValue;
 
 export const StreamFiContext = createContext<StreamFiContextValue | null>(null);
 
@@ -47,19 +59,15 @@ export interface StreamFiProviderProps {
 
 function checkVersionMismatch() {
   try {
-    // Get the version of @conduit-protocol/sdk that's actually installed
     const sdkPackage = require("@conduit-protocol/sdk/package.json");
     const installedVersion = sdkPackage.version;
 
-    // Get the peerDependencies from @streamfi/react's package.json
-    // The peerDependencies constraint is stored in our own package.json
     const reactPackage = require("../../../package.json");
     const peerConstraint =
       reactPackage.peerDependencies["@conduit-protocol/sdk"];
 
-    if (!peerConstraint) return; // No peer dependency specified, skip check
+    if (!peerConstraint) return;
 
-    // Simple semver check: if installed major version doesn't match the peer constraint's major version
     const installedMajor = parseInt(installedVersion.split(".")[0], 10);
     const constraintMajor = parseInt(peerConstraint.split(".")[0], 10);
 
@@ -72,7 +80,6 @@ function checkVersionMismatch() {
     }
   } catch {
     // Silently ignore errors in version checking
-    // (e.g., if package.json files aren't accessible in some environments)
   }
 }
 
@@ -115,6 +122,138 @@ export function StreamFiProvider({
     checkVersionMismatch();
   }, []);
 
+  // Registry for active stream event listeners
+  const activeListenersRef = useRef<Set<() => void>>(new Set());
+
+  const registerStreamListener = useCallback((unsub: () => void) => {
+    activeListenersRef.current.add(unsub);
+    return () => {
+      activeListenersRef.current.delete(unsub);
+    };
+  }, []);
+
+  const unsubscribeAll = useCallback(() => {
+    activeListenersRef.current.forEach((unsub) => {
+      try {
+        unsub();
+      } catch (err) {
+        console.warn("[StreamFiProvider] Error unsubscribing stream listener:", err);
+      }
+    });
+    activeListenersRef.current.clear();
+    state.client?.clearAddressCache?.();
+  }, [state.client]);
+
+  // Clean up all active listeners on unmount
+  useEffect(() => {
+    return () => {
+      unsubscribeAll();
+    };
+  }, [unsubscribeAll]);
+
+  // Track active wallet for disconnect detection (Issue 3 / #1156)
+  const currentWallet = (state.client as any)?.config?.wallet ?? config?.wallet;
+  const prevWalletRef = useRef<any>(currentWallet);
+  const prevConnectedRef = useRef<boolean>(
+    typeof currentWallet?.isConnected === "function"
+      ? currentWallet.isConnected()
+      : Boolean(currentWallet),
+  );
+
+  useEffect(() => {
+    if (prevWalletRef.current && !currentWallet) {
+      unsubscribeAll();
+    }
+    prevWalletRef.current = currentWallet;
+
+    if (!currentWallet) return;
+
+    let isSubscribed = true;
+    const handleDisconnect = () => {
+      if (isSubscribed) {
+        unsubscribeAll();
+      }
+    };
+
+    if (typeof currentWallet.on === "function") {
+      currentWallet.on("disconnect", handleDisconnect);
+      currentWallet.on("disconnected", handleDisconnect);
+      currentWallet.on("accountsChanged", (accounts: unknown[]) => {
+        if (!accounts || accounts.length === 0) {
+          handleDisconnect();
+        }
+      });
+    }
+
+    let intervalId: any;
+    if (typeof currentWallet.isConnected === "function") {
+      intervalId = setInterval(() => {
+        if (!isSubscribed) return;
+        const isConnected = currentWallet.isConnected?.() ?? false;
+        if (prevConnectedRef.current && !isConnected) {
+          handleDisconnect();
+        }
+        prevConnectedRef.current = isConnected;
+      }, 1000);
+    }
+
+    return () => {
+      isSubscribed = false;
+      if (intervalId) clearInterval(intervalId);
+      if (typeof currentWallet.off === "function") {
+        currentWallet.off("disconnect", handleDisconnect);
+        currentWallet.off("disconnected", handleDisconnect);
+      }
+    };
+  }, [currentWallet, unsubscribeAll]);
+
+  // Network latency & RPC node status indicator (Issue 2 / #1155)
+  const [rpcStatus, setRpcStatus] = useState<RpcStatus>(() => ({
+    url: (state.client as any)?.config?.rpcUrl ?? config?.rpcUrl ?? "",
+    latencyMs: 0,
+    isHealthy: false,
+  }));
+
+  useEffect(() => {
+    const url =
+      (state.client as any)?.config?.rpcUrl ??
+      config?.rpcUrl ??
+      (state.client?.rpcServer as any)?.serverURL?.toString?.() ??
+      "";
+
+    if (!state.client) {
+      setRpcStatus({ url, latencyMs: 0, isHealthy: false });
+      return;
+    }
+
+    let isMounted = true;
+    const measureRpc = async () => {
+      const start = Date.now();
+      try {
+        if (state.client?.rpcServer && typeof state.client.rpcServer.getLatestLedger === "function") {
+          await state.client.rpcServer.getLatestLedger();
+        }
+        const latencyMs = Date.now() - start;
+        if (isMounted) {
+          setRpcStatus({ url, latencyMs, isHealthy: true });
+        }
+      } catch {
+        const latencyMs = Date.now() - start;
+        if (isMounted) {
+          setRpcStatus({ url, latencyMs, isHealthy: false });
+        }
+      }
+    };
+
+    measureRpc();
+    const intervalId = setInterval(measureRpc, 30000);
+
+    return () => {
+      isMounted = false;
+      clearInterval(intervalId);
+    };
+  }, [state.client, config?.rpcUrl]);
+
   const connect = useCallback((cfg: ConduitConfig) => {
     try {
       const newClient = new ConduitClient({ ...cfg, ...(customFetch ? { customFetch } : {}) });
@@ -132,10 +271,11 @@ export function StreamFiProvider({
   }, []);
 
   const disconnect = useCallback(() => {
+    unsubscribeAll();
     setCurrentConfig(undefined);
     setCurrentNetwork(null);
     setState({ client: null, error: null });
-  }, []);
+  }, [unsubscribeAll]);
 
   const isSupportedNetwork = useCallback((net: string): net is Network => {
     return (SUPPORTED_NETWORKS as readonly string[]).includes(net);
@@ -195,8 +335,13 @@ export function StreamFiProvider({
       client: state.client,
       isReady: state.client !== null,
       error: state.error,
+      rpcStatus,
       connect,
       disconnect,
+      registerStreamListener,
+      unsubscribeAll,
+    }),
+    [state.client, state.error, rpcStatus, connect, disconnect, registerStreamListener, unsubscribeAll],
       network,
       setNetwork,
       isSupportedNetwork,
